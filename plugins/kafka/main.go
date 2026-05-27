@@ -191,8 +191,8 @@ func Init(ctx context.Context, config *Config, _logger schemas.Logger) (*KafkaPl
 		kgo.ClientID(clientID),
 		kgo.ProducerLinger(time.Duration(flushFreq) * time.Millisecond),
 		kgo.RecordPartitioner(kgo.RoundRobinPartitioner()),
-		// Deliver records at-least-once; acknowledge after leader writes.
-		kgo.RequiredAcks(kgo.LeaderAck()),
+		// Idempotent producer (franz-go default) requires acks=all.
+		kgo.RequiredAcks(kgo.AllISRAcks()),
 	}
 
 	// TLS configuration

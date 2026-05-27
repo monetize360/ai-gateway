@@ -1,0 +1,53 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "config.db"
+    }
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "logs.db"
+    }
+  },
+  "client": {
+    "drop_excess_requests": false,
+    "initial_pool_size": 5000,
+    "enable_logging": true,
+    "enforce_auth_on_inference": false,
+    "allowed_origins": ["*"]
+  },
+  "plugins": [
+    {
+      "enabled": true,
+      "name": "kafka",
+      "config": {
+        "brokers": ["localhost:29092"],
+        "topic": "bifrost-traces",
+        "client_id": "bifrost-load-test",
+        "flush_frequency_ms": 100,
+        "max_buffer_size": 10000
+      }
+    }
+  ],
+  "providers": {
+    "fake-llm": {
+      "keys": [],
+      "network_config": {
+        "base_url": "http://localhost:8000/",
+        "default_request_timeout_in_seconds": 30,
+        "max_retries": 0,
+        "retry_backoff_initial": 500,
+        "retry_backoff_max": 5000
+      },
+      "custom_provider_config": {
+        "is_key_less": true,
+        "base_provider_type": "openai"
+      }
+    }
+  }
+}
