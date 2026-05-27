@@ -54,7 +54,6 @@ var enterprisePlugins = []string{
 	"datadog",
 	"bigquery",
 	"pubsub",
-	"kafka",
 }
 
 // ServerCallbacks is a interface that defines the callbacks for the server.

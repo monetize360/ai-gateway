@@ -8,6 +8,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/plugins/governance"
+	"github.com/maximhq/bifrost/plugins/kafka"
 	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/plugins/maxim"
 	"github.com/maximhq/bifrost/plugins/otel"
@@ -112,6 +113,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal otel plugin config: %w", err)
 		}
 		return otel.Init(ctx, otelConfig, logger, bifrostConfig.ModelCatalog, handlers.GetVersion())
+
+	case kafka.PluginName:
+		kafkaConfig, err := MarshalPluginConfig[kafka.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal kafka plugin config: %w", err)
+		}
+		return kafka.Init(ctx, kafkaConfig, logger)
 
 	case compat.PluginName:
 		compatConfig, err := MarshalPluginConfig[compat.Config](pluginConfig)
@@ -251,6 +259,15 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 		s.markPluginDisabled(maxim.PluginName)
 	}
 	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(8))
+
+	// 9. Kafka (if configured in PluginConfigs)
+	kafkaPluginConfig := s.getPluginConfig(kafka.PluginName)
+	if kafkaPluginConfig != nil && kafkaPluginConfig.Enabled {
+		s.registerPluginWithStatus(ctx, kafka.PluginName, nil, kafkaPluginConfig.Config, false)
+	} else {
+		s.markPluginDisabled(kafka.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(kafka.PluginName, builtinPlacement, schemas.Ptr(9))
 
 	return nil
 }

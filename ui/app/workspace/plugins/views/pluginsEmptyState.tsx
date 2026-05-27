@@ -10,7 +10,12 @@ interface PluginsEmptyStateProps {
 	canConfigureTracing?: boolean;
 }
 
-export function PluginsEmptyState({ onCreateClick, canCreate = true, onConfigureTracingClick, canConfigureTracing = true }: PluginsEmptyStateProps) {
+export function PluginsEmptyState({
+	onCreateClick,
+	canCreate = true,
+	onConfigureTracingClick,
+	canConfigureTracing = true,
+}: PluginsEmptyStateProps) {
 	return (
 		<div
 			className="flex min-h-[80vh] w-full flex-col items-center justify-center gap-4 py-16 text-center"

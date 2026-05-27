@@ -853,6 +853,71 @@ export const otelFormSchema = z
 		}
 	});
 
+// Kafka SASL Configuration Schema
+export const kafkaSASLSchema = z.object({
+	mechanism: z.enum(["plain", "scram-sha-256", "scram-sha-512"], {
+		message: "Please select a SASL mechanism",
+	}),
+	username: envVarSchema.default({ value: "", env_var: "", from_env: false }),
+	password: envVarSchema.default({ value: "", env_var: "", from_env: false }),
+});
+
+// Kafka TLS Configuration Schema
+export const kafkaTLSSchema = z.object({
+	enabled: z.boolean().default(false),
+	skip_verify: z.boolean().default(false),
+	ca_cert: z.string().optional(),
+});
+
+// Kafka plugin configuration schema
+export const kafkaConfigSchema = z
+	.object({
+		brokers: z.array(z.string().min(1, "Broker address cannot be empty")).min(1, "At least one broker is required"),
+		topic: z.string().min(1, "Topic is required"),
+		client_id: z.string().optional(),
+		sasl: kafkaSASLSchema.optional(),
+		tls: kafkaTLSSchema.optional(),
+		flush_frequency_ms: z.number().int().min(1).max(10000).default(100),
+		max_buffer_size: z.number().int().min(1).default(10000),
+		sasl_enabled: z.boolean().default(false),
+		tls_enabled: z.boolean().default(false),
+	})
+	.superRefine((data, ctx) => {
+		if (data.sasl_enabled) {
+			if (!data.sasl?.username || !isEnvVarSet(data.sasl.username)) {
+				ctx.addIssue({ code: "custom", path: ["sasl", "username"], message: "SASL username is required" });
+			}
+			if (!data.sasl?.password || !isEnvVarSet(data.sasl.password)) {
+				ctx.addIssue({ code: "custom", path: ["sasl", "password"], message: "SASL password is required" });
+			}
+		}
+	});
+
+// Kafka form schema
+export const kafkaFormSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		kafka_config: kafkaConfigSchema,
+	})
+	.superRefine((data, ctx) => {
+		if (data.enabled) {
+			if (!data.kafka_config.brokers || data.kafka_config.brokers.length === 0) {
+				ctx.addIssue({
+					code: "custom",
+					path: ["kafka_config", "brokers"],
+					message: "At least one broker address is required",
+				});
+			}
+			if (!data.kafka_config.topic || data.kafka_config.topic.trim() === "") {
+				ctx.addIssue({
+					code: "custom",
+					path: ["kafka_config", "topic"],
+					message: "Topic is required",
+				});
+			}
+		}
+	});
+
 // Maxim Configuration Schema
 export const maximConfigSchema = z.object({
 	api_key: z.string().default(""),
@@ -1130,6 +1195,8 @@ export type NetworkAndProxyFormSchema = z.infer<typeof networkAndProxyFormSchema
 export type ProxyOnlyFormSchema = z.infer<typeof proxyOnlyFormSchema>;
 export type OtelConfigSchema = z.infer<typeof otelConfigSchema>;
 export type OtelFormSchema = z.infer<typeof otelFormSchema>;
+export type KafkaConfigSchema = z.infer<typeof kafkaConfigSchema>;
+export type KafkaFormSchema = z.infer<typeof kafkaFormSchema>;
 export type MaximConfigSchema = z.infer<typeof maximConfigSchema>;
 export type MaximFormSchema = z.infer<typeof maximFormSchema>;
 export type PrometheusConfigSchema = z.infer<typeof prometheusConfigSchema>;

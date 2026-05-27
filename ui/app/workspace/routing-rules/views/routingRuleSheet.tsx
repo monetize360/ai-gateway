@@ -273,8 +273,8 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 					</SheetDescription>
 				</SheetHeader>
 
-				<form onSubmit={handleSubmit(onSubmit)} className="flex flex-col grow">
-					<div className="flex flex-col gap-6 px-8 pb-6 grow">
+				<form onSubmit={handleSubmit(onSubmit)} className="flex grow flex-col">
+					<div className="flex grow flex-col gap-6 px-8 pb-6">
 						{/* Rule Name */}
 						<div className="space-y-3">
 							<Label htmlFor="name">

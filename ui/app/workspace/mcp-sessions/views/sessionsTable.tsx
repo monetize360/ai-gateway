@@ -77,8 +77,8 @@ export default function SessionsTable({ sessions }: SessionsTableProps) {
 					<AlertDialogHeader>
 						<AlertDialogTitle>Revoke this MCP session?</AlertDialogTitle>
 						<AlertDialogDescription>
-							Bifrost will attempt to revoke the upstream OAuth token and remove the stored credential. Anyone using this binding
-							will need to re-authenticate.
+							Bifrost will attempt to revoke the upstream OAuth token and remove the stored credential. Anyone using this binding will need
+							to re-authenticate.
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
@@ -182,7 +182,7 @@ function HeaderWithTooltip({ label, tooltip }: { label: string; tooltip: string 
 				<TooltipTrigger asChild>
 					<span className="inline-flex cursor-help items-center gap-2">
 						{label}
-						<Info className="size-3 text-muted-foreground" />
+						<Info className="text-muted-foreground size-3" />
 					</span>
 				</TooltipTrigger>
 				<TooltipContent className="max-w-xs">{tooltip}</TooltipContent>
@@ -196,7 +196,7 @@ function BindingCell({ row }: { row: MCPSessionRow }) {
 		const displayName = row.user?.name || row.user?.email;
 		return (
 			<div className="flex items-center gap-1.5 text-sm">
-				<UserRound className="size-3.5 text-muted-foreground" />
+				<UserRound className="text-muted-foreground size-3.5" />
 				{displayName ? <span>{displayName}</span> : <span className="font-mono">{row.user_id}</span>}
 			</div>
 		);
@@ -204,7 +204,7 @@ function BindingCell({ row }: { row: MCPSessionRow }) {
 	if (row.auth_mode === "vk" && row.virtual_key) {
 		return (
 			<div className="flex items-center gap-1.5 text-sm">
-				<KeyRound className="size-3.5 text-muted-foreground" />
+				<KeyRound className="text-muted-foreground size-3.5" />
 				<span>{row.virtual_key.name || row.virtual_key.id}</span>
 			</div>
 		);
@@ -212,12 +212,12 @@ function BindingCell({ row }: { row: MCPSessionRow }) {
 	if (row.auth_mode === "session" && row.session_id) {
 		return (
 			<div className="flex items-center gap-1.5 text-sm">
-				<Fingerprint className="size-3.5 text-muted-foreground" />
+				<Fingerprint className="text-muted-foreground size-3.5" />
 				<span className="font-mono">{row.session_id}</span>
 			</div>
 		);
 	}
-	return <span className="text-sm text-muted-foreground">Session-bound</span>;
+	return <span className="text-muted-foreground text-sm">Session-bound</span>;
 }
 
 function StatusBadge({ status, kind }: { status: string; kind: string }) {
@@ -269,7 +269,7 @@ function RowActions({ row, reauthing, revoking, onReauth, onRevoke }: RowActions
 						// The PKCE state on this flow row is dead; a fresh request to the
 						// MCP client will start a new flow. No action we can offer wires
 						// up to the existing flow row, so surface guidance instead.
-						<DropdownMenuItem disabled className="cursor-default text-xs text-muted-foreground">
+						<DropdownMenuItem disabled className="text-muted-foreground cursor-default text-xs">
 							Trigger a request to re-authenticate
 						</DropdownMenuItem>
 					) : (

@@ -48,7 +48,14 @@ export default function ModelSettingsView() {
 			model_parameters_url: frameworkConfig?.model_parameters_url || "",
 			routing_chain_max_depth: clientConfig?.routing_chain_max_depth ?? DefaultCoreConfig.routing_chain_max_depth,
 		});
-	}, [frameworkConfig?.pricing_url, frameworkConfig?.pricing_sync_interval, frameworkConfig?.model_parameters_url, clientConfig?.routing_chain_max_depth, isDirty, reset]);
+	}, [
+		frameworkConfig?.pricing_url,
+		frameworkConfig?.pricing_sync_interval,
+		frameworkConfig?.model_parameters_url,
+		clientConfig?.routing_chain_max_depth,
+		isDirty,
+		reset,
+	]);
 
 	const hasChanges = useMemo(() => {
 		if (!bifrostConfig || !isDirty) return false;

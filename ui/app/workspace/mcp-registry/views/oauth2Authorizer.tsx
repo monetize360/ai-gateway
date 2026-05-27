@@ -182,7 +182,7 @@ export const OAuth2Authorizer: React.FC<OAuth2AuthorizerProps> = ({
 		const handleMessage = (event: MessageEvent) => {
 			// Only accept messages from the popup we opened and our own callback origin.
 			if (event.source !== popupRef.current || event.origin !== window.location.origin) {
-				return
+				return;
 			}
 
 			if (event.data?.type === "oauth_success") {

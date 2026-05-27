@@ -12,7 +12,7 @@ export default function MCPSessionsPage() {
 	if (isError) {
 		return (
 			<div className="mx-auto w-full max-w-7xl">
-				<div className="rounded-lg border border-destructive bg-destructive/10 p-6 text-sm text-destructive">
+				<div className="border-destructive bg-destructive/10 text-destructive rounded-lg border p-6 text-sm">
 					Failed to load MCP sessions: {getErrorMessage(error)}
 				</div>
 			</div>

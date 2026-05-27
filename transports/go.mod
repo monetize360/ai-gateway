@@ -16,6 +16,7 @@ require (
 	github.com/maximhq/bifrost/framework v1.3.12
 	github.com/maximhq/bifrost/plugins/compat v0.1.11
 	github.com/maximhq/bifrost/plugins/governance v1.5.12
+	github.com/maximhq/bifrost/plugins/kafka v0.1.0
 	github.com/maximhq/bifrost/plugins/logging v1.5.12
 	github.com/maximhq/bifrost/plugins/maxim v1.6.12
 	github.com/maximhq/bifrost/plugins/otel v1.2.12
@@ -137,6 +138,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oapi-codegen/runtime v1.1.1 // indirect
 	github.com/oklog/ulid v1.3.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pinecone-io/go-pinecone/v5 v5.3.0 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect
@@ -169,6 +171,8 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	github.com/twmb/franz-go v1.18.1 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.11.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/weaviate/weaviate v1.36.5 // indirect
 	github.com/weaviate/weaviate-go-client/v5 v5.7.1 // indirect
@@ -208,3 +212,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 )
+
+replace github.com/maximhq/bifrost/plugins/kafka => ../plugins/kafka

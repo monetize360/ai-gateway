@@ -1,12 +1,7 @@
 // RTK Query endpoints for the MCP Auth Sessions tab + auth landing flow.
 // Mirrors the backend handler in transports/bifrost-http/handlers/mcp_sessions.go.
 
-import {
-	MCPFlowDetail,
-	MCPFlowStartResponse,
-	MCPSessionReauthResponse,
-	MCPSessionsListResponse,
-} from "@/lib/types/mcpSessions";
+import { MCPFlowDetail, MCPFlowStartResponse, MCPSessionReauthResponse, MCPSessionsListResponse } from "@/lib/types/mcpSessions";
 import { baseApi } from "./baseApi";
 
 export const mcpSessionsApi = baseApi.injectEndpoints({

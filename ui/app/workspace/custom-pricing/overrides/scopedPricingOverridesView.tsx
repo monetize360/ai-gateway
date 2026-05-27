@@ -369,11 +369,7 @@ export default function ScopedPricingOverridesView() {
 										<TableCell>{row.pattern}</TableCell>
 										<TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
 											<div className="flex items-center justify-end">
-												<PricingOverrideActionsMenu
-													row={row}
-													onEdit={openEditDrawer}
-													onDelete={setDeleteTarget}
-												/>
+												<PricingOverrideActionsMenu row={row} onEdit={openEditDrawer} onDelete={setDeleteTarget} />
 											</div>
 										</TableCell>
 									</TableRow>

@@ -1181,7 +1181,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Name of the plugin (built-in: telemetry, prompts, logging, governance, maxim, semantic_cache, otel, or custom plugin name)"
+            "description": "Name of the plugin (built-in: telemetry, prompts, logging, governance, maxim, semantic_cache, otel, kafka, or custom plugin name)"
           },
           "config": {
             "type": "object",
@@ -1625,6 +1625,104 @@
                     }
                   },
                   "required": ["collector_url", "trace_type", "protocol"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
+                  "const": "kafka"
+                }
+              }
+            },
+            "then": {
+              "required": ["config"],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "description": "Configuration for the Kafka real-time trace streaming plugin",
+                  "properties": {
+                    "brokers": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "minItems": 1,
+                      "description": "List of Kafka broker addresses in host:port format (e.g., ['localhost:9092'])"
+                    },
+                    "topic": {
+                      "type": "string",
+                      "description": "Kafka topic to publish trace records to"
+                    },
+                    "client_id": {
+                      "type": "string",
+                      "description": "Optional Kafka client identifier",
+                      "default": "bifrost-kafka-plugin"
+                    },
+                    "sasl": {
+                      "type": "object",
+                      "description": "SASL authentication configuration",
+                      "properties": {
+                        "mechanism": {
+                          "type": "string",
+                          "enum": ["plain", "scram-sha-256", "scram-sha-512"],
+                          "description": "SASL mechanism"
+                        },
+                        "username": {
+                          "description": "SASL username (plain string or env var reference)",
+                          "oneOf": [
+                            { "type": "string" },
+                            { "$ref": "#/$defs/env_var" }
+                          ]
+                        },
+                        "password": {
+                          "description": "SASL password (plain string or env var reference)",
+                          "oneOf": [
+                            { "type": "string" },
+                            { "$ref": "#/$defs/env_var" }
+                          ]
+                        }
+                      },
+                      "required": ["mechanism", "username", "password"],
+                      "additionalProperties": false
+                    },
+                    "tls": {
+                      "type": "object",
+                      "description": "TLS configuration for broker connections",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Enable TLS for broker connections",
+                          "default": false
+                        },
+                        "skip_verify": {
+                          "type": "boolean",
+                          "description": "Skip TLS certificate verification (insecure)",
+                          "default": false
+                        },
+                        "ca_cert": {
+                          "type": "string",
+                          "description": "PEM-encoded CA certificate for broker TLS verification"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "flush_frequency_ms": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10000,
+                      "default": 100,
+                      "description": "How often (ms) the producer flushes buffered records. Lower values reduce latency."
+                    },
+                    "max_buffer_size": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "default": 10000,
+                      "description": "Maximum number of records held in memory before dropping older ones."
+                    }
+                  },
+                  "required": ["brokers", "topic"],
                   "additionalProperties": false
                 }
               }
