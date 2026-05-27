@@ -1,5 +1,27 @@
 services:
   # ─────────────────────────────────────────────────────────────────────────────
+  # Postgres — config store + logs store for dev Bifrost.
+  # Skipped by run.sh when :5432 is already taken (e.g. framework bifrost-postgres-fw).
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: bifrost-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: bifrost
+      POSTGRES_PASSWORD: bifrost_password
+      POSTGRES_DB: bifrost
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bifrost -d bifrost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Fake OpenAI-compatible LLM inference API (upstream for Bifrost)
   # ─────────────────────────────────────────────────────────────────────────────
   fake-llm:
@@ -70,3 +92,4 @@ services:
 
 volumes:
   kafka-data:
+  postgres-data:
