@@ -1,14 +1,14 @@
 services:
   # ─────────────────────────────────────────────────────────────────────────────
   # Postgres — config store + logs store for dev Bifrost.
-  # Skipped by run.sh when :5432 is already taken (e.g. framework bifrost-postgres-fw).
+  # Host port 5433 avoids conflict with other Postgres on :5432.
   # ─────────────────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: bifrost-postgres
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_USER: bifrost
       POSTGRES_PASSWORD: bifrost_password

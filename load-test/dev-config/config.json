@@ -5,7 +5,7 @@
     "type": "postgres",
     "config": {
       "host": "localhost",
-      "port": "5432",
+      "port": "5433",
       "user": "bifrost",
       "password": "bifrost_password",
       "db_name": "bifrost",
@@ -17,7 +17,7 @@
     "type": "postgres",
     "config": {
       "host": "localhost",
-      "port": "5432",
+      "port": "5433",
       "user": "bifrost",
       "password": "bifrost_password",
       "db_name": "bifrost",

@@ -18,8 +18,9 @@ BIFROST_URL="${BIFROST_URL:-http://localhost:8080}"
 KAFKA_UI_URL="${KAFKA_UI_URL:-http://localhost:8090}"
 KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:29092}"
 KAFKA_TOPIC="${KAFKA_TOPIC:-bifrost-traces}"
-TOTAL_REQUESTS="${TOTAL_REQUESTS:-5000}"
-CONCURRENCY="${CONCURRENCY:-50}"
+TOTAL_REQUESTS="${TOTAL_REQUESTS:-500000}"
+CONCURRENCY="${CONCURRENCY:-200}"
+POSTGRES_PORT="${POSTGRES_PORT:-5433}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -69,8 +70,7 @@ cleanup_conflicting_containers() {
     done
 }
 
-# Returns 0 when Postgres is reachable on localhost:5432 with dev-config credentials.
-# Sets POSTGRES_EXEC_CONTAINER when pg_isready can be run via docker exec.
+# Returns 0 only when a known Bifrost Postgres container accepts bifrost/bifrost.
 postgres_is_ready() {
     POSTGRES_EXEC_CONTAINER=""
     local container
@@ -82,17 +82,13 @@ postgres_is_ready() {
             fi
         fi
     done
-    if command -v nc >/dev/null 2>&1 && nc -z localhost 5432 >/dev/null 2>&1; then
-        log_warn "Port 5432 is already in use — reusing existing Postgres (not starting load-test postgres container)."
-        return 0
-    fi
     return 1
 }
 
 wait_for_postgres() {
     local attempt=0
     local max_attempts=30
-    log_info "Waiting for Postgres on localhost:5432…"
+    log_info "Waiting for Postgres (localhost:${POSTGRES_PORT})…"
     until postgres_is_ready; do
         attempt=$(( attempt + 1 ))
         if [[ ${attempt} -ge ${max_attempts} ]]; then
@@ -101,11 +97,7 @@ wait_for_postgres() {
         fi
         sleep 2
     done
-    if [[ -n "${POSTGRES_EXEC_CONTAINER}" ]]; then
-        log_info "Postgres is ready (container: ${POSTGRES_EXEC_CONTAINER})."
-    else
-        log_info "Postgres is ready on localhost:5432."
-    fi
+    log_info "Postgres is ready (container: ${POSTGRES_EXEC_CONTAINER})."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +242,7 @@ echo "  Service endpoints"
 echo "────────────────────────────────────────────"
 echo "  Bifrost (dev)      : ${BIFROST_URL}"
 echo "  Fake LLM API       : http://localhost:8000"
-echo "  Postgres           : localhost:5432  (db=bifrost)"
+echo "  Postgres           : localhost:${POSTGRES_PORT}  (db=bifrost)"
 echo "  Kafka broker       : ${KAFKA_BROKERS}"
 echo "  Kafka topic        : ${KAFKA_TOPIC}"
 echo "  Kafka UI           : ${KAFKA_UI_URL}"
@@ -261,13 +253,18 @@ echo ""
 # 7. Run load test
 # ─────────────────────────────────────────────────────────────────────────────
 log_info "Running load test: ${TOTAL_REQUESTS} requests at concurrency ${CONCURRENCY}…"
+mkdir -p "${COMPOSE_DIR}/results"
+METRICS_FILE="${COMPOSE_DIR}/results/metrics-$(date +%Y%m%d-%H%M%S).json"
 
 python3 "${SCRIPT_DIR}/load_test.py" \
     --total        "${TOTAL_REQUESTS}" \
     --concurrency  "${CONCURRENCY}" \
     --bifrost-url  "${BIFROST_URL}" \
     --kafka-ui-url "${KAFKA_UI_URL}" \
-    --kafka-topic  "${KAFKA_TOPIC}"
+    --kafka-topic  "${KAFKA_TOPIC}" \
+    --kafka-container kafka \
+    --postgres-container "${POSTGRES_EXEC_CONTAINER:-bifrost-postgres}" \
+    --metrics-out  "${METRICS_FILE}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. Done — services left running
