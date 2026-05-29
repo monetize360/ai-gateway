@@ -28,8 +28,13 @@
   ENV CGO_ENABLED=1 GOOS=linux
   
   COPY transports/go.mod transports/go.sum ./
-  RUN ls
-  RUN cat go.mod
+
+  # Fork-local module: transports/go.mod replaces the kafka plugin with the
+  # local path ../plugins/kafka, which resolves to /plugins/kafka (one level
+  # above WORKDIR /app). Its source must be present before module resolution
+  # and the build, otherwise `go mod download` / `go build` fails.
+  COPY plugins/kafka /plugins/kafka
+
   RUN go mod download
   
   # Copy source code and dependencies
