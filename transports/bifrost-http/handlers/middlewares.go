@@ -18,6 +18,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/temptoken"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 	"github.com/maximhq/bifrost/framework/tracing"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -1204,4 +1205,56 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 	}
 
 	return obsPlugins
+}
+
+// TenantMiddleware validates the Bearer JWT issued by the mpilotv2 backend and
+// injects tenant-scoped identity values into the fasthttp user-value map.
+// ConvertToBifrostContext then copies all user values into BifrostContext
+// automatically via VisitUserValuesAll.
+//
+// Values written to context on success:
+//   - BifrostContextKeyTenantID  — tenantId claim (UUID)
+//   - BifrostContextKeyAccessKey — accessKey claim (UUID, primary key of access_key_token)
+//
+// The JWT key is shared across all tenants and loaded from config.json at
+// startup. Both RS256 (PEM RSA public key) and HS256 (HMAC secret) are
+// supported; the algorithm is auto-detected from the token header.
+//
+// Returns 401 when:
+//   - the Authorization header is missing or does not start with "Bearer "
+//   - the JWT signature is invalid or the token has expired
+//   - the tenantId or accessKey claims are absent or empty
+type TenantMiddleware struct {
+	jwtKey []byte
+}
+
+// NewTenantMiddleware creates a TenantMiddleware using the supplied key bytes.
+// For RS256 tokens pass a PEM-encoded RSA public key; for HS256 pass the raw secret.
+func NewTenantMiddleware(jwtKey []byte) *TenantMiddleware {
+	return &TenantMiddleware{jwtKey: jwtKey}
+}
+
+// Middleware returns a schemas.BifrostHTTPMiddleware that validates the JWT and
+// injects tenantId + accessKey into the request context.
+func (m *TenantMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
+	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+		return func(ctx *fasthttp.RequestCtx) {
+			authHeader := string(ctx.Request.Header.Peek("Authorization"))
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				SendError(ctx, fasthttp.StatusUnauthorized, "missing or invalid Authorization header")
+				return
+			}
+			rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+
+			claims, err := tenantstore.ExtractClaimsFromJWT(rawToken, m.jwtKey)
+			if err != nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, "invalid tenant token: "+err.Error())
+				return
+			}
+
+			ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
+			ctx.SetUserValue(schemas.BifrostContextKeyAccessKey, claims.AccessKey)
+			next(ctx)
+		}
+	}
 }

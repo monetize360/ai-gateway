@@ -141,6 +141,7 @@ type BifrostHTTPServer struct {
 
 	AuthMiddleware       *handlers.AuthMiddleware
 	TracingMiddleware    *handlers.TracingMiddleware
+	TenantMiddleware     *handlers.TenantMiddleware
 	WSTicketStore        *handlers.WSTicketStore
 	TempTokens           *temptoken.Service
 	TempTokenSweepWorker *temptoken.SweepWorker
@@ -1335,6 +1336,17 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config %v", err)
 	}
+	// Multi-tenant: global DB + JWT middleware (governance wiring happens after plugins load).
+	if s.Config.TenantStoreConfig != nil && s.Config.TenantStoreConfig.Enabled {
+		tenantHolder, tenantErr := lib.InitTenantStore(ctx, s.Config.TenantStoreConfig, s.Config.ConfigStore, logger)
+		if tenantErr != nil {
+			return fmt.Errorf("failed to initialise tenant store: %v", tenantErr)
+		}
+		s.Config.TenantStore = tenantHolder
+		if tenantHolder != nil {
+			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey)
+		}
+	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
 	}
@@ -1384,6 +1396,15 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// Load all plugins
 	if err := s.LoadPlugins(ctx); err != nil {
 		return fmt.Errorf("failed to instantiate plugins: %v", err)
+	}
+	// Wire per-tenant governance store resolution when multi-tenant mode is active.
+	if s.Config.TenantStore != nil && s.Config.TenantStore.Registry != nil {
+		if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
+			govPlugin.SetTenantConfigProvider(s.Config.TenantStore.Registry)
+			logger.Info("governance plugin configured for multi-tenant store routing")
+		} else {
+			logger.Warn("multi-tenant mode enabled but governance plugin not found: %v", govErr)
+		}
 	}
 
 	// Initialize async job executor (requires LogsStore + governance plugin)
@@ -1567,6 +1588,12 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// Order: Tracing.pre → TransportInterceptor.pre → handler → TransportInterceptor.post → Tracing.defer
 	inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{handlers.TransportInterceptorMiddleware(s.Config)}, inferenceMiddlewares...)
 	inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{s.TracingMiddleware.Middleware()}, inferenceMiddlewares...)
+	// TenantMiddleware runs outermost so the tenant ID is available to all downstream
+	// middleware and handlers. Only activated when the server has a TenantMiddleware
+	// instance wired (i.e. multi-tenant mode is enabled in config).
+	if s.TenantMiddleware != nil {
+		inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{s.TenantMiddleware.Middleware()}, inferenceMiddlewares...)
+	}
 
 	err = s.RegisterInferenceRoutes(s.Ctx, inferenceMiddlewares...)
 	if err != nil {

@@ -47,6 +47,21 @@ type InMemoryStore interface {
 	GetMCPClientsAllowingAllVirtualKeys() map[string]string // clientID → clientName
 }
 
+// TenantConfigProvider is the interface the transport layer implements to
+// supply a per-tenant configstore.ConfigStore. It is injected into
+// GovernancePlugin via SetTenantConfigProvider and is nil in single-tenant mode.
+type TenantConfigProvider interface {
+	GetStoreFromContext(ctx context.Context) configstore.ConfigStore
+}
+
+// tenantGovernanceComponents holds the governance data layer initialised for a
+// specific tenant. It is created lazily on first request for that tenant and
+// cached for the lifetime of the process.
+type tenantGovernanceComponents struct {
+	store    GovernanceStore
+	resolver *BudgetResolver
+}
+
 type BaseGovernancePlugin interface {
 	GetName() string
 	EvaluateGovernanceRequest(ctx *schemas.BifrostContext, evaluationRequest *EvaluationRequest, requestType schemas.RequestType) (*EvaluationResult, *schemas.BifrostError)
@@ -81,6 +96,12 @@ type GovernancePlugin struct {
 
 	// Transport dependencies
 	inMemoryStore InMemoryStore
+
+	// Multi-tenant support. tenantConfigProvider is nil in single-tenant mode.
+	// When non-nil, getStoreAndResolverForContext uses it to build and cache
+	// per-tenant GovernanceStore + BudgetResolver instances keyed by tenantID.
+	tenantConfigProvider TenantConfigProvider
+	tenantComponents     sync.Map // string (tenantID) → *tenantGovernanceComponents
 
 	cfgMutex sync.RWMutex
 
@@ -330,6 +351,62 @@ func InitFromStore(
 // GetName returns the name of the plugin
 func (p *GovernancePlugin) GetName() string {
 	return PluginName
+}
+
+// SetTenantConfigProvider wires a TenantConfigProvider into the plugin, enabling
+// multi-tenant mode. Call this once during server bootstrap after the tenant
+// infrastructure has been initialised. Pass nil to revert to single-tenant mode.
+func (p *GovernancePlugin) SetTenantConfigProvider(provider TenantConfigProvider) {
+	p.tenantConfigProvider = provider
+}
+
+// getStoreAndResolverForContext returns the GovernanceStore and BudgetResolver
+// that should be used for the current request.
+//
+// In single-tenant mode (tenantConfigProvider == nil) it always returns the
+// plugin-level defaults. In multi-tenant mode it looks up the tenantID from the
+// context, and lazily initialises a dedicated LocalGovernanceStore + BudgetResolver
+// pair for that tenant on the first call, caching the result for subsequent requests.
+func (p *GovernancePlugin) getStoreAndResolverForContext(ctx context.Context) (GovernanceStore, *BudgetResolver) {
+	if p.tenantConfigProvider == nil {
+		return p.store, p.resolver
+	}
+	tenantID, _ := ctx.Value(schemas.BifrostContextKeyTenantID).(string)
+	if tenantID == "" {
+		return p.store, p.resolver
+	}
+
+	// Fast path: tenant components already cached.
+	if raw, ok := p.tenantComponents.Load(tenantID); ok {
+		if comp, ok := raw.(*tenantGovernanceComponents); ok {
+			return comp.store, comp.resolver
+		}
+	}
+
+	// Slow path: initialise components for this tenant.
+	configStore := p.tenantConfigProvider.GetStoreFromContext(ctx)
+	if configStore == nil {
+		p.logger.Warn("tenant config provider returned nil store for tenant %s, falling back to default", tenantID)
+		return p.store, p.resolver
+	}
+
+	store, err := NewLocalGovernanceStore(ctx, p.logger, configStore, nil, p.modelCatalog)
+	if err != nil {
+		p.logger.Warn("failed to initialise governance store for tenant %s: %v; using default store", tenantID, err)
+		return p.store, p.resolver
+	}
+	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
+
+	comp := &tenantGovernanceComponents{store: store, resolver: resolver}
+	// LoadOrStore: if another goroutine raced us, discard ours and use theirs.
+	if actual, loaded := p.tenantComponents.LoadOrStore(tenantID, comp); loaded {
+		if existing, ok := actual.(*tenantGovernanceComponents); ok {
+			return existing.store, existing.resolver
+		}
+	}
+
+	p.logger.Info("tenant governance store initialised for tenant %s", tenantID)
+	return store, resolver
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -1182,11 +1259,14 @@ func (p *GovernancePlugin) validateRequiredHeaders(ctx *schemas.BifrostContext) 
 //   - *EvaluationResult: The governance evaluation result
 //   - *schemas.BifrostError: The error to return if request is not allowed, nil if allowed
 func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext, evaluationRequest *EvaluationRequest, requestType schemas.RequestType) (*EvaluationResult, *schemas.BifrostError) {
+	// Select the right store + resolver for this request (tenant-aware in multi-tenant mode).
+	store, resolver := p.getStoreAndResolverForContext(ctx)
+
 	// Check if authentication is mandatory (either VK or user auth)
 	// Checking if the virtual key is valid or not
 	isVirtualKeyValid := false
 	if evaluationRequest.VirtualKey != "" {
-		_, exists := p.store.GetVirtualKey(ctx, evaluationRequest.VirtualKey)
+		_, exists := store.GetVirtualKey(ctx, evaluationRequest.VirtualKey)
 		if exists {
 			isVirtualKeyValid = true
 		} else {
@@ -1218,7 +1298,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	p.cfgMutex.RUnlock()
 
 	// First evaluate model and provider checks (applies even when virtual keys are disabled or not present)
-	result := p.resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
+	result := resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
 
 	// The flow for governance checks is:
 	//   VK (identity + VK-level budget/rate-limit) -> Customer -> Team -> User
@@ -1231,7 +1311,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// Resolve the VK once; it feeds both the VK evaluation and hierarchy-ID extraction.
 	var hierarchyVK *configstoreTables.TableVirtualKey
 	if evaluationRequest.VirtualKey != "" {
-		if vk, ok := p.store.GetVirtualKey(ctx, evaluationRequest.VirtualKey); ok && vk != nil {
+		if vk, ok := store.GetVirtualKey(ctx, evaluationRequest.VirtualKey); ok && vk != nil {
 			hierarchyVK = vk
 		}
 	}
@@ -1245,7 +1325,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// we touch Customer / Team / User.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
 		skipVKBudgetLimit := evaluationRequest.UserID != "" || skipBudgetsAndRateLimits
-		result = p.resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
+		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
 	}
 
 	// Step 2: Customer-level budget (customer attached directly to VK, or via the VK's team).
@@ -1264,7 +1344,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			customerID = hierarchyVK.Team.Customer.ID
 		}
 		if customerID != "" {
-			result = p.resolver.EvaluateCustomerRequest(ctx, customerID, evaluationRequest)
+			result = resolver.EvaluateCustomerRequest(ctx, customerID, evaluationRequest)
 		}
 	}
 
@@ -1279,13 +1359,13 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			teamID = hierarchyVK.Team.ID
 		}
 		if teamID != "" {
-			result = p.resolver.EvaluateTeamRequest(ctx, teamID, evaluationRequest)
+			result = resolver.EvaluateTeamRequest(ctx, teamID, evaluationRequest)
 		}
 	}
 
 	// Step 4: User-level governance (enterprise-only).
 	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
-		result = p.resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
+		result = resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
 	}
 
 	// Check the actual MCP tools injected into the request against the VK MCPConfigs.

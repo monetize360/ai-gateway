@@ -1,0 +1,40 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "config_store": {
+    "enabled": true,
+    "type": "postgres",
+    "config": {
+      "host": "localhost",
+      "port": "5432",
+      "user": "postgres",
+      "password": "monetize360",
+      "db_name": "bifrost",
+      "ssl_mode": "disable"
+    }
+  },
+  "tenant_store": {
+    "enabled": true,
+    "refresh_interval_seconds": 300,
+    "global": {
+      "host": "localhost",
+      "port": "5432",
+      "user": "postgres",
+      "password": "monetize360",
+      "db_name": "mpilotv2",
+      "ssl_mode": "disable"
+    },
+    "jwt_public_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0OUoy87WGZ6yEHngGLeJPOqgJO9coiqy61duVZq6Z9BulrOFGlYYHxTqnUDTyLco6LoLtHg9rUH3UBAmqUACBoAjRyoQUTp2R09wL/usyOWIRZETwuCrZLS8vy7tF3Ohe4pTGLyNUeCPYbMHvZeKJsA/oYobvasKRMdMMtNJilFFb+oAO+A1xbSNdOGJsTEpIxrx9CIAvNSL3t9drANBYuzve8PUXtKamSow4tN4+UfbEbHA3/Ghj7cp+Yx4igsFd+lLXOPblb+7GNk8gcAbyF+Q1gbvhFfz2Uzkugpw4dDvqLyseBdw8b35OJpXdWhjyojLOGPgbkkscnIOdOv0xQIDAQAB"
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "postgres",
+    "config": {
+      "host": "localhost",
+      "port": "5432",
+      "user": "postgres",
+      "password": "monetize360",
+      "db_name": "bifrost",
+      "ssl_mode": "disable"
+    }
+  }
+}

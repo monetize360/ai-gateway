@@ -158,6 +158,7 @@ type ConfigData struct {
 	VectorStoreConfig *vectorstore.Config                   `json:"vector_store,omitempty"`
 	ConfigStoreConfig *configstore.Config                   `json:"config_store,omitempty"`
 	LogsStoreConfig   *logstore.Config                      `json:"logs_store,omitempty"`
+	TenantStoreConfig *TenantStoreFileConfig                `json:"tenant_store,omitempty"`
 	Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
 	WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 	FeatureFlags      *FeatureFlagsFileConfig               `json:"feature_flags,omitempty"`
@@ -236,6 +237,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 		VectorStoreConfig json.RawMessage                       `json:"vector_store,omitempty"`
 		ConfigStoreConfig json.RawMessage                       `json:"config_store,omitempty"`
 		LogsStoreConfig   json.RawMessage                       `json:"logs_store,omitempty"`
+		TenantStoreConfig *TenantStoreFileConfig                `json:"tenant_store,omitempty"`
 		Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
 		WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 		FeatureFlags      *FeatureFlagsFileConfig               `json:"feature_flags,omitempty"`
@@ -257,6 +259,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	cd.Plugins = temp.Plugins
 	cd.WebSocket = temp.WebSocket
 	cd.FeatureFlags = temp.FeatureFlags
+	cd.TenantStoreConfig = temp.TenantStoreConfig
 	// Initialize providers map if nil
 	if cd.Providers == nil {
 		cd.Providers = make(map[string]configstore.ProviderConfig)
@@ -322,6 +325,10 @@ type Config struct {
 	ConfigStore configstore.ConfigStore
 	VectorStore vectorstore.VectorStore
 	LogsStore   logstore.LogStore
+
+	// Multi-tenant (nil when tenant_store.enabled is false)
+	TenantStoreConfig *TenantStoreFileConfig
+	TenantStore       *TenantStoreHolder
 
 	// In-memory storage
 	ClientConfig     *configstore.ClientConfig
@@ -681,6 +688,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		wsConfig.CheckAndSetDefaults()
 		config.WebSocketConfig = wsConfig
 	}
+	config.TenantStoreConfig = configData.TenantStoreConfig
 	return config, nil
 }
 
@@ -3695,6 +3703,9 @@ func (c *Config) Close(ctx context.Context) {
 	}
 	if c.VectorStore != nil {
 		c.VectorStore.Close(ctx, "")
+	}
+	if c.TenantStore != nil {
+		c.TenantStore.Close(ctx)
 	}
 }
 

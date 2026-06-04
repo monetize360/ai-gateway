@@ -71,6 +71,59 @@ func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
 	return nil
 }
 
+// NewPostgresConfigStoreFromDSN creates a Postgres ConfigStore from a pre-built
+// connection string. Useful when the full host/port/user/password breakdown is
+// not required (e.g. per-tenant DSNs stored in a control-plane database).
+// Uses the same two-pool lifecycle as newPostgresConfigStore.
+func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schemas.Logger) (ConfigStore, error) {
+	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
+
+	mDb, err := openPostresConnection(migrationDSN, logger)
+	if err != nil {
+		return nil, err
+	}
+	if err := triggerMigrations(ctx, mDb); err != nil {
+		closeDbConn(mDb, logger)
+		return nil, err
+	}
+	closeDbConn(mDb, logger)
+
+	db, err := openPostresConnection(dsn, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	d := &RDBConfigStore{logger: logger}
+	d.db.Store(db)
+
+	d.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
+		tempDB, err := openPostresConnection(migrationDSN, logger)
+		if err != nil {
+			return err
+		}
+		defer closeDbConn(tempDB, logger)
+		return fn(ctx, tempDB)
+	}
+
+	d.refreshPoolFn = func(ctx context.Context) error {
+		newDB, err := openPostresConnection(dsn, logger)
+		if err != nil {
+			return fmt.Errorf("failed to open fresh runtime pool: %w", err)
+		}
+		oldDB := d.db.Swap(newDB)
+		if oldDB != nil {
+			closeDbConn(oldDB, logger)
+		}
+		return nil
+	}
+
+	if err := d.EncryptPlaintextRows(ctx); err != nil {
+		closeDbConn(db, logger)
+		return nil, fmt.Errorf("failed to encrypt plaintext rows: %w", err)
+	}
+	return d, nil
+}
+
 // newPostgresConfigStore creates a new Postgres config store.
 //
 // Uses a two-pool lifecycle to avoid SQLSTATE 0A000 ("cached plan must not

@@ -250,6 +250,8 @@ const (
 	BifrostContextKeySkipDBUpdate                        BifrostContextKey = "bifrost-skip-db-update"                           // bool (set by bifrost - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernancePluginName                BifrostContextKey = "governance-plugin-name"                           // string (name of the governance plugin that processed the request - set by bifrost)
 	BifrostContextKeyClusterNodeID                       BifrostContextKey = "bifrost-cluster-node-id"                          // string (cluster node ID for log attribution - set by enterprise server)
+	BifrostContextKeyTenantID                            BifrostContextKey = "bifrost-tenant-id"                                // string (tenant UUID - set by TenantMiddleware from JWT tenantId claim)
+	BifrostContextKeyAccessKey                           BifrostContextKey = "bifrost-access-key"                               // string (access key UUID - set by TenantMiddleware from JWT accessKey claim; maps to access_key_token.access_key)
 	BifrostContextKeyGovernanceBudgetIDs                 BifrostContextKey = "bifrost-governance-budget-ids"                    // []string (budget IDs applicable to this request - set by governance plugin)
 	BifrostContextKeyGovernanceRateLimitIDs              BifrostContextKey = "bifrost-governance-rate-limit-ids"                // []string (rate limit IDs applicable to this request - set by governance plugin)
 	BifrostContextKeyPromptsPluginName                   BifrostContextKey = "prompts-plugin-name"                              // string (name of the prompts plugin to use - set by bifrost - DO NOT SET THIS MANUALLY))
