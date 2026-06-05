@@ -3,7 +3,6 @@ package tables
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -13,7 +12,7 @@ import (
 
 // TableMCPClient represents an MCP client configuration in the database
 type TableMCPClient struct {
-	ID                      uint            `gorm:"primaryKey;autoIncrement" json:"id"` // ID is used as the internal primary key and is also accessed by public methods, so it must be present.
+	ID                      string          `gorm:"primaryKey;type:uuid" json:"id"` // ID is the internal primary key; ClientID is the stable external identifier.
 	ClientID                string          `gorm:"type:varchar(255);uniqueIndex;not null" json:"client_id"`
 	Name                    string          `gorm:"type:varchar(255);uniqueIndex;not null" json:"name"`
 	IsCodeModeClient        bool            `gorm:"default:false" json:"is_code_mode_client"`         // Whether the client is a code mode client
@@ -46,9 +45,6 @@ type TableMCPClient struct {
 
 	EncryptionStatus string `gorm:"type:varchar(20);default:'plain_text'" json:"-"`
 
-	CreatedAt time.Time `gorm:"index;not null" json:"created_at"`
-	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`
-
 	// Virtual fields for runtime use (not stored in DB)
 	StdioConfig               *schemas.MCPStdioConfig    `gorm:"-" json:"stdio_config,omitempty"`
 	ToolsToExecute            schemas.WhiteList          `gorm:"-" json:"tools_to_execute"`
@@ -58,6 +54,8 @@ type TableMCPClient struct {
 	ToolPricing               map[string]float64         `gorm:"-" json:"tool_pricing"`
 	DiscoveredTools           map[string]schemas.ChatTool `gorm:"-" json:"-"`
 	DiscoveredToolNameMapping map[string]string           `gorm:"-" json:"-"`
+
+	SystemColumns
 }
 
 // TableName sets the table name for each model

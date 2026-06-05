@@ -331,7 +331,7 @@ func TestVirtualKeyBudgetFrequencyChangePreservesUsageWhenRequested(t *testing.T
 
 func TestProviderBudgetFrequencyChangePreservesUsageWhenRequested(t *testing.T) {
 	originalLastReset := time.Now().Add(-2 * time.Hour)
-	providerConfigID := uint(7)
+	providerConfigID := "00000000-0000-4000-8000-000000000007"
 	reconciled, err := reconcileBudgetRequestsForTest(
 		[]configstoreTables.TableBudget{
 			{
@@ -743,7 +743,7 @@ func TestRotateVirtualKey_OnlyChangesValueAndReloads(t *testing.T) {
 					{ID: 7, VirtualKeyID: "vk-1", Provider: "openai"},
 				},
 				MCPConfigs: []configstoreTables.TableVirtualKeyMCPConfig{
-					{ID: 9, VirtualKeyID: "vk-1", MCPClientID: 3},
+					{ID: "00000000-0000-0000-0000-000000000009", VirtualKeyID: "vk-1", MCPClientID: "00000000-0000-0000-0000-000000000003"},
 				},
 			},
 		},

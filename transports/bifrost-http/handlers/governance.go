@@ -105,7 +105,7 @@ type UpdateVirtualKeyRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
 	ProviderConfigs []struct {
-		ID                *uint                   `json:"id,omitempty"` // null for new entries
+		ID                *string                 `json:"id,omitempty"` // null for new entries
 		Provider          string                  `json:"provider" validate:"required"`
 		Weight            *float64                `json:"weight,omitempty"`
 		AllowedModels     schemas.WhiteList       `json:"allowed_models,omitempty"`     // ["*"] allows all models; empty denies all
@@ -115,7 +115,7 @@ type UpdateVirtualKeyRequest struct {
 		KeyIDs            schemas.WhiteList       `json:"key_ids,omitempty"`            // List of DBKey UUIDs to associate with this provider config
 	} `json:"provider_configs,omitempty"`
 	MCPConfigs []struct {
-		ID             *uint             `json:"id,omitempty"` // null for new entries
+		ID             *string           `json:"id,omitempty"` // null for new entries
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"`
@@ -1065,11 +1065,11 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				return req.ProviderConfigs[i].Provider < req.ProviderConfigs[j].Provider
 			})
 			// Create maps for easier lookup
-			existingConfigsMap := make(map[uint]configstoreTables.TableVirtualKeyProviderConfig)
+			existingConfigsMap := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
 			for _, config := range existingConfigs {
 				existingConfigsMap[config.ID] = config
 			}
-			requestConfigsMap := make(map[uint]bool)
+			requestConfigsMap := make(map[string]bool)
 			// Process new configs: create new ones and update existing ones
 			for _, pc := range req.ProviderConfigs {
 				providerName := schemas.ModelProvider(strings.TrimSpace(pc.Provider))
@@ -1170,7 +1170,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					// Update existing provider config
 					existing, ok := existingConfigsMap[*pc.ID]
 					if !ok {
-						return fmt.Errorf("provider config %d does not belong to this virtual key", *pc.ID)
+						return fmt.Errorf("provider config %s does not belong to this virtual key", *pc.ID)
 					}
 					requestConfigsMap[*pc.ID] = true
 					if err := pc.AllowedModels.Validate(); err != nil {
@@ -1339,7 +1339,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				}
 			}
 			// Delete provider configs that are not in the request
-			configIDs := make([]uint, 0, len(existingConfigsMap))
+			configIDs := make([]string, 0, len(existingConfigsMap))
 			for id := range existingConfigsMap {
 				configIDs = append(configIDs, id)
 			}
@@ -1385,11 +1385,11 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				return req.MCPConfigs[i].MCPClientName < req.MCPConfigs[j].MCPClientName
 			})
 			// Create maps for easier lookup
-			existingMCPConfigsMap := make(map[uint]configstoreTables.TableVirtualKeyMCPConfig)
+			existingMCPConfigsMap := make(map[string]configstoreTables.TableVirtualKeyMCPConfig)
 			for _, config := range existingMCPConfigs {
 				existingMCPConfigsMap[config.ID] = config
 			}
-			requestMCPConfigsMap := make(map[uint]bool)
+			requestMCPConfigsMap := make(map[string]bool)
 			// Process new configs: create new ones and update existing ones
 			for _, mc := range req.MCPConfigs {
 				if err := mc.ToolsToExecute.Validate(); err != nil {
@@ -1412,7 +1412,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					// Update existing MCP config
 					existing, ok := existingMCPConfigsMap[*mc.ID]
 					if !ok {
-						return fmt.Errorf("MCP config %d does not belong to this virtual key", *mc.ID)
+						return fmt.Errorf("MCP config %s does not belong to this virtual key", *mc.ID)
 					}
 					requestMCPConfigsMap[*mc.ID] = true
 					existing.ToolsToExecute = mc.ToolsToExecute
@@ -1422,7 +1422,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				}
 			}
 			// Delete MCP configs that are not in the request
-			mcpConfigIDs := make([]uint, 0, len(existingMCPConfigsMap))
+			mcpConfigIDs := make([]string, 0, len(existingMCPConfigsMap))
 			for id := range existingMCPConfigsMap {
 				mcpConfigIDs = append(mcpConfigIDs, id)
 			}
@@ -2756,8 +2756,10 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 			ID:        uuid.NewString(),
 			ModelName: req.ModelName,
 			Provider:  req.Provider,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
+			SystemColumns: configstoreTables.SystemColumns{
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			},
 		}
 		// Create budget if provided
 		if req.Budget != nil {
@@ -3933,8 +3935,10 @@ func (h *GovernanceHandler) createPricingOverride(ctx *fasthttp.RequestCtx) {
 		RequestTypes:     req.RequestTypes,
 		PricingPatchJSON: string(patchJSON),
 		ConfigHash:       "",
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
 	}
 
 	if err := h.configStore.CreatePricingOverride(ctx, &override); err != nil {
@@ -4048,8 +4052,13 @@ func (h *GovernanceHandler) updatePricingOverride(ctx *fasthttp.RequestCtx) {
 		RequestTypes:     merged.RequestTypes,
 		PricingPatchJSON: pricingPatchJSON,
 		ConfigHash:       existing.ConfigHash,
-		CreatedAt:        existing.CreatedAt,
-		UpdatedAt:        time.Now(),
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: existing.CreatedAt,
+			CreatedBy: existing.CreatedBy,
+			UpdatedAt: time.Now(),
+			UpdatedBy: existing.UpdatedBy,
+			Deleted:   existing.Deleted,
+		},
 	}
 
 	if err := h.configStore.UpdatePricingOverride(ctx, &override); err != nil {

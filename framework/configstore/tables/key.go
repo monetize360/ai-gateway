@@ -3,7 +3,6 @@ package tables
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -13,9 +12,9 @@ import (
 
 // TableKey represents an API key configuration in the database
 type TableKey struct {
-	ID                    uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	ID                    string         `gorm:"primaryKey;type:uuid" json:"id"`
 	Name                  string         `gorm:"type:varchar(255);uniqueIndex:idx_key_name;not null" json:"name"`
-	ProviderID            uint           `gorm:"index;not null" json:"provider_id"`
+	ProviderID            string         `gorm:"type:uuid;index;not null" json:"provider_id"`
 	Provider              string         `gorm:"index;type:varchar(50)" json:"provider"`                          // ModelProvider as string
 	KeyID                 string         `gorm:"type:varchar(255);uniqueIndex:idx_key_id;not null" json:"key_id"` // UUID from schemas.Key
 	Value                 schemas.EnvVar `gorm:"type:text;not null" json:"value"`
@@ -23,9 +22,6 @@ type TableKey struct {
 	BlacklistedModelsJSON string         `gorm:"type:text" json:"-"` // JSON serialized []string
 	Weight                *float64       `json:"weight"`
 	Enabled               *bool          `gorm:"default:true" json:"enabled,omitempty"`
-	CreatedAt             time.Time      `gorm:"index;not null" json:"created_at"`
-	UpdatedAt             time.Time      `gorm:"index;not null" json:"updated_at"`
-
 	// Config hash is used to detect changes synced from config.json file
 	ConfigHash string `gorm:"type:varchar(255);null" json:"config_hash"`
 
@@ -88,6 +84,8 @@ type TableKey struct {
 	ReplicateKeyConfig *schemas.ReplicateKeyConfig `gorm:"-" json:"replicate_key_config,omitempty"`
 	OllamaKeyConfig    *schemas.OllamaKeyConfig    `gorm:"-" json:"ollama_key_config,omitempty"`
 	SGLKeyConfig       *schemas.SGLKeyConfig       `gorm:"-" json:"sgl_key_config,omitempty"`
+
+	SystemColumns
 }
 
 // TableName sets the table name for each model

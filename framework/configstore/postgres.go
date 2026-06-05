@@ -74,20 +74,11 @@ func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
 // NewPostgresConfigStoreFromDSN creates a Postgres ConfigStore from a pre-built
 // connection string. Useful when the full host/port/user/password breakdown is
 // not required (e.g. per-tenant DSNs stored in a control-plane database).
-// Uses the same two-pool lifecycle as newPostgresConfigStore.
+//
+// Schema migrations are intentionally not run here: per-tenant databases are
+// provisioned and migrated by MPilot (Liquibase finops changelogs). Bifrost
+// only opens a runtime pool and reads/writes existing tables.
 func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schemas.Logger) (ConfigStore, error) {
-	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
-
-	mDb, err := openPostresConnection(migrationDSN, logger)
-	if err != nil {
-		return nil, err
-	}
-	if err := triggerMigrations(ctx, mDb); err != nil {
-		closeDbConn(mDb, logger)
-		return nil, err
-	}
-	closeDbConn(mDb, logger)
-
 	db, err := openPostresConnection(dsn, logger)
 	if err != nil {
 		return nil, err
@@ -96,6 +87,7 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schem
 	d := &RDBConfigStore{logger: logger}
 	d.db.Store(db)
 
+	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
 	d.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
 		tempDB, err := openPostresConnection(migrationDSN, logger)
 		if err != nil {

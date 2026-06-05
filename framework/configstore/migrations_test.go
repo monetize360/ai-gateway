@@ -13,6 +13,7 @@ import (
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -44,6 +45,17 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err, "Failed to migrate test database")
 
 	return db
+}
+
+func newTestMCPClient(name, clientID string) *tables.TableMCPClient {
+	now := time.Now()
+	return &tables.TableMCPClient{
+		ID:             uuid.NewString(),
+		ClientID:       clientID,
+		Name:           name,
+		ConnectionType: "stdio",
+		SystemColumns:  tables.SystemColumns{CreatedAt: now, UpdatedAt: now},
+	}
 }
 
 // captureLogOutput captures log output during a function execution
@@ -117,19 +129,13 @@ func TestFindUniqueName_NoCollision(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a test client with a unique name
-	client := &tables.TableMCPClient{
-		Name:           "existing_client",
-		ClientID:       "client-1",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client := newTestMCPClient("existing_client", "client-1")
 	err := db.WithContext(ctx).Create(client).Error
 	require.NoError(t, err)
 
 	// Test findUniqueName with a different base name (no collision)
 	logOutput := captureLogOutput(func() {
-		uniqueName, err := findUniqueNameForTest("new_client", "new_client", 999, db.WithContext(ctx))
+		uniqueName, err := findUniqueNameForTest("new_client", "new_client", "00000000-0000-0000-0000-000000000999", db.WithContext(ctx))
 		require.NoError(t, err)
 		assert.Equal(t, "new_client", uniqueName, "Should return base name when no collision")
 	})
@@ -144,24 +150,12 @@ func TestFindUniqueName_WithCollision(t *testing.T) {
 
 	// Create existing clients that will cause collisions
 	// First client with base name
-	client1 := &tables.TableMCPClient{
-		Name:           "my_tool",
-		ClientID:       "client-1",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client1 := newTestMCPClient("my_tool", "client-1")
 	err := db.WithContext(ctx).Create(client1).Error
 	require.NoError(t, err)
 
 	// Second client with first suffix
-	client2 := &tables.TableMCPClient{
-		Name:           "my_tool1",
-		ClientID:       "client-2",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client2 := newTestMCPClient("my_tool1", "client-2")
 	err = db.WithContext(ctx).Create(client2).Error
 	require.NoError(t, err)
 
@@ -169,7 +163,7 @@ func TestFindUniqueName_WithCollision(t *testing.T) {
 	// excludeID is set to a non-existent ID (999) so all existing clients are considered
 	var uniqueName string
 	logOutput := captureLogOutput(func() {
-		uniqueName, err = findUniqueNameForTest("my_tool", "my-tool", 999, db.WithContext(ctx))
+		uniqueName, err = findUniqueNameForTest("my_tool", "my-tool", "00000000-0000-0000-0000-000000000999", db.WithContext(ctx))
 	})
 
 	require.NoError(t, err)
@@ -182,40 +176,22 @@ func TestFindUniqueName_MultipleCollisions(t *testing.T) {
 	ctx := context.Background()
 
 	// Create existing clients that will cause multiple collisions
-	client1 := &tables.TableMCPClient{
-		Name:           "test_tool",
-		ClientID:       "client-1",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client1 := newTestMCPClient("test_tool", "client-1")
 	err := db.WithContext(ctx).Create(client1).Error
 	require.NoError(t, err)
 
-	client2 := &tables.TableMCPClient{
-		Name:           "test_tool1",
-		ClientID:       "client-2",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client2 := newTestMCPClient("test_tool1", "client-2")
 	err = db.WithContext(ctx).Create(client2).Error
 	require.NoError(t, err)
 
-	client3 := &tables.TableMCPClient{
-		Name:           "test_tool2",
-		ClientID:       "client-3",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client3 := newTestMCPClient("test_tool2", "client-3")
 	err = db.WithContext(ctx).Create(client3).Error
 	require.NoError(t, err)
 
 	// Test findUniqueName with multiple collisions - should find "test_tool3"
 	var uniqueName string
 	logOutput := captureLogOutput(func() {
-		uniqueName, err = findUniqueNameForTest("test_tool", "test tool", 999, db.WithContext(ctx))
+		uniqueName, err = findUniqueNameForTest("test_tool", "test tool", "00000000-0000-0000-0000-000000000999", db.WithContext(ctx))
 	})
 
 	require.NoError(t, err)
@@ -228,20 +204,14 @@ func TestFindUniqueName_NormalizationAndCollision(t *testing.T) {
 	ctx := context.Background()
 
 	// Create existing client with normalized name
-	client := &tables.TableMCPClient{
-		Name:           "my_tool",
-		ClientID:       "client-1",
-		ConnectionType: "stdio",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
+	client := newTestMCPClient("my_tool", "client-1")
 	err := db.WithContext(ctx).Create(client).Error
 	require.NoError(t, err)
 
 	// Test that "my-tool" normalizes to "my_tool" and then collides, requiring suffix
 	var uniqueName string
 	logOutput := captureLogOutput(func() {
-		uniqueName, err = findUniqueNameForTest("my_tool", "my-tool", 999, db.WithContext(ctx))
+		uniqueName, err = findUniqueNameForTest("my_tool", "my-tool", "00000000-0000-0000-0000-000000000999", db.WithContext(ctx))
 	})
 
 	require.NoError(t, err)
@@ -276,27 +246,9 @@ func TestFindUniqueName_MultipleNormalizationsToSameBase(t *testing.T) {
 
 	// Create three clients with original names (simulating pre-migration state)
 	clients := []*tables.TableMCPClient{
-		{
-			Name:           "mcp client",
-			ClientID:       "client-1",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
-		{
-			Name:           "mcp-client",
-			ClientID:       "client-2",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
-		{
-			Name:           "1mcp-client",
-			ClientID:       "client-3",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
+		newTestMCPClient("mcp client", "client-1"),
+		newTestMCPClient("mcp-client", "client-2"),
+		newTestMCPClient("1mcp-client", "client-3"),
 	}
 
 	for _, client := range clients {
@@ -379,27 +331,9 @@ func TestFindUniqueName_MigrationScenarioWithInMemoryTracking(t *testing.T) {
 
 	// Create three clients with original names (simulating pre-migration state)
 	clients := []*tables.TableMCPClient{
-		{
-			Name:           "mcp client",
-			ClientID:       "client-1",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
-		{
-			Name:           "mcp-client",
-			ClientID:       "client-2",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
-		{
-			Name:           "1mcp-client",
-			ClientID:       "client-3",
-			ConnectionType: "stdio",
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-		},
+		newTestMCPClient("mcp client", "client-1"),
+		newTestMCPClient("mcp-client", "client-2"),
+		newTestMCPClient("1mcp-client", "client-3"),
 	}
 
 	for _, client := range clients {
@@ -471,7 +405,7 @@ func TestFindUniqueName_MigrationScenarioWithInMemoryTracking(t *testing.T) {
 }
 
 // findUniqueNameForTestWithTracking is a test helper that tracks assigned names in memory
-func findUniqueNameForTestWithTracking(baseName string, originalName string, excludeID uint, tx *gorm.DB, assignedNames map[string]bool) (string, error) {
+func findUniqueNameForTestWithTracking(baseName string, originalName string, excludeID string, tx *gorm.DB, assignedNames map[string]bool) (string, error) {
 	// First check if base name is already assigned in this migration
 	if !assignedNames[baseName] {
 		// Also check database for existing names (excluding current client)
@@ -520,7 +454,7 @@ func findUniqueNameForTestWithTracking(baseName string, originalName string, exc
 
 // findUniqueNameForTest is a test helper that extracts the findUniqueName logic
 // This mirrors the implementation in migrations.go for testing
-func findUniqueNameForTest(baseName string, originalName string, excludeID uint, tx *gorm.DB) (string, error) {
+func findUniqueNameForTest(baseName string, originalName string, excludeID string, tx *gorm.DB) (string, error) {
 	// First, try the base name
 	var count int64
 	err := tx.Model(&tables.TableMCPClient{}).Where("name = ? AND id != ?", baseName, excludeID).Count(&count).Error
@@ -1243,12 +1177,14 @@ func TestFullMigration_VirtualKeyCRUD(t *testing.T) {
 	now := time.Now()
 
 	vk := &tables.TableVirtualKey{
-		ID:        "vk-test-001",
-		Name:      "test-virtual-key",
-		Value:     "vk-secret-value-12345",
-		IsActive:  bifrost.Ptr(true),
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:       "vk-test-001",
+		Name:     "test-virtual-key",
+		Value:    "vk-secret-value-12345",
+		IsActive: bifrost.Ptr(true),
+		SystemColumns: tables.SystemColumns{
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
 	}
 
 	err := store.CreateVirtualKey(ctx, vk)
@@ -1333,20 +1269,23 @@ func TestFullMigration_EncryptPlaintextRows(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	// Insert a provider first (FK for config_keys)
-	err := db.Exec(`INSERT INTO config_providers (name, encryption_status, created_at, updated_at)
-		VALUES (?, 'plain_text', ?, ?)`, "openai", now, now).Error
+	providerID := "11111111-1111-1111-1111-111111111111"
+	err := db.Exec(`INSERT INTO config_providers (id, name, encryption_status, created_at, updated_at, deleted)
+		VALUES (?, ?, 'plain_text', ?, ?, false)`, providerID, "openai", now, now).Error
 	require.NoError(t, err)
 
 	// Get the provider ID
-	var providerID uint
-	err = db.Table("config_providers").Select("id").Where("name = ?", "openai").Scan(&providerID).Error
+	var scannedProviderID string
+	err = db.Table("config_providers").Select("id").Where("name = ?", "openai").Scan(&scannedProviderID).Error
+	require.NoError(t, err)
+	providerID = scannedProviderID
 	require.NoError(t, err)
 
 	// Insert plaintext key (bypassing GORM hooks)
-	err = db.Exec(`INSERT INTO config_keys (name, provider_id, provider, key_id, value, models_json,
-		encryption_status, created_at, updated_at)
-		VALUES (?, ?, 'openai', ?, ?, '["*"]', 'plain_text', ?, ?)`,
-		"plaintext-key", providerID, "pk-1", "sk-plaintext-secret", now, now).Error
+	err = db.Exec(`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, models_json,
+		encryption_status, created_at, updated_at, deleted)
+		VALUES (?, ?, ?, 'openai', ?, ?, '["*"]', 'plain_text', ?, ?, false)`,
+		uuid.NewString(), "plaintext-key", providerID, "pk-1", "sk-plaintext-secret", now, now).Error
 	require.NoError(t, err)
 
 	// Insert plaintext virtual key
@@ -1434,7 +1373,8 @@ func TestFullMigration_EndToEnd(t *testing.T) {
 	} {
 		err := store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
 			ID: vk.id, Name: vk.name, Value: vk.value,
-			IsActive: bifrost.Ptr(true), CreatedAt: now, UpdatedAt: now,
+			IsActive: bifrost.Ptr(true),
+			SystemColumns: tables.SystemColumns{CreatedAt: now, UpdatedAt: now},
 		})
 		require.NoError(t, err, "CreateVirtualKey %s", vk.name)
 	}
@@ -1520,17 +1460,13 @@ func TestMigrationAddEncryptionColumns(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	// Insert rows BEFORE encryption columns exist (they won't have encryption_status)
-	err := db.Exec(`INSERT INTO config_providers (name, created_at, updated_at) VALUES (?, ?, ?)`,
-		"openai", now, now).Error
+	provider := &tables.TableProvider{Name: "openai"}
+	err := db.Create(provider).Error
 	require.NoError(t, err)
 
-	var providerID uint
-	err = db.Table("config_providers").Select("id").Where("name = ?", "openai").Scan(&providerID).Error
-	require.NoError(t, err)
-
-	err = db.Exec(`INSERT INTO config_keys (name, provider_id, provider, key_id, value, created_at, updated_at)
-		VALUES (?, ?, 'openai', ?, ?, ?, ?)`,
-		"test-key", providerID, "ek-1", "sk-test", now, now).Error
+	err = db.Exec(`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, created_at, updated_at, deleted)
+		VALUES (?, ?, ?, 'openai', ?, ?, ?, ?, false)`,
+		uuid.NewString(), "test-key", provider.ID, "ek-1", "sk-test", now, now).Error
 	require.NoError(t, err)
 
 	err = db.Exec(`INSERT INTO governance_virtual_keys (id, name, value, is_active, created_at, updated_at)
@@ -1802,19 +1738,15 @@ func TestMigrationBackfillAllowedModelsWildcard(t *testing.T) {
 	db.Exec(`DELETE FROM migrations WHERE id = 'backfill_allowed_models_wildcard'`)
 
 	// Create a provider
-	err := db.Exec(`INSERT INTO config_providers (name, encryption_status, created_at, updated_at)
-		VALUES ('openai', 'plain_text', ?, ?)`, now, now).Error
-	require.NoError(t, err)
-
-	var providerID uint
-	err = db.Table("config_providers").Select("id").Where("name = ?", "openai").Scan(&providerID).Error
+	provider := &tables.TableProvider{Name: "openai"}
+	err := db.Create(provider).Error
 	require.NoError(t, err)
 
 	// Create a key with empty models_json
-	err = db.Exec(`INSERT INTO config_keys (name, key_id, provider_id, provider, value, models_json,
-		encryption_status, created_at, updated_at)
-		VALUES ('empty-models-key', 'emk-1', ?, 'openai', 'sk-test', '[]', 'plain_text', ?, ?)`,
-		providerID, now, now).Error
+	err = db.Exec(`INSERT INTO config_keys (id, name, key_id, provider_id, provider, value, models_json,
+		encryption_status, created_at, updated_at, deleted)
+		VALUES (?, 'empty-models-key', 'emk-1', ?, 'openai', 'sk-test', '[]', 'plain_text', ?, ?, false)`,
+		uuid.NewString(), provider.ID, now, now).Error
 	require.NoError(t, err)
 
 	// Create a VK
@@ -1823,8 +1755,8 @@ func TestMigrationBackfillAllowedModelsWildcard(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a provider config with empty allowed_models
-	err = db.Exec(`INSERT INTO governance_virtual_key_provider_configs (virtual_key_id, provider, allowed_models, allow_all_keys)
-		VALUES ('vk-wildcard-1', 'openai', '[]', true)`).Error
+	err = db.Exec(`INSERT INTO governance_virtual_key_provider_configs (virtual_key_id, provider, allowed_models, allow_all_keys, created_at, updated_at, deleted)
+		VALUES ('vk-wildcard-1', 'openai', '[]', true, ?, ?, 0)`, now, now).Error
 	require.NoError(t, err)
 
 	// Run the migration
@@ -1863,10 +1795,10 @@ func TestMigrationRemoveServerPrefixFromMCPTools(t *testing.T) {
 	toolsJSON, _ := json.Marshal([]string{"my_server_tool1", "my_server_tool2", "standalone_tool"})
 	autoToolsJSON, _ := json.Marshal([]string{"my_server_auto1"})
 
-	err := db.Exec(`INSERT INTO config_mcp_clients (client_id, name, connection_type,
-		tools_to_execute_json, tools_to_auto_execute_json, encryption_status, created_at, updated_at)
-		VALUES (?, ?, 'stdio', ?, ?, 'plain_text', ?, ?)`,
-		"mcp-prefix-1", "my_server", string(toolsJSON), string(autoToolsJSON), now, now).Error
+	err := db.Exec(`INSERT INTO config_mcp_clients (id, client_id, name, connection_type,
+		tools_to_execute_json, tools_to_auto_execute_json, encryption_status, created_at, updated_at, deleted)
+		VALUES (?, ?, ?, 'stdio', ?, ?, 'plain_text', ?, ?, false)`,
+		uuid.NewString(), "mcp-prefix-1", "my_server", string(toolsJSON), string(autoToolsJSON), now, now).Error
 	require.NoError(t, err)
 
 	// Run the migration
@@ -1911,10 +1843,10 @@ func TestMigrationRemoveServerPrefixFromMCPTools_Collision(t *testing.T) {
 	// Client where stripping the prefix would cause a collision:
 	// "srv_read" (prefixed) → "read", but "read" already exists in the list
 	toolsJSON, _ := json.Marshal([]string{"srv_read", "read"})
-	err := db.Exec(`INSERT INTO config_mcp_clients (client_id, name, connection_type,
-		tools_to_execute_json, encryption_status, created_at, updated_at)
-		VALUES (?, ?, 'stdio', ?, 'plain_text', ?, ?)`,
-		"mcp-collision", "srv", string(toolsJSON), now, now).Error
+	err := db.Exec(`INSERT INTO config_mcp_clients (id, client_id, name, connection_type,
+		tools_to_execute_json, encryption_status, created_at, updated_at, deleted)
+		VALUES (?, ?, ?, 'stdio', ?, 'plain_text', ?, ?, false)`,
+		uuid.NewString(), "mcp-collision", "srv", string(toolsJSON), now, now).Error
 	require.NoError(t, err)
 
 	// Run the migration — should not error, collision is handled
@@ -2100,11 +2032,12 @@ func setupLegacyBudgetOwnerMigrationDB(t *testing.T) *gorm.DB {
 
 func insertProviderConfigRaw(t *testing.T, db *gorm.DB, id uint, virtualKeyID, provider string) {
 	t.Helper()
+	now := time.Now()
 	err := db.Exec(`
 		INSERT INTO governance_virtual_key_provider_configs
-		  (id, virtual_key_id, provider, allowed_models, allow_all_keys)
-		VALUES (?, ?, ?, '[]', 1)
-	`, id, virtualKeyID, provider).Error
+		  (id, virtual_key_id, provider, allowed_models, allow_all_keys, created_at, updated_at, deleted)
+		VALUES (?, ?, ?, '[]', 1, ?, ?, 0)
+	`, id, virtualKeyID, provider, now, now).Error
 	require.NoError(t, err, "Failed to insert provider config %d", id)
 }
 

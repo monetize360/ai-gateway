@@ -2466,7 +2466,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 		}
 		if clone.ProviderConfigs != nil {
 			// Create a map of existing provider configs by ID for fast lookup
-			existingProviderConfigs := make(map[uint]configstoreTables.TableVirtualKeyProviderConfig)
+			existingProviderConfigs := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
 			if existingVK.ProviderConfigs != nil {
 				for _, existingPC := range existingVK.ProviderConfigs {
 					existingProviderConfigs[existingPC.ID] = existingPC

@@ -3,26 +3,23 @@ package tables
 import (
 	"encoding/json"
 	"strings"
-	"time"
 
 	"gorm.io/gorm"
 )
 
 // TableTeam represents a team entity with budget, rate limit and customer association
 type TableTeam struct {
-	ID          string  `gorm:"primaryKey;type:varchar(255)" json:"id"`
+	ID          string  `gorm:"primaryKey;type:uuid" json:"id"`
 	Name        string  `gorm:"type:varchar(255);not null;uniqueIndex" json:"name"`
-	CustomerID  *string `gorm:"type:varchar(255);index" json:"customer_id,omitempty"` // A team can belong to a customer
-	RateLimitID *string `gorm:"type:varchar(255);index" json:"rate_limit_id,omitempty"`
+	CustomerID  *string `gorm:"type:uuid;index" json:"customer_id,omitempty"`
+	RateLimitID *string `gorm:"type:uuid;index" json:"rate_limit_id,omitempty"`
 	SourceID    *string `gorm:"type:varchar(255);uniqueIndex" json:"source_id,omitempty"`
 
-	// Relationships
 	Customer    *TableCustomer    `gorm:"foreignKey:CustomerID" json:"customer,omitempty"`
-	Budgets     []TableBudget     `gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"` // Multiple budgets with different reset intervals
+	Budgets     []TableBudget     `gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`
 	RateLimit   *TableRateLimit   `gorm:"foreignKey:RateLimitID" json:"rate_limit,omitempty"`
 	VirtualKeys []TableVirtualKey `gorm:"foreignKey:TeamID" json:"virtual_keys,omitempty"`
 
-	// Computed (not a DB column) — populated via correlated subquery in query layer, hence no migration
 	VirtualKeyCount int64 `gorm:"->;-:migration" json:"virtual_key_count"`
 
 	Profile       *string        `gorm:"type:text" json:"-"`
@@ -36,12 +33,9 @@ type TableTeam struct {
 
 	CalendarAligned bool `gorm:"default:false" json:"calendar_aligned"`
 
-	// Config hash is used to detect the changes synced from config.json file
-	// Every time we sync the config.json file, we will update the config hash
 	ConfigHash string `gorm:"type:varchar(255);null" json:"config_hash"`
 
-	CreatedAt time.Time `gorm:"index;not null" json:"created_at"`
-	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`
+	SystemColumns
 }
 
 // TableName sets the table name for each model
@@ -88,9 +82,7 @@ func (t *TableTeam) BeforeSave(tx *gorm.DB) error {
 }
 
 // AfterFind hook for TableTeam to deserialize JSON fields and propagate
-// calendar_aligned down to owned budgets / rate_limit. The reset path reads
-// the stamped value off the budget / rate_limit; the governance store's
-// Update*InMemory paths re-stamp on every team update.
+// calendar_aligned down to owned budgets / rate_limit.
 func (t *TableTeam) AfterFind(tx *gorm.DB) error {
 	if t.Profile != nil {
 		if err := json.Unmarshal([]byte(*t.Profile), &t.ParsedProfile); err != nil {

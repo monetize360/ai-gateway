@@ -249,8 +249,10 @@ func buildModelConfig(id, modelName string, provider *string, budget *configstor
 		ID:        id,
 		ModelName: modelName,
 		Provider:  provider,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
 	}
 	if budget != nil {
 		mc.Budget = budget
@@ -264,10 +266,13 @@ func buildModelConfig(id, modelName string, provider *string, budget *configstor
 }
 
 func buildProviderWithGovernance(name string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit) *configstoreTables.TableProvider {
+	now := time.Now().UTC()
 	provider := &configstoreTables.TableProvider{
-		Name:      name,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Name: name,
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
 	}
 	if budget != nil {
 		provider.Budget = budget

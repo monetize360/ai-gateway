@@ -2443,7 +2443,7 @@ func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID *string, ownerType,
 		Where("rate_limit_id = ?", id).
 		Select("id").
 		First(&vkOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to virtual-key provider config %d; cannot link to %s %q", id, vkOwner.ID, ownerType, ownerID)
+		return fmt.Errorf("rate_limit_id %q is already linked to virtual-key provider config %s; cannot link to %s %q", id, vkOwner.ID, ownerType, ownerID)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
 	}
@@ -3313,7 +3313,7 @@ func resolveMCPConfigClientIDs(
 		mc := &mcpConfigs[i]
 
 		// If MCPClientID is already set (e.g., from database or direct construction), keep it
-		if mc.MCPClientID != 0 {
+		if mc.MCPClientID != "" {
 			resolvedConfigs = append(resolvedConfigs, *mc)
 			continue
 		}
@@ -3413,13 +3413,13 @@ func reconcileVirtualKeyAssociations(
 	}
 
 	// Build lookup map for existing MCP configs by MCPClientID
-	existingByMCPClientID := make(map[uint]configstoreTables.TableVirtualKeyMCPConfig)
+	existingByMCPClientID := make(map[string]configstoreTables.TableVirtualKeyMCPConfig)
 	for _, mc := range existingMCPConfigs {
 		existingByMCPClientID[mc.MCPClientID] = mc
 	}
 
 	// Process MCP configs from config.json
-	newMCPSet := make(map[uint]bool)
+	newMCPSet := make(map[string]bool)
 	for _, newMC := range newMCPConfigs {
 		newMCPSet[newMC.MCPClientID] = true
 		newMC.VirtualKeyID = vkID
@@ -3427,12 +3427,12 @@ func reconcileVirtualKeyAssociations(
 			// Update existing MCP config from file
 			existing.ToolsToExecute = newMC.ToolsToExecute
 			if err := store.UpdateVirtualKeyMCPConfig(ctx, &existing, tx); err != nil {
-				return fmt.Errorf("failed to update MCP config for client %d: %w", newMC.MCPClientID, err)
+				return fmt.Errorf("failed to update MCP config for client %s: %w", newMC.MCPClientID, err)
 			}
 		} else {
 			// Create new MCP config from file
 			if err := store.CreateVirtualKeyMCPConfig(ctx, &newMC, tx); err != nil {
-				return fmt.Errorf("failed to create MCP config for client %d: %w", newMC.MCPClientID, err)
+				return fmt.Errorf("failed to create MCP config for client %s: %w", newMC.MCPClientID, err)
 			}
 		}
 	}
@@ -3441,7 +3441,7 @@ func reconcileVirtualKeyAssociations(
 	for mcpClientID, existing := range existingByMCPClientID {
 		if !newMCPSet[mcpClientID] {
 			if err := store.DeleteVirtualKeyMCPConfig(ctx, existing.ID, tx); err != nil {
-				return fmt.Errorf("failed to delete MCP config for client %d: %w", mcpClientID, err)
+				return fmt.Errorf("failed to delete MCP config for client %s: %w", mcpClientID, err)
 			}
 		}
 	}

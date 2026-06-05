@@ -449,7 +449,7 @@ func TestProviderRateLimitUpdateSyncToMemory(t *testing.T) {
 	vkData1 := getVKResp1.Body["virtual_keys"].(map[string]interface{})[vkValue].(map[string]interface{})
 	providerConfigs1 := vkData1["provider_configs"].([]interface{})
 	providerConfig1 := providerConfigs1[0].(map[string]interface{})
-	providerConfigID := uint(providerConfig1["id"].(float64))
+	providerConfigID := providerConfig1["id"].(string)
 	rateLimitID1, _ := providerConfig1["rate_limit_id"].(string)
 	getRateLimitsResp1 := MakeRequest(t, APIRequest{
 		Method: "GET",
@@ -998,7 +998,7 @@ func TestProviderBudgetUpdateSyncToMemory(t *testing.T) {
 	vkData1 := getVKResp1.Body["virtual_keys"].(map[string]interface{})[vkValue].(map[string]interface{})
 	providerConfigs1 := vkData1["provider_configs"].([]interface{})
 	providerConfig1 := providerConfigs1[0].(map[string]interface{})
-	providerConfigID := uint(providerConfig1["id"].(float64))
+	providerConfigID := providerConfig1["id"].(string)
 	budgetID, _ := providerConfig1["budget_id"].(string)
 
 	getBudgetsResp1 := MakeRequest(t, APIRequest{

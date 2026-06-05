@@ -807,6 +807,12 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationDropAzureAPIVersionColumn(ctx, db); err != nil {
 		return err
 	}
+	if err := triggerGovernanceAuditMigrations(ctx, db); err != nil {
+		return err
+	}
+	if err := triggerConfigAuditMigrations(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -945,11 +951,6 @@ func migrationInit(ctx context.Context, db *gorm.DB) error {
 		Migrate: func(tx *gorm.DB) error {
 			tx = tx.WithContext(ctx)
 			migrator := tx.Migrator()
-			if !migrator.HasTable(&tables.TableConfigHash{}) {
-				if err := migrator.CreateTable(&tables.TableConfigHash{}); err != nil {
-					return err
-				}
-			}
 			// TableBudget and TableRateLimit must be created before TableProvider
 			// because TableProvider has FK references to them
 			if !migrator.HasTable(&tables.TableBudget{}) {
@@ -1107,9 +1108,6 @@ func migrationInit(ctx context.Context, db *gorm.DB) error {
 				return err
 			}
 			if err := migrator.DropTable(&tables.TablePlugin{}); err != nil {
-				return err
-			}
-			if err := migrator.DropTable(&tables.TableConfigHash{}); err != nil {
 				return err
 			}
 			return nil
@@ -1324,10 +1322,10 @@ func migrationDropAllowDirectKeysColumn(ctx context.Context, db *gorm.DB) error 
 				}
 				newHash, err := clientConfig.GenerateClientConfigHash()
 				if err != nil {
-					return fmt.Errorf("failed to generate hash for client config %d: %w", cc.ID, err)
+					return fmt.Errorf("failed to generate hash for client config %s: %w", cc.ID, err)
 				}
 				if err := tx.Model(&cc).Update("config_hash", newHash).Error; err != nil {
-					return fmt.Errorf("failed to update hash for client config %d: %w", cc.ID, err)
+					return fmt.Errorf("failed to update hash for client config %s: %w", cc.ID, err)
 				}
 			}
 			return nil
@@ -1522,7 +1520,7 @@ func migrationAddKeyNameColumn(ctx context.Context, db *gorm.DB) error {
 					if len(keyIDShort) > 8 {
 						keyIDShort = keyIDShort[:8]
 					}
-					keyName := keyIDShort + "-" + strconv.Itoa(int(key.ID))
+					keyName := keyIDShort + "-" + key.ID
 					uniqueName := fmt.Sprintf("%s-key-%s", key.Provider, keyName)
 
 					// Update the key with the unique name
@@ -1880,7 +1878,7 @@ func migrationAddMCPClientIDColumn(ctx context.Context, db *gorm.DB) error {
 
 					// Update the client with the generated client_id
 					if err := tx.Model(&client).Update("client_id", clientID).Error; err != nil {
-						return fmt.Errorf("failed to update MCP client %d with client_id %s: %w", client.ID, clientID, err)
+						return fmt.Errorf("failed to update MCP client %s with client_id %s: %w", client.ID, clientID, err)
 					}
 				}
 
@@ -2018,7 +2016,7 @@ func migrationMissingProviderColumnInKeyTable(ctx context.Context, db *gorm.DB) 
 					if err == gorm.ErrRecordNotFound {
 						continue
 					}
-					return fmt.Errorf("failed to fetch provider %d for key %s: %w", key.ProviderID, key.KeyID, err)
+					return fmt.Errorf("failed to fetch provider %s for key %s: %w", key.ProviderID, key.KeyID, err)
 				}
 
 				// Update the key with the provider name
@@ -2346,7 +2344,7 @@ func migrationNormalizeMCPClientNames(ctx context.Context, db *gorm.DB) error {
 			assignedNames := make(map[string]bool)
 
 			// Helper function to find a unique name
-			findUniqueName := func(baseName string, originalName string, excludeID uint, tx *gorm.DB, assignedNames map[string]bool) (string, error) {
+			findUniqueName := func(baseName string, originalName string, excludeID string, tx *gorm.DB, assignedNames map[string]bool) (string, error) {
 				// First check if base name is already assigned in this migration
 				if !assignedNames[baseName] {
 					// Also check database for existing names (excluding current client)
@@ -2411,12 +2409,12 @@ func migrationNormalizeMCPClientNames(ctx context.Context, db *gorm.DB) error {
 					// Find a unique name (pass assignedNames map to track names in this migration)
 					uniqueName, err := findUniqueName(normalizedName, originalName, client.ID, tx, assignedNames)
 					if err != nil {
-						return fmt.Errorf("failed to find unique name for client %d (original: %s): %w", client.ID, originalName, err)
+						return fmt.Errorf("failed to find unique name for client %s (original: %s): %w", client.ID, originalName, err)
 					}
 
 					// Update the client name
 					if err := tx.Model(&client).Update("name", uniqueName).Error; err != nil {
-						return fmt.Errorf("failed to update MCP client %d name from %s to %s: %w", client.ID, originalName, uniqueName, err)
+						return fmt.Errorf("failed to update MCP client %s name from %s to %s: %w", client.ID, originalName, uniqueName, err)
 					}
 				}
 			}
@@ -2507,11 +2505,12 @@ func migrationMoveKeysToProviderConfig(ctx context.Context, db *gorm.DB) error {
 						// Insert directly into the join table using clause.OnConflict for
 						// database-agnostic duplicate handling (works for SQLite and PostgreSQL)
 						joinEntry := tables.TableVirtualKeyProviderConfigKey{
+							ID:                              uuid.NewString(),
 							TableVirtualKeyProviderConfigID: providerConfig.ID,
-							TableKeyID:                      keyData.ID,
+							TableKeyID:                      strconv.FormatUint(uint64(keyData.ID), 10),
 						}
 						if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&joinEntry).Error; err != nil {
-							return fmt.Errorf("failed to associate key %d with provider config %d: %w", keyData.ID, providerConfig.ID, err)
+							return fmt.Errorf("failed to associate key %d with provider config %s: %w", keyData.ID, providerConfig.ID, err)
 						}
 					}
 				}
@@ -2797,10 +2796,10 @@ func migrationAddAdditionalConfigHashColumns(ctx context.Context, db *gorm.DB) e
 						}
 						hash, err := clientConfig.GenerateClientConfigHash()
 						if err != nil {
-							return fmt.Errorf("failed to generate hash for client config %d: %w", cc.ID, err)
+							return fmt.Errorf("failed to generate hash for client config %s: %w", cc.ID, err)
 						}
 						if err := tx.Model(&cc).Update("config_hash", hash).Error; err != nil {
-							return fmt.Errorf("failed to update hash for client config %d: %w", cc.ID, err)
+							return fmt.Errorf("failed to update hash for client config %s: %w", cc.ID, err)
 						}
 					}
 				}
@@ -3483,7 +3482,7 @@ func migrationRemoveServerPrefixFromMCPTools(ctx context.Context, db *gorm.DB) e
 				// Save the updated VK config if any changes were made
 				if needsUpdate {
 					if err := tx.Save(vkConfig).Error; err != nil {
-						return fmt.Errorf("failed to save updated VK MCP config ID %d: %w", vkConfig.ID, err)
+						return fmt.Errorf("failed to save updated VK MCP config ID %s: %w", vkConfig.ID, err)
 					}
 				}
 			}
@@ -4289,7 +4288,7 @@ func migrationDropDeploymentColumnsAndAddAliases(ctx context.Context, db *gorm.D
 			// encrypt any plaintext values first.
 			if encrypt.IsEnabled() {
 				type aliasRow struct {
-					ID          uint
+					ID          string
 					AliasesJSON *string
 				}
 				var plainRows []aliasRow
@@ -4307,17 +4306,17 @@ func migrationDropDeploymentColumnsAndAddAliases(ctx context.Context, db *gorm.D
 					// If Decrypt fails, the value is plaintext — encrypt it.
 					if _, err := encrypt.Decrypt(*row.AliasesJSON); err != nil {
 						if !json.Valid([]byte(*row.AliasesJSON)) {
-							return fmt.Errorf("failed to decrypt aliases for key %d: %w", row.ID, err)
+							return fmt.Errorf("failed to decrypt aliases for key %s: %w", row.ID, err)
 						}
 						encrypted, encErr := encrypt.Encrypt(*row.AliasesJSON)
 						if encErr != nil {
-							return fmt.Errorf("failed to encrypt aliases for key %d: %w", row.ID, encErr)
+							return fmt.Errorf("failed to encrypt aliases for key %s: %w", row.ID, encErr)
 						}
 						if err := tx.Exec(
 							"UPDATE config_keys SET aliases_json = ? WHERE id = ?",
 							encrypted, row.ID,
 						).Error; err != nil {
-							return fmt.Errorf("failed to update encrypted aliases for key %d: %w", row.ID, err)
+							return fmt.Errorf("failed to update encrypted aliases for key %s: %w", row.ID, err)
 						}
 					}
 				}
@@ -4640,7 +4639,7 @@ func migrationBackfillEmptyVirtualKeyConfigs(ctx context.Context, db *gorm.DB) e
 							ToolsToExecute: []string{"*"},
 						}
 						if err := tx.Create(&mcpConfig).Error; err != nil {
-							return fmt.Errorf("failed to create MCP config for VK %s, client %d: %w", vk.ID, mcpClient.ID, err)
+							return fmt.Errorf("failed to create MCP config for VK %s, client %s: %w", vk.ID, mcpClient.ID, err)
 						}
 					}
 					modifiedVKIDs[vk.ID] = struct{}{}
@@ -5265,14 +5264,14 @@ func migrationAddAllowAllKeysToProviderConfig(ctx context.Context, db *gorm.DB) 
 				if err := tx.Table("governance_virtual_key_provider_config_keys").
 					Where("table_virtual_key_provider_config_id = ?", pc.ID).
 					Count(&keyCount).Error; err != nil {
-					return fmt.Errorf("failed to count keys for provider config %d: %w", pc.ID, err)
+					return fmt.Errorf("failed to count keys for provider config %s: %w", pc.ID, err)
 				}
 
 				if keyCount == 0 {
 					if err := tx.Model(&tables.TableVirtualKeyProviderConfig{}).
 						Where("id = ?", pc.ID).
 						Update("allow_all_keys", true).Error; err != nil {
-						return fmt.Errorf("failed to backfill allow_all_keys for provider config %d: %w", pc.ID, err)
+						return fmt.Errorf("failed to backfill allow_all_keys for provider config %s: %w", pc.ID, err)
 					}
 					modifiedVKIDs[pc.VirtualKeyID] = struct{}{}
 				}
@@ -6432,10 +6431,10 @@ func migrationAddRoutingChainMaxDepthColumn(ctx context.Context, db *gorm.DB) er
 					}
 					newHash, err := clientConfig.GenerateClientConfigHash()
 					if err != nil {
-						return fmt.Errorf("failed to generate hash for client config %d: %w", cc.ID, err)
+						return fmt.Errorf("failed to generate hash for client config %s: %w", cc.ID, err)
 					}
 					if err := tx.Model(&cc).Update("config_hash", newHash).Error; err != nil {
-						return fmt.Errorf("failed to update hash for client config %d: %w", cc.ID, err)
+						return fmt.Errorf("failed to update hash for client config %s: %w", cc.ID, err)
 					}
 				}
 			}
@@ -6535,7 +6534,7 @@ func migrationAddOllamaSGLConfigColumns(ctx context.Context, db *gorm.DB) error 
 				}
 				var nc schemas.NetworkConfig
 				if err := json.Unmarshal([]byte(p.NetworkConfigJSON), &nc); err != nil {
-					log.Printf("[Migration] Failed to parse network_config for provider %s (id=%d), skipping: %v", p.Name, p.ID, err)
+					log.Printf("[Migration] Failed to parse network_config for provider %s (id=%s), skipping: %v", p.Name, p.ID, err)
 					continue
 				}
 				if nc.BaseURL == "" {
@@ -8365,10 +8364,10 @@ func migrationRefreshConfigHashAfterMCPExternalServerURLRemoval(ctx context.Cont
 				}
 				newHash, err := clientConfig.GenerateClientConfigHash()
 				if err != nil {
-					return fmt.Errorf("regenerate config hash for client config %d: %w", cc.ID, err)
+					return fmt.Errorf("regenerate config hash for client config %s: %w", cc.ID, err)
 				}
 				if err := tx.Model(&cc).Update("config_hash", newHash).Error; err != nil {
-					return fmt.Errorf("update config_hash for client config %d: %w", cc.ID, err)
+					return fmt.Errorf("update config_hash for client config %s: %w", cc.ID, err)
 				}
 			}
 			return nil

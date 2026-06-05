@@ -219,7 +219,7 @@ type CreateVirtualKeyRequest struct {
 
 // ProviderConfigRequest represents a provider configuration for a virtual key
 type ProviderConfigRequest struct {
-	ID            *uint                   `json:"id,omitempty"`
+	ID            *string                 `json:"id,omitempty"`
 	Provider      string                  `json:"provider"`
 	Weight        *float64                `json:"weight,omitempty"`
 	AllowedModels []string                `json:"allowed_models,omitempty"`

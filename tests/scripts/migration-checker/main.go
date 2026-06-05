@@ -276,7 +276,6 @@ func parseMigrationOrder(migrationsPath string) ([]MigrationAction, error) {
 
 	// Table struct to table name mapping (simplified)
 	tableMapping := map[string]string{
-		"TableConfigHash":              "config_hashes",
 		"TableBudget":                  "governance_budgets",
 		"TableRateLimit":               "governance_rate_limits",
 		"TableProvider":                "config_providers",

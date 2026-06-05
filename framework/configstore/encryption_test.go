@@ -7,6 +7,7 @@ import (
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -55,6 +56,9 @@ func setupEncryptionTestStore(t *testing.T) (*RDBConfigStore, *gorm.DB) {
 	)
 	require.NoError(t, err)
 
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	ensureEncryptionTestProvider(t, db, now)
+
 	store := &RDBConfigStore{logger: bifrost.NewDefaultLogger(schemas.LogLevelInfo)}
 	store.db.Store(db)
 	store.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
@@ -71,6 +75,60 @@ func insertPlaintextRow(t *testing.T, db *gorm.DB, sql string, args ...any) {
 	require.NoError(t, db.Exec(sql, args...).Error)
 }
 
+const testEncryptionProviderID = "11111111-1111-1111-1111-111111111111"
+
+func ensureEncryptionTestProvider(t *testing.T, db *gorm.DB, now string) {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Table("config_providers").Where("id = ?", testEncryptionProviderID).Count(&count).Error)
+	if count == 0 {
+		insertPlaintextRow(t, db,
+			`INSERT INTO config_providers (id, name, encryption_status, created_at, updated_at, deleted) VALUES (?, 'openai', 'plain_text', ?, ?, 0)`,
+			testEncryptionProviderID, now, now)
+	}
+}
+
+func insertPlaintextConfigKey(t *testing.T, db *gorm.DB, name, provider, keyID, value, now string) {
+	t.Helper()
+	ensureEncryptionTestProvider(t, db, now)
+	insertPlaintextRow(t, db,
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), name, testEncryptionProviderID, provider, keyID, value, now, now)
+}
+
+func insertPlaintextMCPClient(t *testing.T, db *gorm.DB, clientID, name, connectionType, connectionString, headersJSON, now string) {
+	t.Helper()
+	insertPlaintextRow(t, db,
+		`INSERT INTO config_mcp_clients (id, client_id, name, connection_type, connection_string, headers_json, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), clientID, name, connectionType, connectionString, headersJSON, now, now)
+}
+
+func insertPlaintextProviderProxy(t *testing.T, db *gorm.DB, name, proxyJSON, now string) {
+	t.Helper()
+	insertPlaintextRow(t, db,
+		`INSERT INTO config_providers (id, name, proxy_config_json, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), name, proxyJSON, now, now)
+}
+
+func insertPlaintextVectorStore(t *testing.T, db *gorm.DB, enabled bool, storeType, config, now string) {
+	t.Helper()
+	insertPlaintextRow(t, db,
+		`INSERT INTO config_vector_store (id, enabled, type, config, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), enabled, storeType, config, now, now)
+}
+
+func insertPlaintextPlugin(t *testing.T, db *gorm.DB, name string, enabled bool, configJSON, now string) {
+	t.Helper()
+	insertPlaintextRow(t, db,
+		`INSERT INTO config_plugins (id, name, enabled, version, config_json, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 1, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), name, enabled, configJSON, now, now)
+}
+
 // ============================================================================
 // EncryptPlaintextRows — full startup pass
 // ============================================================================
@@ -82,10 +140,7 @@ func TestEncryptPlaintextRows_EncryptsAllTables(t *testing.T) {
 	future := time.Now().Add(time.Hour).UTC().Format("2006-01-02 15:04:05")
 
 	// Insert plaintext rows across all tables (bypassing hooks)
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"test-key", 1, "openai", "key-1", "sk-plaintext-key", now, now)
+	insertPlaintextConfigKey(t, db, "test-key", "openai", "key-1", "sk-plaintext-key", now)
 
 	insertPlaintextRow(t, db,
 		`INSERT INTO governance_virtual_keys (id, name, value, is_active, encryption_status, created_at, updated_at)
@@ -107,25 +162,15 @@ func TestEncryptPlaintextRows_EncryptsAllTables(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, 'pending', 'plain_text', ?, ?, ?)`,
 		"cfg-1", "plaintext-client-secret", "plaintext-verifier", "https://example.com/cb", "csrf-state", now, now, future)
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_mcp_clients (client_id, name, connection_type, connection_string, headers_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'sse', ?, ?, 'plain_text', ?, ?)`,
-		"mcp-1", "test-mcp", "https://mcp.example.com", `{"Authorization":"Bearer token"}`, now, now)
+	insertPlaintextMCPClient(t, db, "mcp-1", "test-mcp", "sse", "https://mcp.example.com", `{"Authorization":"Bearer token"}`, now)
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_providers (name, proxy_config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'plain_text', ?, ?)`,
-		"openai", `{"url":"https://proxy.example.com"}`, now, now)
+		`UPDATE config_providers SET proxy_config_json = ? WHERE id = ?`,
+		`{"url":"https://proxy.example.com"}`, testEncryptionProviderID)
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_vector_store (enabled, type, config, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, 'plain_text', ?, ?)`,
-		true, "redis", `{"host":"redis.example.com","password":"secret"}`, now, now)
+	insertPlaintextVectorStore(t, db, true, "redis", `{"host":"redis.example.com","password":"secret"}`, now)
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_plugins (name, enabled, version, config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 1, ?, 'plain_text', ?, ?)`,
-		"test-plugin", true, `{"api_key":"plugin-secret"}`, now, now)
+	insertPlaintextPlugin(t, db, "test-plugin", true, `{"api_key":"plugin-secret"}`, now)
 
 	// Run the startup encryption pass
 	err := store.EncryptPlaintextRows(ctx)
@@ -181,7 +226,7 @@ func TestEncryptPlaintextRows_SkipsAlreadyEncrypted(t *testing.T) {
 	// Create a key through the normal GORM path (which encrypts via hooks)
 	key := &tables.TableKey{
 		Name:       "already-encrypted",
-		ProviderID: 1,
+		ProviderID: "11111111-1111-1111-1111-111111111111",
 		Provider:   "openai",
 		KeyID:      "enc-key-1",
 		Value:      *schemas.NewEnvVar("sk-secret"),
@@ -208,10 +253,7 @@ func TestEncryptPlaintextRows_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"idempotent-key", 1, "openai", "idem-1", "sk-plaintext", now, now)
+	insertPlaintextConfigKey(t, db, "idempotent-key", "openai", "idem-1", "sk-plaintext", now)
 
 	// Run twice
 	err := store.EncryptPlaintextRows(ctx)
@@ -233,15 +275,14 @@ func TestEncryptPlaintextRows_HandlesNullEncryptionStatus(t *testing.T) {
 
 	// Insert with NULL encryption_status (legacy row)
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-		"null-status-key", 1, "openai", "null-1", "sk-null-status", now, now)
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'openai', ?, ?, NULL, ?, ?, 0)`,
+		uuid.NewString(), "null-status-key", testEncryptionProviderID, "null-1", "sk-null-status", now, now)
 
-	// Insert with empty encryption_status
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', ?, ?)`,
-		"empty-status-key", 1, "openai", "empty-1", "sk-empty-status", now, now)
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'openai', ?, ?, '', ?, ?, 0)`,
+		uuid.NewString(), "empty-status-key", testEncryptionProviderID, "empty-1", "sk-empty-status", now, now)
 
 	err := store.EncryptPlaintextRows(ctx)
 	require.NoError(t, err)
@@ -319,10 +360,7 @@ func TestEncryptPlaintextPlugins(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_plugins (name, enabled, version, config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 1, ?, 'plain_text', ?, ?)`,
-		"batch-plugin", true, `{"secret":"value"}`, now, now)
+	insertPlaintextPlugin(t, db, "batch-plugin", true, `{"secret":"value"}`, now)
 
 	count, err := store.encryptPlaintextPlugins(ctx)
 	require.NoError(t, err)
@@ -340,10 +378,7 @@ func TestEncryptPlaintextPlugins_SkipsEmptyConfig(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	// Insert plugin with empty config — should NOT be picked up by the query
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_plugins (name, enabled, version, config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 1, '{}', 'plain_text', ?, ?)`,
-		"empty-config-plugin", true, now, now)
+	insertPlaintextPlugin(t, db, "empty-config-plugin", true, "{}", now)
 
 	count, err := store.encryptPlaintextPlugins(ctx)
 	require.NoError(t, err)
@@ -356,10 +391,7 @@ func TestEncryptPlaintextProviderProxies_SkipsNoProxy(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	// Provider without proxy config — should NOT be picked up
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_providers (name, proxy_config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, '', 'plain_text', ?, ?)`,
-		"no-proxy-provider", now, now)
+	insertPlaintextProviderProxy(t, db, "no-proxy-provider", "", now)
 
 	count, err := store.encryptPlaintextProviderProxies(ctx)
 	require.NoError(t, err)
@@ -375,15 +407,8 @@ func TestEncryptPlaintextKeys_EncryptsAndDecryptsCorrectly(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"batch-key-1", 1, "openai", "bk-1", "sk-batch-secret-1", now, now)
-
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"batch-key-2", 1, "anthropic", "bk-2", "sk-batch-secret-2", now, now)
+	insertPlaintextConfigKey(t, db, "batch-key-1", "openai", "bk-1", "sk-batch-secret-1", now)
+	insertPlaintextConfigKey(t, db, "batch-key-2", "anthropic", "bk-2", "sk-batch-secret-2", now)
 
 	count, err := store.encryptPlaintextKeys(ctx)
 	require.NoError(t, err)
@@ -465,10 +490,7 @@ func TestEncryptPlaintextMCPClients_EncryptsAndDecryptsCorrectly(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_mcp_clients (client_id, name, connection_type, connection_string, headers_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'sse', ?, ?, 'plain_text', ?, ?)`,
-		"mcp-batch-1", "batch-mcp", "https://mcp.example.com", `{"X-Api-Key":"secret-key"}`, now, now)
+	insertPlaintextMCPClient(t, db, "mcp-batch-1", "batch-mcp", "sse", "https://mcp.example.com", `{"X-Api-Key":"secret-key"}`, now)
 
 	count, err := store.encryptPlaintextMCPClients(ctx)
 	require.NoError(t, err)
@@ -492,10 +514,7 @@ func TestEncryptPlaintextProviderProxies_EncryptsAndDecryptsCorrectly(t *testing
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_providers (name, proxy_config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'plain_text', ?, ?)`,
-		"proxy-provider", `{"url":"https://proxy.example.com","username":"admin","password":"secret-proxy-pass"}`, now, now)
+	insertPlaintextProviderProxy(t, db, "proxy-provider", `{"url":"https://proxy.example.com","username":"admin","password":"secret-proxy-pass"}`, now)
 
 	count, err := store.encryptPlaintextProviderProxies(ctx)
 	require.NoError(t, err)
@@ -523,10 +542,7 @@ func TestEncryptPlaintextVectorStoreConfigs_EncryptsAndDecryptsCorrectly(t *test
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	configJSON := `{"host":"redis.example.com","password":"redis-secret"}`
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_vector_store (enabled, type, config, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, 'plain_text', ?, ?)`,
-		true, "redis", configJSON, now, now)
+	insertPlaintextVectorStore(t, db, true, "redis", configJSON, now)
 
 	count, err := store.encryptPlaintextVectorStoreConfigs(ctx)
 	require.NoError(t, err)
@@ -550,10 +566,7 @@ func TestEncryptPlaintextVectorStoreConfigs_SkipsEmptyConfig(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_vector_store (enabled, type, config, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, '', 'plain_text', ?, ?)`,
-		false, "none", now, now)
+	insertPlaintextVectorStore(t, db, false, "none", "", now)
 
 	count, err := store.encryptPlaintextVectorStoreConfigs(ctx)
 	require.NoError(t, err)
@@ -566,10 +579,7 @@ func TestEncryptPlaintextMCPClients_SkipsEmptyFields(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	// MCP client with no connection string and empty headers — nothing to encrypt
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_mcp_clients (client_id, name, connection_type, headers_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'stdio', '{}', 'plain_text', ?, ?)`,
-		"mcp-empty", "empty-mcp", now, now)
+	insertPlaintextMCPClient(t, db, "mcp-empty", "empty-mcp", "stdio", "", "{}", now)
 
 	count, err := store.encryptPlaintextMCPClients(ctx)
 	require.NoError(t, err)
@@ -588,10 +598,7 @@ func TestEncryptPlaintextKeys_MultipleBatches(t *testing.T) {
 
 	// Insert 5 plaintext keys to verify the batch loop processes all rows
 	for i := range 5 {
-		insertPlaintextRow(t, db,
-			`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-			fmt.Sprintf("paginated-key-%d", i), 1, "openai", fmt.Sprintf("pk-%d", i), fmt.Sprintf("sk-secret-%d", i), now, now)
+		insertPlaintextConfigKey(t, db, fmt.Sprintf("paginated-key-%d", i), "openai", fmt.Sprintf("pk-%d", i), fmt.Sprintf("sk-secret-%d", i), now)
 	}
 
 	count, err := store.encryptPlaintextKeys(ctx)
@@ -650,9 +657,9 @@ func TestEncryptPlaintextKeys_AzureFields_EncryptsAndDecryptsCorrectly(t *testin
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, azure_endpoint, azure_client_id, azure_client_secret, azure_tenant_id, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"azure-key", 1, "azure", "az-1", "sk-azure-key-value",
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, azure_endpoint, azure_client_id, azure_client_secret, azure_tenant_id, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'azure', ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "azure-key", testEncryptionProviderID, "az-1", "sk-azure-key-value",
 		"https://myresource.openai.azure.com", "my-azure-client-id", "azure-super-secret-client",
 		"my-azure-tenant-id", now, now)
 
@@ -690,9 +697,9 @@ func TestEncryptPlaintextKeys_VertexFields_EncryptsAndDecryptsCorrectly(t *testi
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, vertex_project_id, vertex_project_number, vertex_region, vertex_auth_credentials, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"vertex-key", 1, "vertex", "vx-1", "sk-vertex-key-value",
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, vertex_project_id, vertex_project_number, vertex_region, vertex_auth_credentials, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'vertex', ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "vertex-key", testEncryptionProviderID, "vx-1", "sk-vertex-key-value",
 		"my-gcp-project", "123456789", "us-central1",
 		`{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----secret"}`, now, now)
 
@@ -727,9 +734,9 @@ func TestEncryptPlaintextKeys_BedrockFields_EncryptsAndDecryptsCorrectly(t *test
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, bedrock_access_key, bedrock_secret_key, bedrock_session_token, bedrock_region, bedrock_arn, aliases_json, bedrock_batch_s3_config_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"bedrock-key", 1, "bedrock", "br-1", "sk-bedrock-key-value",
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, bedrock_access_key, bedrock_secret_key, bedrock_session_token, bedrock_region, bedrock_arn, aliases_json, bedrock_batch_s3_config_json, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'bedrock', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "bedrock-key", testEncryptionProviderID, "br-1", "sk-bedrock-key-value",
 		"AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "FwoGZXIvYXdzEBYaDH7sampleSessionToken",
 		"us-west-2", "arn:aws:iam::123456789:role/bedrock",
 		`{"claude-3":"profile-claude"}`, `{"buckets":[{"bucket_name":"my-bucket","prefix":"jobs/","is_default":true}]}`,
@@ -788,19 +795,19 @@ func TestEncryptPlaintextKeys_AllProviderFields_ViaStartupPass(t *testing.T) {
 
 	// Insert keys for all three providers with sensitive fields
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, azure_endpoint, azure_client_secret, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"startup-azure", 1, "azure", "sa-1", "sk-az", "https://az.openai.azure.com", "az-secret", now, now)
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, azure_endpoint, azure_client_secret, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'azure', ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "startup-azure", testEncryptionProviderID, "sa-1", "sk-az", "https://az.openai.azure.com", "az-secret", now, now)
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, vertex_auth_credentials, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"startup-vertex", 1, "vertex", "sv-1", "sk-vx", "vertex-creds-json", now, now)
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, vertex_auth_credentials, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'vertex', ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "startup-vertex", testEncryptionProviderID, "sv-1", "sk-vx", "vertex-creds-json", now, now)
 
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, bedrock_access_key, bedrock_secret_key, bedrock_session_token, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"startup-bedrock", 1, "bedrock", "sb-1", "sk-br", "AKIA-BR", "secret-br", "session-br", now, now)
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, bedrock_access_key, bedrock_secret_key, bedrock_session_token, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'bedrock', ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "startup-bedrock", testEncryptionProviderID, "sb-1", "sk-br", "AKIA-BR", "secret-br", "session-br", now, now)
 
 	// Run the full startup encryption pass
 	err := store.EncryptPlaintextRows(ctx)
@@ -872,10 +879,13 @@ func TestBeforeSave_DoesNotMutateSharedProviderConfigs(t *testing.T) {
 		ARN:          schemas.NewEnvVar("arn:aws:iam::123456789:role/test"),
 	}
 
+	provider := &tables.TableProvider{Name: "shared-ptr-provider"}
+	require.NoError(t, db.Create(provider).Error)
+
 	// Save a key using the shared config pointers (mimics UpdateProvidersConfig)
 	key := &tables.TableKey{
 		Name:             "shared-ptr-test",
-		ProviderID:       1,
+		ProviderID:       provider.ID,
 		Provider:         "azure",
 		KeyID:            "sp-1",
 		Value:            *schemas.NewEnvVar("sk-test-value"),
@@ -992,9 +1002,12 @@ func TestBeforeSave_EnvVarBackedFields_NotEncrypted(t *testing.T) {
 	require.True(t, vertexCfg.AuthCredentials.IsFromEnv())
 	require.True(t, bedrockCfg.AccessKey.IsFromEnv())
 
+	provider := &tables.TableProvider{Name: "env-backed-provider"}
+	require.NoError(t, db.Create(provider).Error)
+
 	key := &tables.TableKey{
 		Name:             "env-backed-key",
-		ProviderID:       1,
+		ProviderID:       provider.ID,
 		Provider:         "azure",
 		KeyID:            "env-1",
 		Value:            *schemas.NewEnvVar("env.TEST_AZURE_KEY"),
@@ -1077,9 +1090,9 @@ func TestEncryptPlaintextKeys_EnvVarBackedFields_SurviveStartupPass(t *testing.T
 
 	// Insert plaintext rows with env var references via raw SQL (mimics legacy data)
 	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, azure_endpoint, vertex_auth_credentials, bedrock_access_key, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"env-startup-key", 1, "azure", "esp-1",
+		`INSERT INTO config_keys (id, name, provider_id, provider, key_id, value, azure_endpoint, vertex_auth_credentials, bedrock_access_key, encryption_status, created_at, updated_at, deleted)
+		 VALUES (?, ?, ?, 'azure', ?, ?, ?, ?, ?, 'plain_text', ?, ?, 0)`,
+		uuid.NewString(), "env-startup-key", testEncryptionProviderID, "esp-1",
 		"env.TEST_SP_KEY", "env.TEST_SP_ENDPOINT", "env.TEST_SP_CREDS", "env.TEST_SP_ACCESS",
 		now, now)
 
@@ -1130,10 +1143,7 @@ func TestEncryptPlaintextRows_EncryptionDisabled_Noop(t *testing.T) {
 	future := time.Now().Add(time.Hour).UTC().Format("2006-01-02 15:04:05")
 
 	// Insert plaintext rows across multiple tables
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_keys (name, provider_id, provider, key_id, value, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 'plain_text', ?, ?)`,
-		"disabled-key", 1, "openai", "dk-1", "sk-should-stay-plain", now, now)
+	insertPlaintextConfigKey(t, db, "disabled-key", "openai", "dk-1", "sk-should-stay-plain", now)
 
 	insertPlaintextRow(t, db,
 		`INSERT INTO sessions (token, encryption_status, expires_at, created_at, updated_at)
@@ -1178,7 +1188,7 @@ func TestEncryptPlaintextRows_EncryptionDisabled_GORMHooksStorePlaintext(t *test
 	// Create rows via GORM (hooks fire, but encryption is disabled)
 	key := &tables.TableKey{
 		Name:       "hook-no-encrypt",
-		ProviderID: 1,
+		ProviderID: "11111111-1111-1111-1111-111111111111",
 		Provider:   "openai",
 		KeyID:      "hne-1",
 		Value:      *schemas.NewEnvVar("sk-stays-plain-via-hook"),
@@ -1289,10 +1299,7 @@ func TestEncryptPlaintextMCPClients_EnvVarConnectionStringSurvivesStartup(t *tes
 
 	t.Setenv("TEST_MCP_URL", "https://mcp-env.example.com/sse")
 
-	insertPlaintextRow(t, db,
-		`INSERT INTO config_mcp_clients (client_id, name, connection_type, connection_string, headers_json, encryption_status, created_at, updated_at)
-		 VALUES (?, ?, 'sse', ?, '{}', 'plain_text', ?, ?)`,
-		"mcp-env-startup", "env-startup-mcp", "env.TEST_MCP_URL", now, now)
+	insertPlaintextMCPClient(t, db, "mcp-env-startup", "env-startup-mcp", "sse", "env.TEST_MCP_URL", "{}", now)
 
 	count, err := store.encryptPlaintextMCPClients(ctx)
 	require.NoError(t, err)

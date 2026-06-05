@@ -829,11 +829,11 @@ func (m *MockConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value s
 	return nil, nil
 }
 
-func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID uint) ([]tables.TableVirtualKeyMCPConfig, error) {
+func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	return nil, nil
 }
 
-func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []uint) ([]tables.TableVirtualKeyMCPConfig, error) {
+func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	return nil, nil
 }
 
@@ -854,7 +854,7 @@ func (m *MockConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, vi
 	return nil
 }
 
-func (m *MockConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id uint, tx ...*gorm.DB) error {
+func (m *MockConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
 	return nil
 }
 
@@ -871,7 +871,7 @@ func (m *MockConfigStore) UpdateVirtualKeyMCPConfig(ctx context.Context, virtual
 	return nil
 }
 
-func (m *MockConfigStore) DeleteVirtualKeyMCPConfig(ctx context.Context, id uint, tx ...*gorm.DB) error {
+func (m *MockConfigStore) DeleteVirtualKeyMCPConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
 	return nil
 }
 
@@ -6707,7 +6707,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -6739,7 +6739,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic", // Different provider
 				Weight:        ptrFloat64(1.0),
@@ -6767,7 +6767,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(2.0), // Different weight
@@ -6802,9 +6802,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -6828,9 +6828,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2, // Different MCP client ID
+				MCPClientID:    "00000000-0000-0000-0000-000000000002", // Different MCP client ID
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -6854,9 +6854,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool3"}, // Different tools
 			},
 		},
@@ -8286,7 +8286,7 @@ func TestSQLite_VirtualKey_MergePath_WithProviderConfigKeys(t *testing.T) {
 		if pc.Keys[0].KeyID != dbKey.KeyID {
 			t.Errorf("Expected key ID '%s', got '%s'", dbKey.KeyID, pc.Keys[0].KeyID)
 		}
-		t.Logf("✓ Key successfully associated: ID=%d, KeyID=%s, Name=%s", pc.Keys[0].ID, pc.Keys[0].KeyID, pc.Keys[0].Name)
+		t.Logf("✓ Key successfully associated: ID=%s, KeyID=%s, Name=%s", pc.Keys[0].ID, pc.Keys[0].KeyID, pc.Keys[0].Name)
 	}
 }
 
@@ -9090,7 +9090,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9105,7 +9105,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    2, // Different client
+				MCPClientID:    "00000000-0000-0000-0000-000000000002", // Different client
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9120,7 +9120,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool3", "tool4"}, // Different tools
 			},
 		},
@@ -9135,11 +9135,11 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 			{
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -9199,7 +9199,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9290,12 +9290,12 @@ func TestSQLite_VirtualKey_WithMCPConfigs(t *testing.T) {
 
 	if len(mcpConfigs) > 0 {
 		if mcpConfigs[0].MCPClientID != mcpClient.ID {
-			t.Errorf("Expected MCPClientID %d, got %d", mcpClient.ID, mcpConfigs[0].MCPClientID)
+			t.Errorf("Expected MCPClientID %s, got %s", mcpClient.ID, mcpConfigs[0].MCPClientID)
 		}
 		if len(mcpConfigs[0].ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools, got %d", len(mcpConfigs[0].ToolsToExecute))
 		}
-		t.Logf("✓ MCP config created successfully with MCPClientID: %d", mcpConfigs[0].MCPClientID)
+		t.Logf("✓ MCP config created successfully with MCPClientID: %s", mcpConfigs[0].MCPClientID)
 	}
 
 	config1.Close(ctx)
@@ -10123,12 +10123,12 @@ func TestSQLite_VK_ProviderAndMCPConfigs_Combined(t *testing.T) {
 	}
 	if len(mcpConfigs) > 0 {
 		if mcpConfigs[0].MCPClientID != mcpClient.ID {
-			t.Errorf("Expected MCPClientID %d, got %d", mcpClient.ID, mcpConfigs[0].MCPClientID)
+			t.Errorf("Expected MCPClientID %s, got %s", mcpClient.ID, mcpConfigs[0].MCPClientID)
 		}
 		if len(mcpConfigs[0].ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools, got %d", len(mcpConfigs[0].ToolsToExecute))
 		}
-		t.Logf("✓ MCP config: MCPClientID=%d, tools=%v", mcpConfigs[0].MCPClientID, mcpConfigs[0].ToolsToExecute)
+		t.Logf("✓ MCP config: MCPClientID=%s, tools=%v", mcpConfigs[0].MCPClientID, mcpConfigs[0].ToolsToExecute)
 	}
 
 	t.Log("✓ VK with combined provider and MCP configs created successfully")
@@ -10189,7 +10189,7 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	if err != nil || calendarClient == nil {
 		t.Fatalf("CalendarService MCP client not found: %v", err)
 	}
-	t.Logf("MCP clients created: WeatherService ID=%d, CalendarService ID=%d", weatherClient.ID, calendarClient.ID)
+	t.Logf("MCP clients created: WeatherService ID=%s, CalendarService ID=%s", weatherClient.ID, calendarClient.ID)
 
 	config1.Close(ctx)
 
@@ -10297,7 +10297,7 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	}
 
 	// Build a map of MCPClientID to config for easier verification
-	configByClientID := make(map[uint]tables.TableVirtualKeyMCPConfig)
+	configByClientID := make(map[string]tables.TableVirtualKeyMCPConfig)
 	for _, mc := range mcpConfigs {
 		configByClientID[mc.MCPClientID] = mc
 	}
@@ -10305,23 +10305,23 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	// Verify WeatherService config
 	weatherConfig, ok := configByClientID[weatherClient.ID]
 	if !ok {
-		t.Errorf("MCP config for WeatherService (ID=%d) not found", weatherClient.ID)
+		t.Errorf("MCP config for WeatherService (ID=%s) not found", weatherClient.ID)
 	} else {
 		if len(weatherConfig.ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools for WeatherService, got %d", len(weatherConfig.ToolsToExecute))
 		}
-		t.Logf("✓ WeatherService MCP config: MCPClientID=%d, tools=%v", weatherConfig.MCPClientID, weatherConfig.ToolsToExecute)
+		t.Logf("✓ WeatherService MCP config: MCPClientID=%s, tools=%v", weatherConfig.MCPClientID, weatherConfig.ToolsToExecute)
 	}
 
 	// Verify CalendarService config
 	calendarConfig, ok := configByClientID[calendarClient.ID]
 	if !ok {
-		t.Errorf("MCP config for CalendarService (ID=%d) not found", calendarClient.ID)
+		t.Errorf("MCP config for CalendarService (ID=%s) not found", calendarClient.ID)
 	} else {
 		if len(calendarConfig.ToolsToExecute) != 1 || calendarConfig.ToolsToExecute[0] != "*" {
 			t.Errorf("Expected tools=[\"*\"] for CalendarService, got %v", calendarConfig.ToolsToExecute)
 		}
-		t.Logf("✓ CalendarService MCP config: MCPClientID=%d, tools=%v", calendarConfig.MCPClientID, calendarConfig.ToolsToExecute)
+		t.Logf("✓ CalendarService MCP config: MCPClientID=%s, tools=%v", calendarConfig.MCPClientID, calendarConfig.ToolsToExecute)
 	}
 
 	t.Log("✓ mcp_client_name was successfully resolved to MCPClientID")
@@ -10484,21 +10484,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4"},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
@@ -10516,21 +10516,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
 				AllowedModels: []string{"command"},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10548,21 +10548,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4"},
 			},
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
@@ -10608,7 +10608,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10626,7 +10626,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10644,7 +10644,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10690,7 +10690,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10713,7 +10713,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10736,7 +10736,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10787,21 +10787,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -10816,21 +10816,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 		},
@@ -10845,21 +10845,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -10902,9 +10902,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-a", "tool-b", "tool-c", "tool-d"},
 			},
 		},
@@ -10919,9 +10919,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-d", "tool-c", "tool-b", "tool-a"},
 			},
 		},
@@ -10936,9 +10936,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-c", "tool-a", "tool-d", "tool-b"},
 			},
 		},
@@ -10981,7 +10981,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4", "gpt-3.5-turbo"},
@@ -10991,7 +10991,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 				},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3", "claude-2"},
@@ -11002,13 +11002,13 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		},
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
-				MCPClientID:    1,
+				ID:             "1",
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 			{
-				ID:             2,
-				MCPClientID:    2,
+				ID:             "2",
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool3", "tool4"},
 			},
 		},
@@ -11023,7 +11023,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            2,
+				ID:            "2",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-2", "claude-3"}, // reversed
@@ -11032,7 +11032,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 				},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-3.5-turbo", "gpt-4"}, // reversed
@@ -11044,13 +11044,13 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		},
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             2,
-				MCPClientID:    2,
+				ID:             "2",
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool4", "tool3"}, // reversed
 			},
 			{
-				ID:             1,
-				MCPClientID:    1,
+				ID:             "1",
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool2", "tool1"}, // reversed
 			},
 		},
@@ -15641,7 +15641,7 @@ var excludedGoFields = map[string]map[string]bool{
 		"config_hash":        true,
 		"created_at":         true,
 		"updated_at":         true,
-		"created_by_user_id": true, // DB ownership metadata; set by API/session layer
+		"created_by": true, // DB ownership metadata; set by API/session layer
 		"budgets":            true, // GORM relation (budgets have virtual_key_id FK)
 		"rate_limit":         true, // GORM relation
 		"team":               true, // GORM relation

@@ -783,7 +783,7 @@ type VirtualKeyProviderConfigHashInput struct {
 
 // VirtualKeyMCPConfigHashInput represents MCP config fields for hashing
 type VirtualKeyMCPConfigHashInput struct {
-	MCPClientID    uint
+	MCPClientID    string
 	ToolsToExecute []string
 }
 

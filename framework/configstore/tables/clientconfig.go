@@ -2,14 +2,13 @@ package tables
 
 import (
 	"encoding/json"
-	"time"
 
 	"gorm.io/gorm"
 )
 
 // TableClientConfig represents global client configuration in the database
 type TableClientConfig struct {
-	ID                                    uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	ID                                    string `gorm:"primaryKey;type:uuid" json:"id"`
 	DropExcessRequests                    bool   `gorm:"default:false" json:"drop_excess_requests"`
 	PrometheusLabelsJSON                  string `gorm:"type:text" json:"-"` // JSON serialized []string
 	AllowedOriginsJSON                    string `gorm:"type:text" json:"-"` // JSON serialized []string
@@ -51,9 +50,6 @@ type TableClientConfig struct {
 	// Every time we sync the config.json file, we will update the config hash
 	ConfigHash string `gorm:"type:varchar(255);null" json:"config_hash"`
 
-	CreatedAt time.Time `gorm:"index;not null" json:"created_at"`
-	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`
-
 	// Virtual fields for runtime use (not stored in DB)
 	PrometheusLabels   []string                  `gorm:"-" json:"prometheus_labels"`
 	AllowedOrigins     []string                  `gorm:"-" json:"allowed_origins,omitempty"`
@@ -63,6 +59,8 @@ type TableClientConfig struct {
 	WhitelistedRoutes  []string                  `gorm:"-" json:"whitelisted_routes,omitempty"`
 	HeaderFilterConfig *GlobalHeaderFilterConfig `gorm:"-" json:"header_filter_config,omitempty"`
 	Metadata           map[string]any            `gorm:"-" json:"metadata,omitempty"`
+
+	SystemColumns
 }
 
 // TableName sets the table name for each model

@@ -166,9 +166,9 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 	}
 
 	// Batch-fetch all VK assignments for this page in a single query, then group by client ID.
-	assignmentsByClientID := make(map[uint][]configstoreTables.TableVirtualKeyMCPConfig)
+	assignmentsByClientID := make(map[string][]configstoreTables.TableVirtualKeyMCPConfig)
 	if h.store.ConfigStore != nil {
-		dbClientIDs := make([]uint, 0, len(dbClients))
+		dbClientIDs := make([]string, 0, len(dbClients))
 		for _, c := range dbClients {
 			dbClientIDs = append(dbClientIDs, c.ID)
 		}
