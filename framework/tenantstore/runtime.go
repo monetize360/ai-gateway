@@ -61,6 +61,49 @@ func (m *TenantDBManager) LoadAll(ctx context.Context) error {
 	return nil
 }
 
+// ListTenantIDs returns the tenant IDs currently registered in memory.
+func (m *TenantDBManager) ListTenantIDs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := make([]string, 0, len(m.stores))
+	for tenantID := range m.stores {
+		ids = append(ids, tenantID)
+	}
+	return ids
+}
+
+// SyncTenantsFromGlobalDB opens ConfigStores for tenants discovered in the global
+// tenants table that are not yet present in memory. Existing tenant connections
+// are left untouched.
+func (m *TenantDBManager) SyncTenantsFromGlobalDB(ctx context.Context) error {
+	tenantDSNs, err := m.globalDB.GetAllTenants(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load tenants from global DB: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	added := 0
+	for tenantID, dsn := range tenantDSNs {
+		if _, exists := m.stores[tenantID]; exists {
+			continue
+		}
+		store, storeErr := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.logger)
+		if storeErr != nil {
+			m.logger.Warn("skipping tenant %s during sync: failed to open config store: %v", tenantID, storeErr)
+			continue
+		}
+		m.stores[tenantID] = store
+		added++
+		m.logger.Info("tenant store loaded during sync: %s", tenantID)
+	}
+	if added > 0 {
+		m.logger.Info("tenant sync added %d store(s); %d tenant(s) ready", added, len(m.stores))
+	}
+	return nil
+}
+
 // GetStore returns the pre-loaded ConfigStore for the given tenantID.
 // Returns an error when the tenant was not found in the startup snapshot.
 // Use EvictAndReload to refresh a single tenant at runtime.

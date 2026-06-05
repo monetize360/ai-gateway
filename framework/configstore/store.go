@@ -428,20 +428,6 @@ type ConfigStore interface {
 	// for writes and internal lookups that must bypass scoping.
 	ScopedDB(ctx context.Context) *gorm.DB
 
-	// RunMigration opens a throwaway *gorm.DB against the same
-	// backing database, invokes fn with it, and closes the connection. Use
-	// this for DDL (typically downstream-consumer migrations) that must not
-	// leave cached prepared-statement plans on the runtime pool.
-	//
-	// After fn returns successfully, callers should invoke
-	// RefreshConnectionPool if the migration altered tables the runtime pool
-	// has already queried — otherwise SQLSTATE 0A000 can surface on reads
-	// whose cached plans predate the DDL.
-	//
-	// For SQLite backends, this is a pass-through that runs fn on the
-	// existing connection (no server-side plan cache, single-writer lock).
-	RunMigration(ctx context.Context, fn func(context.Context, *gorm.DB) error) error
-
 	// RefreshConnectionPool tears down the runtime pool and opens a fresh
 	// one against the same configuration. In-flight queries on the old
 	// pool complete before it closes; subsequent DB() calls return the new

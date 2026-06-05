@@ -48,3 +48,31 @@ func (r *TenantConfigRegistry) GetStoreFromContext(ctx context.Context) configst
 func (r *TenantConfigRegistry) DefaultStore() configstore.ConfigStore {
 	return r.defaultStore
 }
+
+// ListTenantIDs returns the tenant IDs currently registered with the manager.
+func (r *TenantConfigRegistry) ListTenantIDs(_ context.Context) []string {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	return r.manager.ListTenantIDs()
+}
+
+// SyncTenants discovers new tenants from the global DB and opens their stores.
+func (r *TenantConfigRegistry) SyncTenants(ctx context.Context) error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	return r.manager.SyncTenantsFromGlobalDB(ctx)
+}
+
+// GetStoreForTenant returns the ConfigStore for a specific tenant ID.
+func (r *TenantConfigRegistry) GetStoreForTenant(ctx context.Context, tenantID string) configstore.ConfigStore {
+	if r == nil || r.manager == nil || tenantID == "" {
+		return nil
+	}
+	store, err := r.manager.GetStore(ctx, tenantID)
+	if err != nil || store == nil {
+		return nil
+	}
+	return store
+}

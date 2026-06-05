@@ -222,6 +222,16 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	return store, nil
 }
 
+// RefreshFromDatabase reloads all governance entities from the backing config store
+// into memory. Callers should flush in-memory usage counters to the database
+// before refreshing when usage tracking is active.
+func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	return gs.loadFromDatabase(ctx)
+}
+
 // LoadBudget loads a budget by its ID from the local store.
 func (gs *LocalGovernanceStore) LoadBudget(ctx context.Context, budgetID string) *configstoreTables.TableBudget {
 	if budget, ok := gs.budgets.Load(budgetID); ok {

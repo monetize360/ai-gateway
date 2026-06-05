@@ -26,13 +26,12 @@ import (
 // RDBConfigStore represents a configuration store that uses a relational database.
 //
 // The runtime *gorm.DB is held behind an atomic.Pointer so RefreshConnectionPool
-// can swap it out without tearing callers down. migrateOnFreshFn and refreshPoolFn
-// are backend-specific hooks installed by the constructor (postgres vs sqlite).
+// can swap it out without tearing callers down.
 type RDBConfigStore struct {
-	db               atomic.Pointer[gorm.DB]
-	logger           schemas.Logger
+	db            atomic.Pointer[gorm.DB]
+	logger        schemas.Logger
 	migrateOnFreshFn func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error
-	refreshPoolFn    func(ctx context.Context) error
+	refreshPoolFn func(ctx context.Context) error
 }
 
 // getWeight safely dereferences a *float64 weight pointer, returning 1.0 as default if nil.
@@ -305,34 +304,10 @@ func (s *RDBConfigStore) ScopedDB(ctx context.Context) *gorm.DB {
 	return db
 }
 
-// RunMigration opens a throwaway connection against the same
-// backing database, invokes fn with it, and closes the connection. Use this
-// for DDL that must not leave cached prepared-statement plans on the runtime
-// pool. After fn returns, callers should invoke RefreshConnectionPool if the
-// migration altered tables the runtime pool has already queried.
-//
-// For SQLite, the throwaway concept doesn't apply (no server-side plan cache,
-// single-writer file lock), so this runs fn against the existing *gorm.DB.
-//
-// Returns an error if the store was constructed without a migration hook
-// wired — e.g. a direct `&RDBConfigStore{}` literal that skipped the
-// newPostgresConfigStore / newSqliteConfigStore constructor. An explicit
-// error is safer than a silent fallback to the runtime pool: running DDL
-// on the runtime pool would reintroduce SQLSTATE 0A000.
-func (s *RDBConfigStore) RunMigration(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
-	if s.migrateOnFreshFn == nil {
-		return fmt.Errorf("configstore: migration hook is not configured; construct the store via newPostgresConfigStore or newSqliteConfigStore")
-	}
-	return s.migrateOnFreshFn(ctx, fn)
-}
-
 // RefreshConnectionPool closes the runtime pool and opens a fresh one against
 // the same configuration. In-flight queries on the old pool complete before
 // it closes; subsequent DB() calls return the new pool, whose connections
 // carry no cached plans. SQLite is a no-op.
-//
-// Returns an error if the store was constructed without a refresh hook wired
-// (same rationale as RunMigration).
 func (s *RDBConfigStore) RefreshConnectionPool(ctx context.Context) error {
 	if s.refreshPoolFn == nil {
 		return fmt.Errorf("configstore: refresh hook is not configured; construct the store via newPostgresConfigStore or newSqliteConfigStore")

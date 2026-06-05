@@ -28,9 +28,7 @@ func buildPostgresDSN(config *PostgresConfig) string {
 		config.Password.GetValue(), config.DBName.GetValue(), config.SSLMode.GetValue())
 }
 
-// openPostresConnection opens a *gorm.DB against the configured Postgres instance
-// using the shared bifrost logger. Used for both the throwaway migration pool
-// and the runtime pool.
+// openPostresConnection opens a *gorm.DB against the configured Postgres instance.
 func openPostresConnection(dsn string, logger schemas.Logger) (*gorm.DB, error) {
 	return gorm.Open(postgres.New(postgres.Config{DSN: dsn}), &gorm.Config{
 		Logger: newGormLogger(logger),
@@ -38,7 +36,6 @@ func openPostresConnection(dsn string, logger schemas.Logger) (*gorm.DB, error) 
 }
 
 // closeDbConn closes the *sql.DB backing a *gorm.DB, logging any error.
-// Used in error paths and for the throwaway migration pool.
 func closeDbConn(db *gorm.DB, logger schemas.Logger) {
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -72,11 +69,7 @@ func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
 }
 
 // NewPostgresConfigStoreFromDSN creates a Postgres ConfigStore from a pre-built
-// connection string. Useful when the full host/port/user/password breakdown is
-// not required (e.g. per-tenant DSNs stored in a control-plane database).
-//
-// Schema migrations are intentionally not run here: per-tenant databases are
-// provisioned and migrated by MPilot (Liquibase finops changelogs). Bifrost
+// connection string. Schema management is the caller's responsibility; Bifrost
 // only opens a runtime pool and reads/writes existing tables.
 func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schemas.Logger) (ConfigStore, error) {
 	db, err := openPostresConnection(dsn, logger)
@@ -87,16 +80,9 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schem
 	d := &RDBConfigStore{logger: logger}
 	d.db.Store(db)
 
-	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
 	d.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
-		tempDB, err := openPostresConnection(migrationDSN, logger)
-		if err != nil {
-			return err
-		}
-		defer closeDbConn(tempDB, logger)
-		return fn(ctx, tempDB)
+		return fn(ctx, d.DB())
 	}
-
 	d.refreshPoolFn = func(ctx context.Context) error {
 		newDB, err := openPostresConnection(dsn, logger)
 		if err != nil {
@@ -117,12 +103,6 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schem
 }
 
 // newPostgresConfigStore creates a new Postgres config store.
-//
-// Uses a two-pool lifecycle to avoid SQLSTATE 0A000 ("cached plan must not
-// change result type"): a throwaway migration pool runs DDL and is closed
-// immediately, then a fresh runtime pool is opened. The runtime pool's
-// connections never see pre-migration schema, so their cached prepared-plans
-// stay valid for the life of the process.
 func newPostgresConfigStore(ctx context.Context, config *PostgresConfig, logger schemas.Logger) (ConfigStore, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
@@ -147,26 +127,7 @@ func newPostgresConfigStore(ctx context.Context, config *PostgresConfig, logger 
 	}
 	dsn := buildPostgresDSN(config)
 
-	// Migration-only DSN. Forces pgx into simple-query protocol on the migration
-	// pool so no statement plan is ever cached server-side; that makes SQLSTATE
-	// 0A000 ("cached plan must not change result type") structurally impossible
-	// when a migration mixes DDL with subsequent SELECTs against the same table.
-	// Runtime pools keep the default cache-statement mode for performance.
-	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
-
-	// Throwaway pool for schema migrations. Closing it before the runtime pool
-	// opens guarantees no cached prepared-plan survives the DDL.
-	mDb, err := openPostresConnection(migrationDSN, logger)
-	if err != nil {
-		return nil, err
-	}
-	if err := triggerMigrations(ctx, mDb); err != nil {
-		closeDbConn(mDb, logger)
-		return nil, err
-	}
-	closeDbConn(mDb, logger)
-
-	// Runtime pool. Opens against post-migration schema.
+	// Runtime pool.
 	db, err := openPostresConnection(dsn, logger)
 	if err != nil {
 		return nil, err
@@ -176,18 +137,16 @@ func newPostgresConfigStore(ctx context.Context, config *PostgresConfig, logger 
 		return nil, err
 	}
 
+	if err := autoMigrateConfigTables(db); err != nil {
+		closeDbConn(db, logger)
+		return nil, fmt.Errorf("failed to auto-migrate configstore tables: %w", err)
+	}
+
 	d := &RDBConfigStore{logger: logger}
 	d.db.Store(db)
 
-	// migrateOnFreshFn: downstream consumers (e.g. bifrost-enterprise) run
-	// their migrations via this hook on a throwaway pool that closes after fn.
 	d.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
-		tempDB, err := openPostresConnection(migrationDSN, logger)
-		if err != nil {
-			return err
-		}
-		defer closeDbConn(tempDB, logger)
-		return fn(ctx, tempDB)
+		return fn(ctx, d.DB())
 	}
 
 	// refreshPoolFn: open fresh runtime pool first (so a failure leaves the

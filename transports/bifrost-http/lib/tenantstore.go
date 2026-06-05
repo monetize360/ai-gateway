@@ -3,6 +3,7 @@ package lib
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -138,4 +139,14 @@ func GetAccessKeyFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(schemas.BifrostContextKeyAccessKey).(string)
 	return v
+}
+
+// TenantGovernanceSyncInterval returns how often per-tenant governance stores
+// should be refreshed from the database. Defaults to 10s when unset.
+func TenantGovernanceSyncInterval(cfg *TenantStoreFileConfig) time.Duration {
+	const defaultInterval = 10 * time.Second
+	if cfg == nil || cfg.RefreshIntervalSeconds <= 0 {
+		return defaultInterval
+	}
+	return time.Duration(cfg.RefreshIntervalSeconds) * time.Second
 }

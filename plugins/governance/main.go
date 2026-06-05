@@ -102,6 +102,8 @@ type GovernancePlugin struct {
 	// per-tenant GovernanceStore + BudgetResolver instances keyed by tenantID.
 	tenantConfigProvider TenantConfigProvider
 	tenantComponents     sync.Map // string (tenantID) → *tenantGovernanceComponents
+	tenantSyncOnce       sync.Once
+	tenantSyncCancel     context.CancelFunc
 
 	cfgMutex sync.RWMutex
 
@@ -390,22 +392,16 @@ func (p *GovernancePlugin) getStoreAndResolverForContext(ctx context.Context) (G
 		return p.store, p.resolver
 	}
 
-	store, err := NewLocalGovernanceStore(ctx, p.logger, configStore, nil, p.modelCatalog)
-	if err != nil {
-		p.logger.Warn("failed to initialise governance store for tenant %s: %v; using default store", tenantID, err)
+	store := p.initTenantGovernanceStore(ctx, tenantID, configStore)
+	if store == nil {
 		return p.store, p.resolver
 	}
-	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
-
-	comp := &tenantGovernanceComponents{store: store, resolver: resolver}
-	// LoadOrStore: if another goroutine raced us, discard ours and use theirs.
-	if actual, loaded := p.tenantComponents.LoadOrStore(tenantID, comp); loaded {
-		if existing, ok := actual.(*tenantGovernanceComponents); ok {
-			return existing.store, existing.resolver
+	if raw, ok := p.tenantComponents.Load(tenantID); ok {
+		if comp, ok := raw.(*tenantGovernanceComponents); ok && comp != nil {
+			return comp.store, comp.resolver
 		}
 	}
-
-	p.logger.Info("tenant governance store initialised for tenant %s", tenantID)
+	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
 	return store, resolver
 }
 
@@ -1784,6 +1780,9 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 func (p *GovernancePlugin) Cleanup() error {
 	var cleanupErr error
 	p.cleanupOnce.Do(func() {
+		if p.tenantSyncCancel != nil {
+			p.tenantSyncCancel()
+		}
 		if p.cancelFunc != nil {
 			p.cancelFunc()
 		}

@@ -2,7 +2,7 @@
   "$schema": "https://www.getbifrost.ai/schema",
   "tenant_store": {
     "enabled": true,
-    "refresh_interval_seconds": 300,
+    "refresh_interval_seconds": 10,
     "global": {
       "host": "localhost",
       "port": "5432",

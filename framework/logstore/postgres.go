@@ -63,13 +63,6 @@ func resolveMatViewRefreshInterval(raw string, logger schemas.Logger) time.Durat
 }
 
 // newPostgresLogStore creates a new Postgres log store.
-//
-// Uses a two-pool lifecycle to avoid SQLSTATE 0A000 ("cached plan must not
-// change result type"): a throwaway pool runs the version check and schema
-// migrations and is closed immediately, then a fresh runtime pool is opened
-// for query traffic and the async index / matview builders. The runtime
-// pool's connections never see pre-migration schema, so their cached
-// prepared-plans stay valid for the life of the process.
 func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger schemas.Logger) (LogStore, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
@@ -95,22 +88,12 @@ func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger sch
 	}
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s", config.Host.GetValue(), config.Port.GetValue(), config.User.GetValue(), config.Password.GetValue(), config.DBName.GetValue(), config.SSLMode.GetValue())
 
-	// Migration-only DSN. Forces pgx into simple-query protocol on the throwaway
-	// migration pool so no statement plan is ever cached server-side; that makes
-	// SQLSTATE 0A000 ("cached plan must not change result type") structurally
-	// impossible when a migration mixes DDL with subsequent SELECTs against the
-	// same table. Runtime pool keeps the default cache-statement mode.
-	migrationDSN := dsn + " default_query_exec_mode=simple_protocol"
-
 	openPool := func(connDSN string) (*gorm.DB, error) {
 		return gorm.Open(postgres.New(postgres.Config{DSN: connDSN}), &gorm.Config{
 			Logger: newGormLogger(logger),
 		})
 	}
 
-	// closePoolStrict returns the close error so callers can abort startup
-	// when the throwaway migration pool doesn't tear down cleanly — a half-
-	// closed pool weakens the guarantee that no cached plans survive DDL.
 	closePool := func(db *gorm.DB) error {
 		if db == nil {
 			return nil
@@ -122,34 +105,7 @@ func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger sch
 		return sqlDB.Close()
 	}
 
-	// Throwaway pool for the version gate and schema migrations. Closing it
-	// before the runtime pool opens guarantees no cached plan survives DDL.
-	mDb, err := openPool(migrationDSN)
-	if err != nil {
-		return nil, err
-	}
-
-	// Postgres version gate: refuse to start below 16 (matviews, partitioning,
-	// and some JSON operators we rely on depend on 16+).
-	var pgVersionNum int
-	if err := mDb.Raw("SELECT current_setting('server_version_num')::int").Scan(&pgVersionNum).Error; err != nil {
-		_ = closePool(mDb)
-		return nil, err
-	}
-	if pgVersionNum < 160000 {
-		_ = closePool(mDb)
-		return nil, fmt.Errorf("postgres version is lower than 16, please upgrade to 16 or higher")
-	}
-
-	if err := triggerMigrations(ctx, mDb); err != nil {
-		_ = closePool(mDb)
-		return nil, err
-	}
-	if err := closePool(mDb); err != nil {
-		return nil, fmt.Errorf("close migration db connection: %w", err)
-	}
-
-	// Runtime pool. Opens against post-migration schema.
+	// Runtime pool.
 	db, err := openPool(dsn)
 	if err != nil {
 		return nil, err
@@ -174,6 +130,12 @@ func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger sch
 		maxOpenConns = 50
 	}
 	sqlDB.SetMaxOpenConns(maxOpenConns)
+
+	if err := db.AutoMigrate(&Log{}, &MCPToolLog{}, &AsyncJob{}); err != nil {
+		closePool(db)
+		return nil, fmt.Errorf("failed to auto-migrate logstore tables: %w", err)
+	}
+
 	d := &RDBLogStore{db: db, logger: logger}
 
 	// Run all index builds sequentially in a single goroutine to prevent

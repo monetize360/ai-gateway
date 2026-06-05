@@ -1401,6 +1401,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if s.Config.TenantStore != nil && s.Config.TenantStore.Registry != nil {
 		if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
 			govPlugin.SetTenantConfigProvider(s.Config.TenantStore.Registry)
+			govPlugin.StartTenantGovernanceSync(lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
 			logger.Info("governance plugin configured for multi-tenant store routing")
 		} else {
 			logger.Warn("multi-tenant mode enabled but governance plugin not found: %v", govErr)
