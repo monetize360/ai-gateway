@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 	bifrost "github.com/maximhq/bifrost/core"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -1998,6 +1999,20 @@ func (s *RDBConfigStore) GetModelPrices(ctx context.Context) ([]tables.TableMode
 	return modelPrices, nil
 }
 
+func prepareCatalogUpsertRow(id *string, system *tables.SystemColumns) {
+	if id != nil && *id == "" {
+		*id = uuid.NewString()
+	}
+	if system == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if system.CreatedAt.IsZero() {
+		system.CreatedAt = now
+	}
+	system.UpdatedAt = now
+}
+
 // UpsertModelPrices creates or updates a model pricing record in the database.
 // Uses a single atomic ON CONFLICT statement to avoid deadlocks in multinode deployments
 // where multiple nodes may attempt concurrent upserts for the same model on startup.
@@ -2009,6 +2024,8 @@ func (s *RDBConfigStore) UpsertModelPrices(ctx context.Context, pricing *tables.
 		txDB = s.DB()
 	}
 	db := txDB.WithContext(ctx)
+
+	prepareCatalogUpsertRow(&pricing.ID, &pricing.SystemColumns)
 
 	if err := db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "model"}, {Name: "provider"}, {Name: "mode"}},
@@ -2195,9 +2212,14 @@ func (s *RDBConfigStore) UpsertModelParameters(ctx context.Context, params *tabl
 	}
 	db := txDB.WithContext(ctx)
 
+	prepareCatalogUpsertRow(&params.ID, &params.SystemColumns)
+
 	if err := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "model"}},
-		UpdateAll: true,
+		Columns: []clause.Column{{Name: "model"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"data",
+			"updated_at",
+		}),
 	}).Create(params).Error; err != nil {
 		return s.parseGormError(err)
 	}

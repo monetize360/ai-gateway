@@ -1345,6 +1345,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		s.Config.TenantStore = tenantHolder
 		if tenantHolder != nil {
 			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey)
+			lib.WireTenantModelCatalogSync(ctx, tenantHolder, s.Config.ModelCatalog, s.Config.ConfigStore, logger)
 		}
 	}
 	if s.Config.KVStore != nil {

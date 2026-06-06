@@ -7,7 +7,14 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/tenantstore"
+)
+
+const (
+	modelCatalogTenantPricingStartupSyncLock = "model_catalog_tenant_pricing_startup_sync"
+	modelCatalogTenantParamsStartupSyncLock  = "model_catalog_tenant_params_startup_sync"
+	distributedLockRetryAttempts             = 10
 )
 
 // TenantStoreFileConfig is the config.json shape for multi-tenant mode.
@@ -32,10 +39,11 @@ type TenantStoreGlobalPostgresFile struct {
 // TenantStoreHolder wires the per-tenant ConfigStore registry and JWT verification
 // key into the HTTP transport layer.
 type TenantStoreHolder struct {
-	Registry *tenantstore.TenantConfigRegistry
-	Manager  *tenantstore.TenantDBManager
-	GlobalDB *tenantstore.GlobalDB
-	JWTKey   []byte
+	Registry           *tenantstore.TenantConfigRegistry
+	Manager            *tenantstore.TenantDBManager
+	GlobalDB           *tenantstore.GlobalDB
+	JWTKey             []byte
+	catalogLockManager *configstore.DistributedLockManager
 }
 
 // Close releases global DB and per-tenant connection pools.
@@ -91,13 +99,127 @@ func InitTenantStore(
 	registry := tenantstore.NewTenantConfigRegistry(manager, defaultStore)
 
 	holder := &TenantStoreHolder{
-		Registry: registry,
-		Manager:  manager,
-		GlobalDB: globalDB,
-		JWTKey:   jwtKey,
+		Registry:           registry,
+		Manager:            manager,
+		GlobalDB:           globalDB,
+		JWTKey:             jwtKey,
+		catalogLockManager: newCatalogDistributedLockManager(defaultStore, logger),
 	}
+
+	// Best-effort: copy model pricing/parameters already present in the default
+	// config store into each tenant DB. A follow-up sync runs after ModelCatalog
+	// finishes any background cloud fetch (see WireTenantModelCatalogSync).
+	holder.syncModelCatalogToTenantsLocked(ctx, defaultStore, logger)
+
 	logger.Info("multi-tenant mode enabled")
 	return holder, nil
+}
+
+func newCatalogDistributedLockManager(sourceStore configstore.ConfigStore, logger schemas.Logger) *configstore.DistributedLockManager {
+	if sourceStore == nil {
+		return nil
+	}
+	return configstore.NewDistributedLockManager(
+		sourceStore,
+		logger,
+		configstore.WithDefaultTTL(30*time.Second),
+	)
+}
+
+func withDistributedLock(
+	ctx context.Context,
+	lockManager *configstore.DistributedLockManager,
+	logger schemas.Logger,
+	key string,
+	retries int,
+	fn func() error,
+) error {
+	if lockManager == nil {
+		return fn()
+	}
+	lock, err := lockManager.NewLock(key)
+	if err != nil {
+		return fmt.Errorf("failed to create lock %q: %w", key, err)
+	}
+	if retries > 0 {
+		if err := lock.LockWithRetry(ctx, retries); err != nil {
+			return fmt.Errorf("failed to acquire lock %q: %w", key, err)
+		}
+	} else if err := lock.Lock(ctx); err != nil {
+		return fmt.Errorf("failed to acquire lock %q: %w", key, err)
+	}
+	defer func() {
+		if err := lock.Unlock(context.Background()); err != nil {
+			logger.Warn("failed to release distributed lock %q: %v", key, err)
+		}
+	}()
+	return fn()
+}
+
+func (h *TenantStoreHolder) syncModelCatalogToTenantsLocked(
+	ctx context.Context,
+	sourceStore configstore.ConfigStore,
+	logger schemas.Logger,
+) {
+	if h == nil || h.Manager == nil || sourceStore == nil {
+		return
+	}
+	lockManager := h.catalogLockManager
+	if lockManager == nil {
+		lockManager = newCatalogDistributedLockManager(sourceStore, logger)
+	}
+
+	if err := withDistributedLock(ctx, lockManager, logger, modelCatalogTenantPricingStartupSyncLock, distributedLockRetryAttempts, func() error {
+		tenantstore.SyncModelCatalogPricingToAllTenants(ctx, h.Manager, sourceStore, logger)
+		return nil
+	}); err != nil {
+		logger.Warn("tenant model catalog pricing startup sync failed: %v", err)
+	} else {
+		logger.Info("tenant model catalog pricing startup sync completed successfully")
+	}
+
+	if err := withDistributedLock(ctx, lockManager, logger, modelCatalogTenantParamsStartupSyncLock, distributedLockRetryAttempts, func() error {
+		tenantstore.SyncModelCatalogParametersToAllTenants(ctx, h.Manager, sourceStore, logger)
+		return nil
+	}); err != nil {
+		logger.Warn("tenant model catalog parameters startup sync failed: %v", err)
+	} else {
+		logger.Info("tenant model catalog parameters startup sync completed successfully")
+	}
+}
+
+// SyncModelCatalogToTenants copies model pricing and parameters from the default
+// config store into every tenant database.
+func (h *TenantStoreHolder) SyncModelCatalogToTenants(ctx context.Context, sourceStore configstore.ConfigStore, logger schemas.Logger) {
+	h.syncModelCatalogToTenantsLocked(ctx, sourceStore, logger)
+}
+
+// WireTenantModelCatalogSync registers a ModelCatalog after-sync hook that
+// replicates cloud-synced pricing/parameters into tenant databases, and waits
+// for any startup background cloud fetch before running the first replication.
+func WireTenantModelCatalogSync(
+	ctx context.Context,
+	holder *TenantStoreHolder,
+	catalog *modelcatalog.ModelCatalog,
+	sourceStore configstore.ConfigStore,
+	logger schemas.Logger,
+) {
+	if holder == nil || catalog == nil || sourceStore == nil {
+		return
+	}
+
+	syncTenants := func(syncCtx context.Context) {
+		holder.syncModelCatalogToTenantsLocked(syncCtx, sourceStore, logger)
+	}
+
+	catalog.SetAfterSyncHook(syncTenants)
+
+	go func() {
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		catalog.WaitStartupBackgroundSync(waitCtx)
+		syncTenants(waitCtx)
+	}()
 }
 
 func postgresConfigFromFile(cfg *TenantStoreGlobalPostgresFile) *tenantstore.PostgresConfig {

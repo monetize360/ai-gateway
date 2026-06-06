@@ -59,6 +59,7 @@ type ModelCatalog struct {
 	syncTicker *time.Ticker
 	done       chan struct{}
 	wg         sync.WaitGroup
+	startupBgWG sync.WaitGroup // background URL syncs spawned during Init when DB already has rows
 	syncCtx    context.Context
 	syncCancel context.CancelFunc
 }
@@ -156,9 +157,9 @@ func Init(ctx context.Context, config *Config, configStore configstore.ConfigSto
 			mc.mu.RUnlock()
 			if hasPricingData {
 				mc.logger.Info("existing pricing data found in database, syncing from URL in background")
-				mc.wg.Add(1)
+				mc.startupBgWG.Add(1)
 				go func() {
-					defer mc.wg.Done()
+					defer mc.startupBgWG.Done()
 					if err := mc.withDistributedLock(mc.syncCtx, "model_catalog_pricing_startup_sync", 10, func() error {
 						return mc.syncPricing(mc.syncCtx)
 					}); err != nil {
@@ -184,9 +185,9 @@ func Init(ctx context.Context, config *Config, configStore configstore.ConfigSto
 			}
 			if n > 0 {
 				mc.logger.Info("existing model parameters found in database (%d records), syncing from URL in background", n)
-				mc.wg.Add(1)
+				mc.startupBgWG.Add(1)
 				go func() {
-					defer mc.wg.Done()
+					defer mc.startupBgWG.Done()
 					if err := mc.withDistributedLock(mc.syncCtx, "model_catalog_params_startup_sync", 10, func() error {
 						return mc.syncModelParameters(mc.syncCtx)
 					}); err != nil {
@@ -245,6 +246,23 @@ func (mc *ModelCatalog) SetShouldSyncGate(shouldSyncGate func(ctx context.Contex
 // In enterprise this is used to broadcast a gossip message so other pods reload from DB.
 func (mc *ModelCatalog) SetAfterSyncHook(fn func(ctx context.Context)) {
 	mc.afterSyncHook = fn
+}
+
+// WaitStartupBackgroundSync blocks until any background cloud sync goroutines started
+// during Init have finished, or until ctx is cancelled.
+func (mc *ModelCatalog) WaitStartupBackgroundSync(ctx context.Context) {
+	if mc == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		mc.startupBgWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+	case <-done:
+	}
 }
 
 // ReloadFromDB reloads the in-memory pricing cache and model-parameters provider cache from the database.
