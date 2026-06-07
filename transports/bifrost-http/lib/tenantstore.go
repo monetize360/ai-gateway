@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/tenantstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
@@ -16,6 +17,8 @@ import (
 type TenantStoreFileConfig struct {
 	Enabled                bool                           `json:"enabled"`
 	RefreshIntervalSeconds int                            `json:"refresh_interval_seconds,omitempty"`
+	MaxIdleConns           int                            `json:"max_idle_conns,omitempty"`
+	MaxOpenConns           int                            `json:"max_open_conns,omitempty"`
 	Global                 *TenantStoreGlobalPostgresFile `json:"global,omitempty"`
 	JWTPublicKey           string                         `json:"jwt_public_key,omitempty"`
 	JWTSecret              string                         `json:"jwt_secret,omitempty"`
@@ -23,12 +26,14 @@ type TenantStoreFileConfig struct {
 
 // TenantStoreGlobalPostgresFile holds plain-string postgres settings for the global DB.
 type TenantStoreGlobalPostgresFile struct {
-	Host     string `json:"host"`
-	Port     string `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-	DBName   string `json:"db_name"`
-	SSLMode  string `json:"ssl_mode"`
+	Host         string `json:"host"`
+	Port         string `json:"port"`
+	User         string `json:"user"`
+	Password     string `json:"password"`
+	DBName       string `json:"db_name"`
+	SSLMode      string `json:"ssl_mode"`
+	MaxIdleConns int    `json:"max_idle_conns,omitempty"`
+	MaxOpenConns int    `json:"max_open_conns,omitempty"`
 }
 
 // TenantStoreHolder wires the per-tenant ConfigStore registry and JWT verification
@@ -82,7 +87,7 @@ func InitTenantStore(
 		return nil, fmt.Errorf("failed to initialise global tenant DB: %w", err)
 	}
 
-	manager := tenantstore.NewTenantDBManager(globalDB, logger)
+	manager := tenantstore.NewTenantDBManager(globalDB, tenantPoolSettingsFromFile(cfg), logger)
 
 	if err := manager.LoadAll(ctx); err != nil {
 		return nil, fmt.Errorf("failed to load tenant stores: %w", err)
@@ -157,12 +162,24 @@ func postgresConfigFromFile(cfg *TenantStoreGlobalPostgresFile) *tenantstore.Pos
 		port = "5432"
 	}
 	return &tenantstore.PostgresConfig{
-		Host:     schemas.NewEnvVar(cfg.Host),
-		Port:     schemas.NewEnvVar(port),
-		User:     schemas.NewEnvVar(cfg.User),
-		Password: schemas.NewEnvVar(cfg.Password),
-		DBName:   schemas.NewEnvVar(cfg.DBName),
-		SSLMode:  schemas.NewEnvVar(sslMode),
+		Host:         schemas.NewEnvVar(cfg.Host),
+		Port:         schemas.NewEnvVar(port),
+		User:         schemas.NewEnvVar(cfg.User),
+		Password:     schemas.NewEnvVar(cfg.Password),
+		DBName:       schemas.NewEnvVar(cfg.DBName),
+		SSLMode:      schemas.NewEnvVar(sslMode),
+		MaxIdleConns: cfg.MaxIdleConns,
+		MaxOpenConns: cfg.MaxOpenConns,
+	}
+}
+
+func tenantPoolSettingsFromFile(cfg *TenantStoreFileConfig) configstore.PostgresPoolSettings {
+	if cfg == nil {
+		return configstore.PostgresPoolSettings{}
+	}
+	return configstore.PostgresPoolSettings{
+		MaxIdleConns: cfg.MaxIdleConns,
+		MaxOpenConns: cfg.MaxOpenConns,
 	}
 }
 

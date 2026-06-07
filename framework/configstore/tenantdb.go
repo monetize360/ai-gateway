@@ -2,7 +2,7 @@
 //
 // Per-tenant ConfigStore instances are created by
 // NewPostgresConfigStoreFromDSN (see postgres.go), which accepts a pre-built
-// connection string rather than the full PostgresConfig struct. Tenant schema
+// connection string and PostgresPoolSettings for sql.DB pool tuning. Tenant schema
 // is owned by MPilot Liquibase; Bifrost does not run triggerMigrations on
 // tenant databases. Used by framework/tenantstore.TenantDBManager at startup.
 //

@@ -13,18 +13,20 @@ import (
 // Stores are initialised eagerly at startup via LoadAll; after that every request
 // hits only a read lock for O(1) access.
 type TenantDBManager struct {
-	mu       sync.RWMutex
-	stores   map[string]configstore.ConfigStore // tenantID → ConfigStore (populated at startup)
-	globalDB *GlobalDB
-	logger   schemas.Logger
+	mu           sync.RWMutex
+	stores       map[string]configstore.ConfigStore // tenantID → ConfigStore (populated at startup)
+	globalDB     *GlobalDB
+	poolSettings configstore.PostgresPoolSettings
+	logger       schemas.Logger
 }
 
 // NewTenantDBManager creates a TenantDBManager backed by the supplied GlobalDB.
-func NewTenantDBManager(globalDB *GlobalDB, logger schemas.Logger) *TenantDBManager {
+func NewTenantDBManager(globalDB *GlobalDB, pool configstore.PostgresPoolSettings, logger schemas.Logger) *TenantDBManager {
 	return &TenantDBManager{
-		stores:   make(map[string]configstore.ConfigStore),
-		globalDB: globalDB,
-		logger:   logger,
+		stores:       make(map[string]configstore.ConfigStore),
+		globalDB:     globalDB,
+		poolSettings: pool,
+		logger:       logger,
 	}
 }
 
@@ -44,7 +46,7 @@ func (m *TenantDBManager) LoadAll(ctx context.Context) error {
 
 	stores := make(map[string]configstore.ConfigStore, len(tenantDSNs))
 	for tenantID, dsn := range tenantDSNs {
-		store, storeErr := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.logger)
+		store, storeErr := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.poolSettings, m.logger)
 		if storeErr != nil {
 			m.logger.Warn("skipping tenant %s: failed to open config store: %v", tenantID, storeErr)
 			continue
@@ -89,7 +91,7 @@ func (m *TenantDBManager) SyncTenantsFromGlobalDB(ctx context.Context) error {
 		if _, exists := m.stores[tenantID]; exists {
 			continue
 		}
-		store, storeErr := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.logger)
+		store, storeErr := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.poolSettings, m.logger)
 		if storeErr != nil {
 			m.logger.Warn("skipping tenant %s during sync: failed to open config store: %v", tenantID, storeErr)
 			continue
@@ -127,7 +129,7 @@ func (m *TenantDBManager) EvictAndReload(ctx context.Context, tenantID string) e
 	if err != nil {
 		return fmt.Errorf("failed to resolve DSN for tenant %q: %w", tenantID, err)
 	}
-	store, err := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.logger)
+	store, err := configstore.NewPostgresConfigStoreFromDSN(ctx, dsn, m.poolSettings, m.logger)
 	if err != nil {
 		return fmt.Errorf("failed to open config store for tenant %q: %w", tenantID, err)
 	}

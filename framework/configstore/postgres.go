@@ -47,20 +47,24 @@ func closeDbConn(db *gorm.DB, logger schemas.Logger) {
 	}
 }
 
-// applyPostgresPoolTuning applies MaxIdleConns / MaxOpenConns from config to
-// the supplied *gorm.DB, falling back to defaults when the config leaves the
-// field at zero.
-func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
+// PostgresPoolSettings holds sql.DB pool limits for Postgres connections.
+// Zero values use package defaults (5 idle, 50 open).
+type PostgresPoolSettings struct {
+	MaxIdleConns int
+	MaxOpenConns int
+}
+
+func (p PostgresPoolSettings) apply(db *gorm.DB) error {
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
-	maxIdleConns := config.MaxIdleConns
+	maxIdleConns := p.MaxIdleConns
 	if maxIdleConns == 0 {
 		maxIdleConns = 5
 	}
 	sqlDB.SetMaxIdleConns(maxIdleConns)
-	maxOpenConns := config.MaxOpenConns
+	maxOpenConns := p.MaxOpenConns
 	if maxOpenConns == 0 {
 		maxOpenConns = 50
 	}
@@ -68,13 +72,27 @@ func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
 	return nil
 }
 
+// applyPostgresPoolTuning applies MaxIdleConns / MaxOpenConns from config to
+// the supplied *gorm.DB, falling back to defaults when the config leaves the
+// field at zero.
+func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
+	return PostgresPoolSettings{
+		MaxIdleConns: config.MaxIdleConns,
+		MaxOpenConns: config.MaxOpenConns,
+	}.apply(db)
+}
+
 // NewPostgresConfigStoreFromDSN creates a Postgres ConfigStore from a pre-built
 // connection string. Schema management is the caller's responsibility; Bifrost
 // only opens a runtime pool and reads/writes existing tables.
-func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schemas.Logger) (ConfigStore, error) {
+func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, pool PostgresPoolSettings, logger schemas.Logger) (ConfigStore, error) {
 	db, err := openPostresConnection(dsn, logger)
 	if err != nil {
 		return nil, err
+	}
+	if err := pool.apply(db); err != nil {
+		closeDbConn(db, logger)
+		return nil, fmt.Errorf("failed to tune tenant DB pool: %w", err)
 	}
 
 	d := &RDBConfigStore{logger: logger}
@@ -87,6 +105,10 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, logger schem
 		newDB, err := openPostresConnection(dsn, logger)
 		if err != nil {
 			return fmt.Errorf("failed to open fresh runtime pool: %w", err)
+		}
+		if err := pool.apply(newDB); err != nil {
+			closeDbConn(newDB, logger)
+			return fmt.Errorf("failed to tune fresh runtime pool: %w", err)
 		}
 		oldDB := d.db.Swap(newDB)
 		if oldDB != nil {
