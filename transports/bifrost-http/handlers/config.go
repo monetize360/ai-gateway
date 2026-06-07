@@ -92,11 +92,11 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 	mapConfig := make(map[string]any)
 
 	if query := string(ctx.QueryArgs().Peek("from_db")); query == "true" {
-		if h.store.ConfigStore == nil {
+		if h.store.StoreFromRequestCtx(ctx) == nil {
 			SendError(ctx, fasthttp.StatusServiceUnavailable, "config store not available")
 			return
 		}
-		cc, err := h.store.ConfigStore.GetClientConfig(ctx)
+		cc, err := h.store.StoreFromRequestCtx(ctx).GetClientConfig(ctx)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError,
 				fmt.Sprintf("failed to fetch config from db: %v", err))
@@ -106,7 +106,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 			mapConfig["client_config"] = cc.Redacted()
 		}
 		// Fetching framework config
-		fc, err := h.store.ConfigStore.GetFrameworkConfig(ctx)
+		fc, err := h.store.StoreFromRequestCtx(ctx).GetFrameworkConfig(ctx)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to fetch framework config from db: %v", err))
 			return
@@ -118,9 +118,9 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 		normalizedFrameworkConfig, _, _ := lib.ResolveFrameworkPricingConfig(nil, h.store.FrameworkConfig)
 		mapConfig["framework_config"] = *normalizedFrameworkConfig
 	}
-	if h.store.ConfigStore != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
 		// Fetching governance config
-		authConfig, err := h.store.ConfigStore.GetAuthConfig(ctx)
+		authConfig, err := h.store.StoreFromRequestCtx(ctx).GetAuthConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get auth config from store: %v", err)
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get auth config from store: %v", err))
@@ -169,12 +169,12 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 			"disable_auth_on_inference": true,
 		}
 	}
-	mapConfig["is_db_connected"] = h.store.ConfigStore != nil
+	mapConfig["is_db_connected"] = h.store.StoreFromRequestCtx(ctx) != nil
 	mapConfig["is_cache_connected"] = h.store.VectorStore != nil
 	mapConfig["is_logs_connected"] = h.store.LogsStore != nil
 	// Fetching proxy config
-	if h.store.ConfigStore != nil {
-		proxyConfig, err := h.store.ConfigStore.GetProxyConfig(ctx)
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		proxyConfig, err := h.store.StoreFromRequestCtx(ctx).GetProxyConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get proxy config from store: %v", err)
 		} else if proxyConfig != nil {
@@ -185,7 +185,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 			mapConfig["proxy_config"] = proxyConfig
 		}
 		// Fetching restart required config
-		restartConfig, err := h.store.ConfigStore.GetRestartRequiredConfig(ctx)
+		restartConfig, err := h.store.StoreFromRequestCtx(ctx).GetRestartRequiredConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get restart required config from store: %v", err)
 		} else if restartConfig != nil {
@@ -193,7 +193,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 		}
 		// Fetching UI/admin metadata blob (onboarding_dismissed, etc.).
 		// This is a free-form key/value store that bypasses config.json sync.
-		if metadata, err := h.store.ConfigStore.GetClientMetadata(ctx); err != nil {
+		if metadata, err := h.store.StoreFromRequestCtx(ctx).GetClientMetadata(ctx); err != nil {
 			if !errors.Is(err, configstore.ErrNotFound) {
 				logger.Warn("failed to get client metadata from store: %v", err)
 			}
@@ -209,7 +209,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 // are removed. Intended for UI/admin preferences (onboarding state, dismissed
 // tooltips, etc.) and is auth-gated by the same middleware as the rest of /api/config.
 func (h *ConfigHandler) updateMetadata(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "config store not available")
 		return
 	}
@@ -222,7 +222,7 @@ func (h *ConfigHandler) updateMetadata(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "patch body must contain at least one key")
 		return
 	}
-	if err := h.store.ConfigStore.UpdateClientMetadata(ctx, patch); err != nil {
+	if err := h.store.StoreFromRequestCtx(ctx).UpdateClientMetadata(ctx, patch); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusConflict, fmt.Sprintf("failed to update metadata: %v", err))
 			return
@@ -237,7 +237,7 @@ func (h *ConfigHandler) updateMetadata(ctx *fasthttp.RequestCtx) {
 // Currently, it supports hot-reloading of the `drop_excess_requests` setting.
 // Note that settings like `prometheus_labels` cannot be changed at runtime.
 func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Config store not initialized")
 		return
 	}
@@ -522,7 +522,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	// Update the store with the new config
 	h.store.ClientConfig = updatedConfig
 
-	if err := h.store.ConfigStore.UpdateClientConfig(ctx, updatedConfig); err != nil {
+	if err := h.store.StoreFromRequestCtx(ctx).UpdateClientConfig(ctx, updatedConfig); err != nil {
 		logger.Warn("failed to save configuration: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to save configuration: %v", err))
 		return
@@ -534,7 +534,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Fetching existing framework config
-	frameworkConfig, err := h.store.ConfigStore.GetFrameworkConfig(ctx)
+	frameworkConfig, err := h.store.StoreFromRequestCtx(ctx).GetFrameworkConfig(ctx)
 	if err != nil {
 		logger.Warn("failed to get framework config from store: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get framework config from store: %v", err))
@@ -626,7 +626,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 			},
 		}
 		// Saving framework config
-		if err := h.store.ConfigStore.UpdateFrameworkConfig(ctx, frameworkConfig); err != nil {
+		if err := h.store.StoreFromRequestCtx(ctx).UpdateFrameworkConfig(ctx, frameworkConfig); err != nil {
 			logger.Warn("failed to save framework configuration: %v", err)
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to save framework configuration: %v", err))
 			return
@@ -637,7 +637,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	// Checking auth config and trying to update if required
 	if payload.AuthConfig != nil {
 		// Getting current governance config
-		authConfig, err := h.store.ConfigStore.GetAuthConfig(ctx)
+		authConfig, err := h.store.StoreFromRequestCtx(ctx).GetAuthConfig(ctx)
 		if err != nil {
 			if !errors.Is(err, configstore.ErrNotFound) {
 				logger.Warn("failed to get auth config from store: %v", err)
@@ -743,7 +743,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 
 		// Flush all existing sessions if auth details have been changed
 		if authChanged {
-			if err := h.store.ConfigStore.FlushSessions(ctx); err != nil {
+			if err := h.store.StoreFromRequestCtx(ctx).FlushSessions(ctx); err != nil {
 				logger.Warn("updated auth config but failed to flush existing sessions, please restart the server: %v", err)
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("updated auth config but failed to flush existing sessions, please restart the server: %v", err))
 				return
@@ -755,7 +755,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	// Set restart required flag if any restart-requiring configs changed
 	if len(restartReasons) > 0 {
 		reason := fmt.Sprintf("%s settings have been updated. A restart is required for changes to take full effect.", strings.Join(restartReasons, ", "))
-		if err := h.store.ConfigStore.SetRestartRequiredConfig(ctx, &configstoreTables.RestartRequiredConfig{
+		if err := h.store.StoreFromRequestCtx(ctx).SetRestartRequiredConfig(ctx, &configstoreTables.RestartRequiredConfig{
 			Required: true,
 			Reason:   reason,
 		}); err != nil {
@@ -772,7 +772,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 
 // forceSyncPricing triggers an immediate pricing sync and resets the pricing sync timer
 func (h *ConfigHandler) forceSyncPricing(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "config store not available")
 		return
 	}
@@ -792,11 +792,11 @@ func (h *ConfigHandler) forceSyncPricing(ctx *fasthttp.RequestCtx) {
 
 // getProxyConfig handles GET /api/proxy-config - Get the current proxy configuration
 func (h *ConfigHandler) getProxyConfig(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "config store not available")
 		return
 	}
-	proxyConfig, err := h.store.ConfigStore.GetProxyConfig(ctx)
+	proxyConfig, err := h.store.StoreFromRequestCtx(ctx).GetProxyConfig(ctx)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get proxy config: %v", err))
 		return
@@ -818,7 +818,7 @@ func (h *ConfigHandler) getProxyConfig(ctx *fasthttp.RequestCtx) {
 
 // updateProxyConfig handles PUT /api/proxy-config - Update the proxy configuration
 func (h *ConfigHandler) updateProxyConfig(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, "config store not initialized")
 		return
 	}
@@ -868,7 +868,7 @@ func (h *ConfigHandler) updateProxyConfig(ctx *fasthttp.RequestCtx) {
 
 	// Handle password - if it's "<redacted>", keep the existing password
 	if payload.Password == "<redacted>" {
-		existingConfig, err := h.store.ConfigStore.GetProxyConfig(ctx)
+		existingConfig, err := h.store.StoreFromRequestCtx(ctx).GetProxyConfig(ctx)
 		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get existing proxy config: %v", err))
 			return
@@ -881,14 +881,14 @@ func (h *ConfigHandler) updateProxyConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Save proxy config
-	if err := h.store.ConfigStore.UpdateProxyConfig(ctx, &payload); err != nil {
+	if err := h.store.StoreFromRequestCtx(ctx).UpdateProxyConfig(ctx, &payload); err != nil {
 		logger.Warn("failed to save proxy configuration: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to save proxy configuration: %v", err))
 		return
 	}
 
 	// Pulling the proxy config from the config store
-	newProxyConfig, err := h.store.ConfigStore.GetProxyConfig(ctx)
+	newProxyConfig, err := h.store.StoreFromRequestCtx(ctx).GetProxyConfig(ctx)
 	if err != nil {
 		logger.Warn("failed to get proxy config from store: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get proxy config from store: %v", err))
@@ -915,7 +915,7 @@ func (h *ConfigHandler) updateProxyConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Set restart required flag for proxy config changes
-	if err := h.store.ConfigStore.SetRestartRequiredConfig(ctx, &configstoreTables.RestartRequiredConfig{
+	if err := h.store.StoreFromRequestCtx(ctx).SetRestartRequiredConfig(ctx, &configstoreTables.RestartRequiredConfig{
 		Required: true,
 		Reason:   "Proxy configuration has been updated. A restart is required for all changes to take full effect.",
 	}); err != nil {

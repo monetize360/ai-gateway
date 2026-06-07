@@ -34,50 +34,55 @@ func (mc *ModelCatalog) syncPricing(ctx context.Context) error {
 		return mc.loadPricingFromURL(ctx)
 	})
 	if err != nil {
-		// Check if we have existing data in database
-		pricingRecords, pricingErr := mc.configStore.GetModelPrices(ctx)
-		if pricingErr != nil {
-			return fmt.Errorf("failed to get pricing records: %w", pricingErr)
+		if mc.configStore != nil {
+			pricingRecords, pricingErr := mc.configStore.GetModelPrices(ctx)
+			if pricingErr != nil {
+				return fmt.Errorf("failed to get pricing records: %w", pricingErr)
+			}
+			if len(pricingRecords) > 0 {
+				mc.logger.Warn("failed to fetch pricing from URL, falling back to existing database records: %v", err)
+				return nil
+			}
 		}
-		if len(pricingRecords) > 0 {
-			mc.logger.Warn("failed to fetch pricing from URL, falling back to existing database records: %v", err)
-			return nil
-		} else {
-			return fmt.Errorf("failed to load pricing data from URL and no existing data in database: %w", err)
-		}
+		return fmt.Errorf("failed to load pricing data from URL: %w", err)
 	}
 
-	// Update database in transaction
-	err = mc.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
-		// Deduplicate and insert new pricing data
+	if mc.configStore != nil {
+		err = mc.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+			seen := make(map[string]bool)
+			for modelKey, entry := range pricingData {
+				pricing := convertPricingDataToTableModelPricing(modelKey, entry)
+				key := makeKey(pricing.Model, pricing.Provider, pricing.Mode)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				if err := mc.configStore.UpsertModelPrices(ctx, &pricing, tx); err != nil {
+					return fmt.Errorf("failed to create pricing record for model %s: %w", pricing.Model, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to sync pricing data to database: %w", err)
+		}
+		if err := mc.loadPricingFromDatabase(ctx); err != nil {
+			return fmt.Errorf("failed to reload pricing cache: %w", err)
+		}
+	} else {
+		mc.mu.Lock()
+		mc.pricingData = make(map[string]configstoreTables.TableModelPricing, len(pricingData))
 		seen := make(map[string]bool)
 		for modelKey, entry := range pricingData {
 			pricing := convertPricingDataToTableModelPricing(modelKey, entry)
-			// Create composite key for deduplication
 			key := makeKey(pricing.Model, pricing.Provider, pricing.Mode)
-			// Skip if already seen
-			if exists, ok := seen[key]; ok && exists {
+			if seen[key] {
 				continue
 			}
-			// Mark as seen
 			seen[key] = true
-			if err := mc.configStore.UpsertModelPrices(ctx, &pricing, tx); err != nil {
-				return fmt.Errorf("failed to create pricing record for model %s: %w", pricing.Model, err)
-			}
+			mc.pricingData[key] = pricing
 		}
-
-		// Clear seen map
-		seen = nil
-
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync pricing data to database: %w", err)
-	}
-
-	// Reload cache from database
-	if err := mc.loadPricingFromDatabase(ctx); err != nil {
-		return fmt.Errorf("failed to reload pricing cache: %w", err)
+		mc.mu.Unlock()
 	}
 
 	// Populate model params cache from pricing datasheet max_output_tokens
@@ -468,6 +473,17 @@ func (mc *ModelCatalog) syncModelParameters(ctx context.Context) error {
 	}
 
 	mc.applyModelParameters(paramsData)
+
+	rows := make([]configstoreTables.TableModelParameters, 0, len(paramsData))
+	for model, data := range paramsData {
+		rows = append(rows, configstoreTables.TableModelParameters{
+			Model: model,
+			Data:  string(data),
+		})
+	}
+	mc.parameterRowsMu.Lock()
+	mc.parameterRows = rows
+	mc.parameterRowsMu.Unlock()
 
 	mc.logger.Info("successfully synced %d model parameters records", len(paramsData))
 	return nil

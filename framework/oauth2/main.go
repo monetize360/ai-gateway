@@ -22,6 +22,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/temptoken"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 // OAuth2Provider implements the schemas.OAuth2Provider interface
 // It provides OAuth 2.0 authentication functionality with database persistence
 type OAuth2Provider struct {
-	configStore    configstore.ConfigStore
+	tenantResolver tenantstore.Resolver
 	mu             sync.RWMutex
 	retryBaseDelay time.Duration // base delay for token endpoint retry backoff; doubles each attempt (1×, 2×, 4×)
 
@@ -49,16 +50,59 @@ type OAuth2Provider struct {
 	tempTokens atomic.Pointer[temptoken.Service]
 }
 
-// NewOAuth2Provider creates a new OAuth provider instance
-func NewOAuth2Provider(configStore configstore.ConfigStore, logger schemas.Logger) *OAuth2Provider {
+// NewOAuth2Provider creates a new OAuth provider instance backed by the tenant registry.
+func NewOAuth2Provider(registry tenantstore.Resolver, logger schemas.Logger) *OAuth2Provider {
 	if logger == nil {
 		logger = bifrost.NewDefaultLogger(schemas.LogLevelInfo)
 	}
 	SetLogger(logger)
 	return &OAuth2Provider{
-		configStore:    configStore,
+		tenantResolver: registry,
 		retryBaseDelay: time.Second,
 	}
+}
+
+// NewOAuth2ProviderWithStore creates an OAuth provider with a fixed store (for tests).
+func NewOAuth2ProviderWithStore(store configstore.ConfigStore, logger schemas.Logger) *OAuth2Provider {
+	if logger == nil {
+		logger = bifrost.NewDefaultLogger(schemas.LogLevelInfo)
+	}
+	SetLogger(logger)
+	return &OAuth2Provider{
+		tenantResolver: tenantstore.NewStaticRegistry(store, ""),
+		retryBaseDelay: time.Second,
+	}
+}
+
+func (p *OAuth2Provider) forEachTenant(ctx context.Context, fn func(tenantCtx context.Context, store configstore.ConfigStore) error) error {
+	if p.tenantResolver == nil {
+		return nil
+	}
+	tenantIDs := p.tenantResolver.ListTenantIDs(ctx)
+	if len(tenantIDs) == 0 {
+		if store := p.configStore(ctx); store != nil {
+			return fn(ctx, store)
+		}
+		return nil
+	}
+	for _, tenantID := range tenantIDs {
+		store := p.tenantResolver.GetStoreForTenant(ctx, tenantID)
+		if store == nil {
+			continue
+		}
+		tenantCtx := context.WithValue(ctx, schemas.BifrostContextKeyTenantID, tenantID)
+		if err := fn(tenantCtx, store); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *OAuth2Provider) configStore(ctx context.Context) configstore.ConfigStore {
+	if p.tenantResolver == nil {
+		return nil
+	}
+	return p.tenantResolver.GetStoreFromContext(ctx)
 }
 
 // SetTempTokenService installs the temp-token service used by
@@ -79,10 +123,10 @@ func (p *OAuth2Provider) tempTokenService() *temptoken.Service {
 
 // mcpTempTokenAuthEnabled reports whether MCP per-user OAuth links may include temp-token auth.
 func (p *OAuth2Provider) mcpTempTokenAuthEnabled(ctx context.Context) bool {
-	if p.configStore == nil {
+	if p.configStore(ctx) == nil {
 		return false
 	}
-	clientConfig, err := p.configStore.GetClientConfig(ctx)
+	clientConfig, err := p.configStore(ctx).GetClientConfig(ctx)
 	if err != nil {
 		logger.Warn("Failed to read MCP temp-token auth setting: %v", err)
 		return false
@@ -101,7 +145,7 @@ func (p *OAuth2Provider) mcpTempTokenAuthEnabled(ctx context.Context) bool {
 func (p *OAuth2Provider) cleanupFlow(ctx context.Context, sessionID string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := p.configStore.DeleteOauthUserSession(cleanupCtx, sessionID); err != nil {
+	if err := p.configStore(ctx).DeleteOauthUserSession(cleanupCtx, sessionID); err != nil {
 		logger.Warn("per-user OAuth flow row cleanup failed: session_id=%s err=%v", sessionID, err)
 	}
 	if svc := p.tempTokenService(); svc != nil {
@@ -114,7 +158,7 @@ func (p *OAuth2Provider) cleanupFlow(ctx context.Context, sessionID string) {
 // GetAccessToken retrieves the access token for a given oauth_config_id
 func (p *OAuth2Provider) GetAccessToken(ctx context.Context, oauthConfigID string) (string, error) {
 	// Load oauth_config by ID
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load oauth config: %w", err)
 	}
@@ -133,7 +177,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, oauthConfigID strin
 	}
 
 	// Load oauth_token by TokenID
-	token, err := p.configStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+	token, err := p.configStore(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load oauth token: %w", err)
 	}
@@ -149,7 +193,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, oauthConfigID strin
 			return "", fmt.Errorf("token expired and refresh failed: %w", err)
 		}
 		// Reload token after refresh
-		token, err = p.configStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+		token, err = p.configStore(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 		if err != nil || token == nil {
 			return "", fmt.Errorf("failed to reload token after refresh: %w", err)
 		}
@@ -172,7 +216,7 @@ func (p *OAuth2Provider) RefreshAccessToken(ctx context.Context, oauthConfigID s
 	defer p.mu.Unlock()
 
 	// Load oauth_config
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil || oauthConfig == nil {
 		return fmt.Errorf("oauth config not found: %w", err)
 	}
@@ -182,7 +226,7 @@ func (p *OAuth2Provider) RefreshAccessToken(ctx context.Context, oauthConfigID s
 	}
 
 	// Load oauth_token
-	token, err := p.configStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+	token, err := p.configStore(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 	if err != nil || token == nil {
 		return fmt.Errorf("oauth token not found: %w", err)
 	}
@@ -215,7 +259,7 @@ func (p *OAuth2Provider) RefreshAccessToken(ctx context.Context, oauthConfigID s
 	}
 	token.LastRefreshedAt = bifrost.Ptr(now)
 
-	if err := p.configStore.UpdateOauthToken(ctx, token); err != nil {
+	if err := p.configStore(ctx).UpdateOauthToken(ctx, token); err != nil {
 		return fmt.Errorf("failed to update token: %w", err)
 	}
 
@@ -226,7 +270,7 @@ func (p *OAuth2Provider) RefreshAccessToken(ctx context.Context, oauthConfigID s
 
 // ValidateToken checks if the token is still valid
 func (p *OAuth2Provider) ValidateToken(ctx context.Context, oauthConfigID string) (bool, error) {
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil || oauthConfig == nil {
 		return false, nil
 	}
@@ -235,7 +279,7 @@ func (p *OAuth2Provider) ValidateToken(ctx context.Context, oauthConfigID string
 		return false, nil
 	}
 
-	token, err := p.configStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+	token, err := p.configStore(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 	if err != nil || token == nil {
 		return false, nil
 	}
@@ -252,7 +296,7 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil || oauthConfig == nil {
 		return fmt.Errorf("oauth config not found: %w", err)
 	}
@@ -261,7 +305,7 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 		return fmt.Errorf("no token linked to oauth config")
 	}
 
-	token, err := p.configStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+	token, err := p.configStore(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 	if err != nil || token == nil {
 		return fmt.Errorf("oauth token not found: %w", err)
 	}
@@ -270,14 +314,14 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 	// This is best-effort - we'll delete the token even if revocation fails
 
 	// Delete token from database
-	if err := p.configStore.DeleteOauthToken(ctx, token.ID); err != nil {
+	if err := p.configStore(ctx).DeleteOauthToken(ctx, token.ID); err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)
 	}
 
 	// Update oauth_config to remove token reference and mark as revoked
 	oauthConfig.TokenID = nil
 	oauthConfig.Status = "revoked"
-	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
+	if err := p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config: %w", err)
 	}
 
@@ -292,7 +336,7 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 func (p *OAuth2Provider) StorePendingMCPClient(oauthConfigID string, mcpClientConfig schemas.MCPClientConfig) error {
 	ctx := context.Background()
 
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		return fmt.Errorf("failed to get oauth config: %w", err)
 	}
@@ -307,7 +351,7 @@ func (p *OAuth2Provider) StorePendingMCPClient(oauthConfigID string, mcpClientCo
 	configStr := string(configJSON)
 	oauthConfig.MCPClientConfigJSON = &configStr
 
-	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
+	if err := p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config with MCP client config: %w", err)
 	}
 
@@ -320,7 +364,7 @@ func (p *OAuth2Provider) StorePendingMCPClient(oauthConfigID string, mcpClientCo
 func (p *OAuth2Provider) GetPendingMCPClient(oauthConfigID string) (*schemas.MCPClientConfig, error) {
 	ctx := context.Background()
 
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get oauth config: %w", err)
 	}
@@ -350,7 +394,7 @@ func (p *OAuth2Provider) GetPendingMCPClient(oauthConfigID string) (*schemas.MCP
 func (p *OAuth2Provider) GetPendingMCPClientByState(state string) (*schemas.MCPClientConfig, string, error) {
 	ctx := context.Background()
 
-	oauthConfig, err := p.configStore.GetOauthConfigByState(ctx, state)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByState(ctx, state)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get oauth config by state: %w", err)
 	}
@@ -380,7 +424,7 @@ func (p *OAuth2Provider) GetPendingMCPClientByState(state string) (*schemas.MCPC
 func (p *OAuth2Provider) RemovePendingMCPClient(oauthConfigID string) error {
 	ctx := context.Background()
 
-	oauthConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		return fmt.Errorf("failed to get oauth config: %w", err)
 	}
@@ -390,7 +434,7 @@ func (p *OAuth2Provider) RemovePendingMCPClient(oauthConfigID string) error {
 
 	oauthConfig.MCPClientConfigJSON = nil
 
-	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
+	if err := p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to clear pending MCP client config: %w", err)
 	}
 
@@ -543,7 +587,7 @@ func (p *OAuth2Provider) InitiateOAuthFlow(ctx context.Context, config *schemas.
 		ExpiresAt:       expiresAt,
 	}
 
-	if err := p.configStore.CreateOauthConfig(ctx, oauthConfigRecord); err != nil {
+	if err := p.configStore(ctx).CreateOauthConfig(ctx, oauthConfigRecord); err != nil {
 		return nil, fmt.Errorf("failed to create oauth config: %w", err)
 	}
 
@@ -575,7 +619,7 @@ func (p *OAuth2Provider) InitiateOAuthFlow(ctx context.Context, config *schemas.
 // Supports PKCE verification
 func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code string) error {
 	// Lookup oauth_config by state
-	oauthConfig, err := p.configStore.GetOauthConfigByState(ctx, state)
+	oauthConfig, err := p.configStore(ctx).GetOauthConfigByState(ctx, state)
 	if err != nil {
 		return fmt.Errorf("failed to lookup oauth config: %w", err)
 	}
@@ -586,7 +630,7 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 	// Check expiry
 	if time.Now().After(oauthConfig.ExpiresAt) {
 		oauthConfig.Status = "expired"
-		p.configStore.UpdateOauthConfig(ctx, oauthConfig)
+		p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig)
 		return fmt.Errorf("oauth flow expired")
 	}
 
@@ -609,7 +653,7 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 	)
 	if err != nil {
 		oauthConfig.Status = "failed"
-		p.configStore.UpdateOauthConfig(ctx, oauthConfig)
+		p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig)
 		logger.Error("Token exchange failed",
 			"error", err.Error(),
 			"client_id", oauthConfig.GetResolvedClientID(),
@@ -640,14 +684,14 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 		Scopes:       string(scopesJSON),
 	}
 
-	if err := p.configStore.CreateOauthToken(ctx, tokenRecord); err != nil {
+	if err := p.configStore(ctx).CreateOauthToken(ctx, tokenRecord); err != nil {
 		return fmt.Errorf("failed to create oauth token: %w", err)
 	}
 
 	// Update oauth_config: link token and set status="authorized"
 	oauthConfig.TokenID = &tokenID
 	oauthConfig.Status = "authorized"
-	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
+	if err := p.configStore(ctx).UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config: %w", err)
 	}
 
@@ -665,7 +709,7 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 // The code_challenge is recomputed deterministically from the stored verifier
 // so we don't have to persist it separately.
 func (p *OAuth2Provider) BuildUpstreamAuthorizeURL(ctx context.Context, flowID string) (string, error) {
-	flow, err := p.configStore.GetOauthUserSessionByID(ctx, flowID)
+	flow, err := p.configStore(ctx).GetOauthUserSessionByID(ctx, flowID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load pending oauth flow: %w", err)
 	}
@@ -678,7 +722,7 @@ func (p *OAuth2Provider) BuildUpstreamAuthorizeURL(ctx context.Context, flowID s
 	if time.Now().After(flow.ExpiresAt) {
 		return "", fmt.Errorf("oauth flow %s: %w", flowID, schemas.ErrOAuth2FlowExpired)
 	}
-	templateConfig, err := p.configStore.GetOauthConfigByID(ctx, flow.OauthConfigID)
+	templateConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, flow.OauthConfigID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load template oauth config: %w", err)
 	}
@@ -772,7 +816,7 @@ func (p *OAuth2Provider) markExpiredIfPermanent(ctx context.Context, oauthConfig
 		oauthConfig.Status = "expired"
 		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if updateErr := p.configStore.UpdateOauthConfig(updateCtx, oauthConfig); updateErr != nil {
+		if updateErr := p.configStore(ctx).UpdateOauthConfig(updateCtx, oauthConfig); updateErr != nil {
 			logger.Error("Failed to update oauth config status: %s, error: %s", oauthConfig.ID, updateErr.Error())
 		}
 	}
@@ -923,7 +967,7 @@ func generateSecureRandomString(length int) (string, error) {
 func (p *OAuth2Provider) InitiateUserOAuthFlow(ctx context.Context, oauthConfigID string, mcpClientID string, redirectURI string, flowMode schemas.MCPAuthMode) (*schemas.OAuth2FlowInitiation, string, error) {
 
 	// 1. Load template OAuth config.
-	templateConfig, err := p.configStore.GetOauthConfigByID(ctx, oauthConfigID)
+	templateConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load template oauth config: %w", err)
 	}
@@ -988,7 +1032,7 @@ func (p *OAuth2Provider) InitiateUserOAuthFlow(ctx context.Context, oauthConfigI
 	//    to insert a fresh row lets both flows complete independently.
 	var existing *tables.TableOauthUserSession
 	if lookupID != "" {
-		found, lookupErr := p.configStore.GetOauthUserSessionByModeIdentityAndMCPClient(ctx, flowMode, lookupID, mcpClientID)
+		found, lookupErr := p.configStore(ctx).GetOauthUserSessionByModeIdentityAndMCPClient(ctx, flowMode, lookupID, mcpClientID)
 		if lookupErr != nil {
 			return nil, "", fmt.Errorf("failed to look up existing flow row: %w", lookupErr)
 		}
@@ -1007,7 +1051,7 @@ func (p *OAuth2Provider) InitiateUserOAuthFlow(ctx context.Context, oauthConfigI
 		existing.CodeVerifier = codeVerifier
 		existing.Status = "pending"
 		existing.ExpiresAt = expiresAt
-		if err := p.configStore.UpdateOauthUserSession(ctx, existing); err != nil {
+		if err := p.configStore(ctx).UpdateOauthUserSession(ctx, existing); err != nil {
 			return nil, "", fmt.Errorf("failed to update flow row for reauth: %w", err)
 		}
 		rowID = existing.ID
@@ -1030,7 +1074,7 @@ func (p *OAuth2Provider) InitiateUserOAuthFlow(ctx context.Context, oauthConfigI
 			Status:        "pending",
 			ExpiresAt:     expiresAt,
 		}
-		if err := p.configStore.CreateOauthUserSession(ctx, row); err != nil {
+		if err := p.configStore(ctx).CreateOauthUserSession(ctx, row); err != nil {
 			return nil, "", fmt.Errorf("failed to create flow row: %w", err)
 		}
 		rowID = row.ID
@@ -1079,7 +1123,7 @@ func (p *OAuth2Provider) InitiateUserOAuthFlow(ctx context.Context, oauthConfigI
 // It looks up the session by state, exchanges code for tokens, and returns a session token.
 func (p *OAuth2Provider) CompleteUserOAuthFlow(ctx context.Context, state string, code string) (string, error) {
 	// Atomically claim session by state to prevent concurrent callback races
-	session, err := p.configStore.ClaimOauthUserSessionByState(ctx, state)
+	session, err := p.configStore(ctx).ClaimOauthUserSessionByState(ctx, state)
 	if err != nil {
 		return "", fmt.Errorf("failed to claim per-user oauth session: %w", err)
 	}
@@ -1101,13 +1145,13 @@ func (p *OAuth2Provider) CompleteUserOAuthFlow(ctx context.Context, state string
 	// nil-config case from a real lookup failure — otherwise wrapping a nil
 	// error with %w produces a useless "%!w(<nil>)" string and the real cause
 	// (config row missing) is hidden.
-	templateConfig, err := p.configStore.GetOauthConfigByID(ctx, session.OauthConfigID)
+	templateConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, session.OauthConfigID)
 	if err != nil {
 		p.cleanupFlow(ctx, session.ID)
 		return "", fmt.Errorf("failed to load template oauth config: %w", err)
 	}
 	if templateConfig == nil {
-		_ = p.configStore.DeleteOauthUserSession(ctx, session.ID)
+		_ = p.configStore(ctx).DeleteOauthUserSession(ctx, session.ID)
 		return "", schemas.ErrOAuth2ConfigNotFound
 	}
 	// Exchange code for tokens with PKCE verifier
@@ -1179,7 +1223,7 @@ func (p *OAuth2Provider) CompleteUserOAuthFlow(ctx context.Context, state string
 	default:
 		// Bogus flow_mode on the row — drop it so a fresh flow can start
 		// instead of leaving the row stuck in 'claiming' forever.
-		_ = p.configStore.DeleteOauthUserSession(ctx, session.ID)
+		_ = p.configStore(ctx).DeleteOauthUserSession(ctx, session.ID)
 		return "", fmt.Errorf("invalid flow mode on session: %s", session.ID)
 	}
 
@@ -1204,12 +1248,12 @@ func (p *OAuth2Provider) CompleteUserOAuthFlow(ctx context.Context, state string
 		AuthMode:      string(flowMode),
 		Status:        "active",
 	}
-	if err := p.configStore.CreateOauthUserToken(ctx, tokenRecord); err != nil {
+	if err := p.configStore(ctx).CreateOauthUserToken(ctx, tokenRecord); err != nil {
 		// The flow row has already been claimed and the auth code has been
 		// exchanged; leaving the row in 'claiming' state would block the
 		// next initiation for this binding indefinitely. Drop it so the
 		// caller can restart cleanly.
-		_ = p.configStore.DeleteOauthUserSession(ctx, session.ID)
+		_ = p.configStore(ctx).DeleteOauthUserSession(ctx, session.ID)
 		return "", fmt.Errorf("failed to create per-user oauth token: %w", err)
 	}
 
@@ -1230,7 +1274,7 @@ func (p *OAuth2Provider) CompleteUserOAuthFlow(ctx context.Context, state string
 // one identity column determined by mode. No fallback chain. Filters
 // status='active' so orphaned rows never satisfy a lookup.
 func (p *OAuth2Provider) GetUserAccessTokenByMode(ctx context.Context, mode schemas.MCPAuthMode, identity, mcpClientID string) (string, error) {
-	token, err := p.configStore.GetOauthUserTokenByMode(ctx, mode, identity, mcpClientID)
+	token, err := p.configStore(ctx).GetOauthUserTokenByMode(ctx, mode, identity, mcpClientID)
 	if err != nil {
 		return "", fmt.Errorf("failed to load per-user oauth token (mode=%s): %w", mode, err)
 	}
@@ -1243,7 +1287,7 @@ func (p *OAuth2Provider) GetUserAccessTokenByMode(ctx context.Context, mode sche
 		if err := p.RefreshUserAccessToken(ctx, token.ID); err != nil {
 			return "", fmt.Errorf("per-user token expired and refresh failed: %w", err)
 		}
-		token, err = p.configStore.GetOauthUserTokenByMode(ctx, mode, identity, mcpClientID)
+		token, err = p.configStore(ctx).GetOauthUserTokenByMode(ctx, mode, identity, mcpClientID)
 		if err != nil || token == nil {
 			return "", fmt.Errorf("failed to reload per-user token after refresh")
 		}
@@ -1265,7 +1309,7 @@ func (p *OAuth2Provider) RefreshUserAccessToken(ctx context.Context, tokenID str
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	token, err := p.configStore.GetOauthUserTokenByID(ctx, tokenID)
+	token, err := p.configStore(ctx).GetOauthUserTokenByID(ctx, tokenID)
 	if err != nil || token == nil {
 		return fmt.Errorf("per-user oauth token not found: %w", err)
 	}
@@ -1277,7 +1321,7 @@ func (p *OAuth2Provider) RefreshUserAccessToken(ctx context.Context, tokenID str
 	// Load template OAuth config for token_url, client_id, etc. Split nil
 	// from a real lookup failure so a missing config doesn't surface as a
 	// useless "%!w(<nil>)" wrapped error.
-	templateConfig, err := p.configStore.GetOauthConfigByID(ctx, token.OauthConfigID)
+	templateConfig, err := p.configStore(ctx).GetOauthConfigByID(ctx, token.OauthConfigID)
 	if err != nil {
 		return fmt.Errorf("failed to load template oauth config for refresh: %w", err)
 	}
@@ -1311,7 +1355,7 @@ func (p *OAuth2Provider) RefreshUserAccessToken(ctx context.Context, tokenID str
 			// the UPDATE fails because of that, the row stays 'active' and
 			// every subsequent inference call keeps retrying a dead refresh
 			// token instead of surfacing the re-auth requirement.
-			if markErr := p.configStore.MarkOauthUserTokenNeedsReauthByID(context.Background(), token.ID); markErr != nil {
+			if markErr := p.configStore(ctx).MarkOauthUserTokenNeedsReauthByID(context.Background(), token.ID); markErr != nil {
 				return fmt.Errorf("per-user oauth refresh permanently rejected but status update failed (mcp_client=%s upstream_status=%d): %w",
 					token.MCPClientID, permErr.StatusCode, markErr)
 			}
@@ -1337,7 +1381,7 @@ func (p *OAuth2Provider) RefreshUserAccessToken(ctx context.Context, tokenID str
 	}
 	token.LastRefreshedAt = bifrost.Ptr(now)
 
-	if err := p.configStore.UpdateOauthUserToken(ctx, token); err != nil {
+	if err := p.configStore(ctx).UpdateOauthUserToken(ctx, token); err != nil {
 		return fmt.Errorf("failed to update per-user token after refresh: %w", err)
 	}
 

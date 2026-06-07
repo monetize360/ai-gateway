@@ -6,13 +6,13 @@ import (
 	"net"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/governance"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
@@ -98,19 +98,16 @@ func TestUpdatePricingOverride_ReplacesFullBody(t *testing.T) {
 	SetLogger(&mockLogger{})
 	store := setupPricingOverrideHandlerStore(t)
 	handler := &GovernanceHandler{
-		configStore:       store,
+		cfg:               lib.NewTestConfig(store),
 		governanceManager: pricingOverrideTestGovernanceManager{},
 	}
 
-	now := time.Now().UTC()
 	override := configstoreTables.TablePricingOverride{
 		ID:               "override-1",
 		Name:             "Original",
 		ScopeKind:        string(modelcatalog.ScopeKindGlobal),
 		MatchType:        string(modelcatalog.MatchTypeExact),
 		Pattern:          "gpt-4.1",
-		CreatedAt:        now,
-		UpdatedAt:        now,
 		PricingPatchJSON: `{"input_cost_per_token":1,"output_cost_per_token":2}`,
 		RequestTypes:     []schemas.RequestType{schemas.ChatCompletionRequest},
 	}

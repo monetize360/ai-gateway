@@ -102,7 +102,7 @@ func newServiceWithMcpAuth(t *testing.T) (*Service, *fakeStore) {
 		t.Fatalf("register scope: %v", err)
 	}
 	store := newFakeStore()
-	return NewService(store, reg), store
+	return NewServiceWithStore(store, reg), store
 }
 
 func TestMintRejectsUnknownScope(t *testing.T) {

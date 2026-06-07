@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 )
 
 // Errors returned by the service. Callers (notably the auth middleware) should
@@ -47,29 +49,39 @@ type ValidatedToken struct {
 // the configstore-backed persistence layer; nothing else needs the row format
 // directly.
 type Service struct {
-	store    configstore.ConfigStore
-	registry *Registry
-	now      func() time.Time // injectable for tests
+	registry       tenantstore.Resolver
+	scopeRegistry  *Registry
+	now            func() time.Time // injectable for tests
 }
 
-// NewService constructs a Service backed by the given store and registry. The
-// registry can be empty at construction time — scopes can be Register()'d
-// before the first Validate call (in practice, at server startup).
-func NewService(store configstore.ConfigStore, registry *Registry) *Service {
-	return &Service{store: store, registry: registry, now: time.Now}
+// NewService constructs a Service backed by the tenant registry and scope registry.
+func NewService(tenantRegistry tenantstore.Resolver, scopeReg *Registry) *Service {
+	return &Service{registry: tenantRegistry, scopeRegistry: scopeReg, now: time.Now}
+}
+
+// NewServiceWithStore constructs a Service with a fixed store (for tests).
+func NewServiceWithStore(store configstore.ConfigStore, scopeReg *Registry) *Service {
+	return &Service{registry: tenantstore.NewStaticRegistry(store, ""), scopeRegistry: scopeReg, now: time.Now}
+}
+
+func (s *Service) store(ctx context.Context) configstore.ConfigStore {
+	if s.registry == nil {
+		return nil
+	}
+	return s.registry.GetStoreFromContext(ctx)
 }
 
 // Registry exposes the underlying scope registry so callers can register
 // scopes without holding a separate reference. Useful for transports that
 // receive only the Service from server startup.
-func (s *Service) Registry() *Registry { return s.registry }
+func (s *Service) Registry() *Registry { return s.scopeRegistry }
 
 // Mint creates a new temp token under the given scope, bound to resourceID,
 // with the requested TTL. The TTL must be > 0 and <= the scope's MaxTTL. The
 // returned plaintext is the value the caller embeds in URLs or hands back to
 // the user; it is never persisted in plaintext when encryption is enabled.
 func (s *Service) Mint(ctx context.Context, scopeName, resourceID string, ttl time.Duration) (string, error) {
-	scope, ok := s.registry.Lookup(scopeName)
+	scope, ok := s.scopeRegistry.Lookup(scopeName)
 	if !ok {
 		return "", fmt.Errorf("%w: %s", ErrScopeUnknown, scopeName)
 	}
@@ -87,7 +99,9 @@ func (s *Service) Mint(ctx context.Context, scopeName, resourceID string, ttl ti
 		ResourceID: resourceID,
 		ExpiresAt:  s.now().Add(ttl),
 	}
-	if err := s.store.CreateTempToken(ctx, row); err != nil {
+	if store := s.store(ctx); store == nil {
+		return "", fmt.Errorf("temptoken: tenant context required")
+	} else if err := store.CreateTempToken(ctx, row); err != nil {
 		return "", fmt.Errorf("temptoken: failed to persist token: %w", err)
 	}
 	return plaintext, nil
@@ -100,7 +114,11 @@ func (s *Service) Validate(ctx context.Context, plaintext, method, path string) 
 		return nil, ErrTokenNotFound
 	}
 	hash := encrypt.HashSHA256(plaintext)
-	row, err := s.store.GetTempTokenByHash(ctx, hash)
+	store := s.store(ctx)
+	if store == nil {
+		return nil, fmt.Errorf("temptoken: tenant context required")
+	}
+	row, err := store.GetTempTokenByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("temptoken: lookup failed: %w", err)
 	}
@@ -110,7 +128,7 @@ func (s *Service) Validate(ctx context.Context, plaintext, method, path string) 
 	if !row.ExpiresAt.After(s.now()) {
 		return nil, ErrTokenExpired
 	}
-	scope, ok := s.registry.Lookup(row.Scope)
+	scope, ok := s.scopeRegistry.Lookup(row.Scope)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrScopeUnknown, row.Scope)
 	}
@@ -125,14 +143,40 @@ func (s *Service) Validate(ctx context.Context, plaintext, method, path string) 
 }
 
 // DeleteExpired removes every token row whose expires_at is at or before
-// `before`. Called by [SweepWorker] on its tick; callers passing time.Now()
-// reap everything currently past its TTL. Returns the number of rows removed.
+// `before`. The context must carry a tenant ID (set by TenantMiddleware on
+// authenticated routes). Returns the number of rows removed.
 func (s *Service) DeleteExpired(ctx context.Context, before time.Time) (int64, error) {
-	n, err := s.store.DeleteExpiredTempTokens(ctx, before)
+	store := s.store(ctx)
+	if store == nil {
+		return 0, fmt.Errorf("temptoken: tenant context required")
+	}
+	n, err := store.DeleteExpiredTempTokens(ctx, before)
 	if err != nil {
 		return 0, fmt.Errorf("temptoken: delete expired failed: %w", err)
 	}
 	return n, nil
+}
+
+// DeleteExpiredAll iterates every registered tenant and reaps expired rows.
+// Called by SweepWorker which runs under a background context with no tenant ID.
+func (s *Service) DeleteExpiredAll(ctx context.Context, before time.Time) (int64, error) {
+	if s.registry == nil {
+		return 0, nil
+	}
+	var total int64
+	for _, tenantID := range s.registry.ListTenantIDs(ctx) {
+		store := s.registry.GetStoreForTenant(ctx, tenantID)
+		if store == nil {
+			continue
+		}
+		tenantCtx := context.WithValue(ctx, schemas.BifrostContextKeyTenantID, tenantID)
+		n, err := store.DeleteExpiredTempTokens(tenantCtx, before)
+		if err != nil {
+			return total, fmt.Errorf("temptoken: delete expired (tenant %s): %w", tenantID, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // DeleteByResourceID removes every token row matching (scope, resourceID).
@@ -145,7 +189,11 @@ func (s *Service) DeleteByResourceID(ctx context.Context, scope, resourceID stri
 	if scope == "" || resourceID == "" {
 		return 0, nil
 	}
-	n, err := s.store.DeleteTempTokensByResourceID(ctx, scope, resourceID)
+	store := s.store(ctx)
+	if store == nil {
+		return 0, fmt.Errorf("temptoken: tenant context required")
+	}
+	n, err := store.DeleteTempTokensByResourceID(ctx, scope, resourceID)
 	if err != nil {
 		return 0, fmt.Errorf("temptoken: delete by resource_id failed: %w", err)
 	}

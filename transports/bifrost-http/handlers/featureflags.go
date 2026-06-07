@@ -6,7 +6,6 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/featureflags"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -17,16 +16,13 @@ import (
 // overrides are persisted. The store is the source of truth for the
 // effective value; the configstore exists only so toggles survive restarts.
 type FeatureFlagsHandler struct {
-	store       *featureflags.Store
-	configStore configstore.ConfigStore
+	store *featureflags.Store
+	cfg   *lib.Config
 }
 
-// NewFeatureFlagsHandler wires the handler to its dependencies. Both must
-// be non-nil at server boot; the handler intentionally does not lazily
-// resolve them because feature flag state is needed during request
-// dispatch and a missing store would cause silent off-by-default behavior.
-func NewFeatureFlagsHandler(store *featureflags.Store, configStore configstore.ConfigStore) *FeatureFlagsHandler {
-	return &FeatureFlagsHandler{store: store, configStore: configStore}
+// NewFeatureFlagsHandler wires the handler to its dependencies.
+func NewFeatureFlagsHandler(store *featureflags.Store, cfg *lib.Config) *FeatureFlagsHandler {
+	return &FeatureFlagsHandler{store: store, cfg: cfg}
 }
 
 // RegisterRoutes mounts the feature flag endpoints. Only GET and PUT are
@@ -101,8 +97,8 @@ func (h *FeatureFlagsHandler) updateFlag(ctx *fasthttp.RequestCtx) {
 	// we roll back the in-memory change to keep the two layers consistent;
 	// otherwise a subsequent restart would silently revert the operator's
 	// toggle and they would have no way to know.
-	if h.configStore != nil {
-		if err := h.configStore.UpsertFeatureFlag(ctx, id, enabled, status.UpdatedAt); err != nil {
+	if h.cfg.StoreFromRequestCtx(ctx) != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).UpsertFeatureFlag(ctx, id, enabled, status.UpdatedAt); err != nil {
 			h.store.Restore(id, priorSnap, priorHad)
 			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to persist feature flag: "+err.Error())
 			return

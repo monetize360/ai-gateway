@@ -134,7 +134,7 @@ func seedFixtures(t *testing.T, store *testConfigStore, tokenURL string) (oauthC
 
 func newTestWorker(store *testConfigStore) *TokenRefreshWorker {
 	noopLogger := bifrost.NewDefaultLogger(schemas.LogLevelError)
-	provider := NewOAuth2Provider(store, noopLogger)
+	provider := NewOAuth2ProviderWithStore(store, noopLogger)
 	provider.retryBaseDelay = 1 * time.Millisecond // speed up retry backoff in tests
 	return NewTokenRefreshWorker(provider, noopLogger)
 }
@@ -171,7 +171,7 @@ func TestTestConfigStore_GetExpiringOauthTokens(t *testing.T) {
 
 func TestMCPTempTokenAuthEnabled(t *testing.T) {
 	store := newTestConfigStore()
-	provider := NewOAuth2Provider(store, bifrost.NewDefaultLogger(schemas.LogLevelError))
+	provider := NewOAuth2ProviderWithStore(store, bifrost.NewDefaultLogger(schemas.LogLevelError))
 
 	assert.False(t, provider.mcpTempTokenAuthEnabled(context.Background()))
 

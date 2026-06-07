@@ -82,7 +82,7 @@ func (w *SweepWorker) run(ctx context.Context) {
 }
 
 func (w *SweepWorker) sweepExpired(ctx context.Context) {
-	n, err := w.service.DeleteExpired(ctx, time.Now())
+	n, err := w.service.DeleteExpiredAll(ctx, time.Now())
 	if err != nil {
 		if w.logger != nil {
 			w.logger.Error("temp-token sweep failed: %v", err)

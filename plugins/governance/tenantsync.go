@@ -7,25 +7,10 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 )
 
-// TenantGovernanceSyncSource extends TenantConfigProvider with tenant enumeration
-// and registry refresh used by the periodic governance sync worker.
-type TenantGovernanceSyncSource interface {
-	TenantConfigProvider
-	ListTenantIDs(ctx context.Context) []string
-	SyncTenants(ctx context.Context) error
-	GetStoreForTenant(ctx context.Context, tenantID string) configstore.ConfigStore
-}
-
 // StartTenantGovernanceSync launches a background worker that reloads governance
-// data from each tenant's config store on the given interval. It is a no-op when
-// provider is nil or interval <= 0.
+// data from each tenant's config store on the given interval.
 func (p *GovernancePlugin) StartTenantGovernanceSync(interval time.Duration) {
-	if p == nil || interval <= 0 {
-		return
-	}
-	source, ok := p.tenantConfigProvider.(TenantGovernanceSyncSource)
-	if !ok || source == nil {
-		p.logger.Warn("tenant governance sync skipped: provider does not implement TenantGovernanceSyncSource")
+	if p == nil || interval <= 0 || p.registry == nil {
 		return
 	}
 
@@ -33,37 +18,40 @@ func (p *GovernancePlugin) StartTenantGovernanceSync(interval time.Duration) {
 		ctx, cancel := context.WithCancel(p.ctx)
 		p.tenantSyncCancel = cancel
 		p.wg.Add(1)
-		go p.tenantGovernanceSyncWorker(ctx, interval, source)
+		go p.tenantGovernanceSyncWorker(ctx, interval)
 		p.logger.Info("tenant governance sync started (interval=%s)", interval)
 	})
 }
 
-func (p *GovernancePlugin) tenantGovernanceSyncWorker(ctx context.Context, interval time.Duration, source TenantGovernanceSyncSource) {
+func (p *GovernancePlugin) tenantGovernanceSyncWorker(ctx context.Context, interval time.Duration) {
 	defer p.wg.Done()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	p.syncAllTenantGovernanceStores(ctx, source)
+	p.syncAllTenantGovernanceStores(ctx)
 
 	for {
 		select {
 		case <-ticker.C:
-			p.syncAllTenantGovernanceStores(ctx, source)
+			p.syncAllTenantGovernanceStores(ctx)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context, source TenantGovernanceSyncSource) {
-	if err := source.SyncTenants(ctx); err != nil {
+func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context) {
+	if p.registry == nil {
+		return
+	}
+	if err := p.registry.SyncTenants(ctx); err != nil {
 		p.logger.Warn("tenant governance sync: failed to refresh tenant registry: %v", err)
 	}
 
-	tenantIDs := source.ListTenantIDs(ctx)
+	tenantIDs := p.registry.ListTenantIDs(ctx)
 	for _, tenantID := range tenantIDs {
-		configStore := source.GetStoreForTenant(ctx, tenantID)
+		configStore := p.registry.GetStoreForTenant(ctx, tenantID)
 		if configStore == nil {
 			p.logger.Warn("tenant governance sync: no config store for tenant %s", tenantID)
 			continue
@@ -75,12 +63,12 @@ func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context, so
 }
 
 func (p *GovernancePlugin) syncTenantGovernanceStore(ctx context.Context, tenantID string, configStore configstore.ConfigStore) error {
-	store := p.initTenantGovernanceStore(ctx, tenantID, configStore)
-	if store == nil {
+	comp := p.initTenantGovernanceComponents(ctx, tenantID, configStore)
+	if comp == nil || comp.store == nil {
 		return nil
 	}
 
-	localStore, ok := store.(*LocalGovernanceStore)
+	localStore, ok := comp.store.(*LocalGovernanceStore)
 	if !ok {
 		return nil
 	}
@@ -94,10 +82,10 @@ func (p *GovernancePlugin) syncTenantGovernanceStore(ctx context.Context, tenant
 	return localStore.RefreshFromDatabase(ctx)
 }
 
-func (p *GovernancePlugin) initTenantGovernanceStore(ctx context.Context, tenantID string, configStore configstore.ConfigStore) GovernanceStore {
+func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, tenantID string, configStore configstore.ConfigStore) *tenantGovernanceComponents {
 	if raw, ok := p.tenantComponents.Load(tenantID); ok {
 		if comp, ok := raw.(*tenantGovernanceComponents); ok && comp != nil {
-			return comp.store
+			return comp
 		}
 	}
 
@@ -107,14 +95,25 @@ func (p *GovernancePlugin) initTenantGovernanceStore(ctx context.Context, tenant
 		return nil
 	}
 	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
+	tracker := NewUsageTracker(p.ctx, store, resolver, configStore, p.logger)
+	engine, err := NewRoutingEngine(store, p.logger, p.routingChainMaxDepth)
+	if err != nil {
+		p.logger.Warn("failed to initialise routing engine for tenant %s: %v", tenantID, err)
+		return nil
+	}
 
-	comp := &tenantGovernanceComponents{store: store, resolver: resolver}
+	comp := &tenantGovernanceComponents{
+		store:    store,
+		resolver: resolver,
+		tracker:  tracker,
+		engine:   engine,
+	}
 	if actual, loaded := p.tenantComponents.LoadOrStore(tenantID, comp); loaded {
 		if existing, ok := actual.(*tenantGovernanceComponents); ok && existing != nil {
-			return existing.store
+			return existing
 		}
 	}
 
 	p.logger.Info("tenant governance store initialised for tenant %s", tenantID)
-	return store
+	return comp
 }

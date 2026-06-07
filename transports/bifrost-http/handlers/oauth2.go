@@ -81,11 +81,11 @@ func (h *OAuthHandler) handleOAuthCallback(ctx *fasthttp.RequestCtx) {
 		// be replayed by anyone with log access while the flow is alive.
 		logger.Error("[oauth] per-user callback completion failed: err=%v", perUserErr)
 		const userMsg = "OAuth authentication failed. Please try again."
-		ctx.Redirect(perUserCallbackRedirect(ctx, h.store.ConfigStore, userMsg, false), fasthttp.StatusFound)
+		ctx.Redirect(perUserCallbackRedirect(ctx, h.store.StoreFromRequestCtx(ctx), userMsg, false), fasthttp.StatusFound)
 		return
 	}
 	if perUserErr == nil {
-		ctx.Redirect(perUserCallbackRedirect(ctx, h.store.ConfigStore, "", true), fasthttp.StatusFound)
+		ctx.Redirect(perUserCallbackRedirect(ctx, h.store.StoreFromRequestCtx(ctx), "", true), fasthttp.StatusFound)
 		return
 	}
 
@@ -112,7 +112,7 @@ func (h *OAuthHandler) handleOAuthCallback(ctx *fasthttp.RequestCtx) {
 func (h *OAuthHandler) handleCallbackError(ctx *fasthttp.RequestCtx, state, errorParam, errorDescription string) {
 	isAdminTestFlow := false
 	if state != "" {
-		oauthConfig, err := h.store.ConfigStore.GetOauthConfigByState(ctx, state)
+		oauthConfig, err := h.store.StoreFromRequestCtx(ctx).GetOauthConfigByState(ctx, state)
 		switch {
 		case err != nil:
 			// Lookup failed — we can't reliably classify the flow. Default
@@ -124,7 +124,7 @@ func (h *OAuthHandler) handleCallbackError(ctx *fasthttp.RequestCtx, state, erro
 		case oauthConfig != nil:
 			isAdminTestFlow = true
 			oauthConfig.Status = "failed"
-			if updateErr := h.store.ConfigStore.UpdateOauthConfig(ctx, oauthConfig); updateErr != nil {
+			if updateErr := h.store.StoreFromRequestCtx(ctx).UpdateOauthConfig(ctx, oauthConfig); updateErr != nil {
 				logger.Warn("[oauth] failed to mark oauth config as failed: id=%s err=%v", oauthConfig.ID, updateErr)
 			}
 		}
@@ -136,7 +136,7 @@ func (h *OAuthHandler) handleCallbackError(ctx *fasthttp.RequestCtx, state, erro
 		ctx.Redirect("/workspace/mcp-registry/oauth-callback?status=failed&error="+url.QueryEscape(userMsg), fasthttp.StatusFound)
 		return
 	}
-	ctx.Redirect(perUserCallbackRedirect(ctx, h.store.ConfigStore, userMsg, false), fasthttp.StatusFound)
+	ctx.Redirect(perUserCallbackRedirect(ctx, h.store.StoreFromRequestCtx(ctx), userMsg, false), fasthttp.StatusFound)
 }
 
 // perUserCallbackRedirect picks the post-callback destination for a per-user
@@ -166,7 +166,7 @@ func perUserCallbackRedirect(ctx *fasthttp.RequestCtx, store configstore.ConfigS
 func (h *OAuthHandler) getOAuthConfigStatus(ctx *fasthttp.RequestCtx) {
 	configID := ctx.UserValue("id").(string)
 
-	oauthConfig, err := h.store.ConfigStore.GetOauthConfigByID(ctx, configID)
+	oauthConfig, err := h.store.StoreFromRequestCtx(ctx).GetOauthConfigByID(ctx, configID)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get OAuth config: %v", err))
 		return
@@ -188,7 +188,7 @@ func (h *OAuthHandler) getOAuthConfigStatus(ctx *fasthttp.RequestCtx) {
 		response["token_id"] = *oauthConfig.TokenID
 
 		// Get token metadata
-		token, err := h.store.ConfigStore.GetOauthTokenByID(ctx, *oauthConfig.TokenID)
+		token, err := h.store.StoreFromRequestCtx(ctx).GetOauthTokenByID(ctx, *oauthConfig.TokenID)
 		if err == nil && token != nil {
 			if token.ExpiresAt != nil {
 				response["token_expires_at"] = token.ExpiresAt

@@ -62,6 +62,10 @@ type ModelCatalog struct {
 	startupBgWG sync.WaitGroup // background URL syncs spawned during Init when DB already has rows
 	syncCtx    context.Context
 	syncCancel context.CancelFunc
+
+	// Last synced parameter rows (used to replicate into tenant databases).
+	parameterRows   []configstoreTables.TableModelParameters
+	parameterRowsMu sync.RWMutex
 }
 
 // Init initializes the model catalog
@@ -466,6 +470,32 @@ func (mc *ModelCatalog) populateModelPoolFromPricingData() {
 }
 
 // Cleanup cleans up the model catalog
+// SnapshotPricingRows returns a copy of the in-memory pricing cache for tenant replication.
+func (mc *ModelCatalog) SnapshotPricingRows() []configstoreTables.TableModelPricing {
+	if mc == nil {
+		return nil
+	}
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	rows := make([]configstoreTables.TableModelPricing, 0, len(mc.pricingData))
+	for _, pricing := range mc.pricingData {
+		rows = append(rows, pricing)
+	}
+	return rows
+}
+
+// SnapshotParameterRows returns the last synced model-parameter rows for tenant replication.
+func (mc *ModelCatalog) SnapshotParameterRows() []configstoreTables.TableModelParameters {
+	if mc == nil {
+		return nil
+	}
+	mc.parameterRowsMu.RLock()
+	defer mc.parameterRowsMu.RUnlock()
+	rows := make([]configstoreTables.TableModelParameters, len(mc.parameterRows))
+	copy(rows, mc.parameterRows)
+	return rows
+}
+
 func (mc *ModelCatalog) Cleanup() error {
 	if mc.syncCancel != nil {
 		mc.syncCancel()

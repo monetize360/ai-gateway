@@ -19,14 +19,14 @@ import (
 
 // SessionHandler manages HTTP requests for session operations
 type SessionHandler struct {
-	configStore   configstore.ConfigStore
+	cfg           *lib.Config
 	wsTicketStore *WSTicketStore
 }
 
 // NewSessionHandler creates a new session handler instance
-func NewSessionHandler(configStore configstore.ConfigStore, wsTicketStore *WSTicketStore) *SessionHandler {
+func NewSessionHandler(cfg *lib.Config, wsTicketStore *WSTicketStore) *SessionHandler {
 	return &SessionHandler{
-		configStore:   configStore,
+		cfg:           cfg,
 		wsTicketStore: wsTicketStore,
 	}
 }
@@ -41,7 +41,7 @@ func (h *SessionHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 
 // isAuthEnabled handles GET /api/session/is-auth-enabled - Check if auth is enabled
 func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendJSON(ctx, map[string]any{
 			"is_auth_enabled": false,
 			"has_valid_token": false,
@@ -49,7 +49,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 		})
 		return
 	}
-	authConfig, err := h.configStore.GetAuthConfig(ctx)
+	authConfig, err := h.cfg.StoreFromRequestCtx(ctx).GetAuthConfig(ctx)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get auth config: %v", err))
 		return
@@ -72,7 +72,7 @@ func (h *SessionHandler) isAuthEnabled(ctx *fasthttp.RequestCtx) {
 	}
 	hasValidToken := false
 	if token != "" {
-		session, err := h.configStore.GetSession(ctx, token)
+		session, err := h.cfg.StoreFromRequestCtx(ctx).GetSession(ctx, token)
 		if err == nil && session != nil && session.ExpiresAt.After(time.Now()) {
 			hasValidToken = true
 		}
@@ -94,7 +94,7 @@ func dashboardAuthType(isEnabled bool) string {
 
 // login handles POST /api/session/login - Login a user
 func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusForbidden, "Authentication is not enabled")
 		return
 	}
@@ -108,7 +108,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Get auth config
-	authConfig, err := h.configStore.GetAuthConfig(ctx)
+	authConfig, err := h.cfg.StoreFromRequestCtx(ctx).GetAuthConfig(ctx)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get auth config: %v", err))
 		return
@@ -143,7 +143,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-	err = h.configStore.CreateSession(ctx, session)
+	err = h.cfg.StoreFromRequestCtx(ctx).CreateSession(ctx, session)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create session: %v", err))
 		return
@@ -171,7 +171,7 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 
 // logout handles POST /api/session/logout - Logout a user
 func (h *SessionHandler) logout(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusForbidden, "Authentication is not enabled")
 		return
 	}
@@ -201,7 +201,7 @@ func (h *SessionHandler) logout(ctx *fasthttp.RequestCtx) {
 
 	// delete session from database if token exists
 	if token != "" {
-		err := h.configStore.DeleteSession(ctx, token)
+		err := h.cfg.StoreFromRequestCtx(ctx).DeleteSession(ctx, token)
 		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 			logger.Error("failed to delete session during logout: %v", err)
 			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to invalidate session. Please try again.")

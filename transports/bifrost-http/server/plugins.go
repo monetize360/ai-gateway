@@ -73,7 +73,7 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		return telemetry.Init(telConfig, bifrostConfig.ModelCatalog, logger)
 
 	case prompts.PluginName:
-		return prompts.Init(ctx, bifrostConfig.ConfigStore, logger)
+		return prompts.Init(ctx, lib.NewTenantPromptsStore(bifrostConfig), logger)
 
 	case logging.PluginName:
 		loggingConfig, err := MarshalPluginConfig[logging.Config](pluginConfig)
@@ -89,9 +89,8 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal governance plugin config: %w", err)
 		}
 		inMemoryStore := &GovernanceInMemoryStore{Config: bifrostConfig}
-		return governance.Init(ctx, governanceConfig, logger, bifrostConfig.ConfigStore,
-			bifrostConfig.GovernanceConfig, bifrostConfig.ModelCatalog,
-			bifrostConfig.MCPCatalog, inMemoryStore)
+		return governance.Init(ctx, governanceConfig, logger, bifrostConfig.Registry(),
+			bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog, inMemoryStore)
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -188,8 +187,8 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(telemetry.PluginName, builtinPlacement, schemas.Ptr(1))
 
-	// 2. Prompts (requires config store for prompt repository; disabled in enterprise)
-	if s.Config.ConfigStore != nil && ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
+	// 2. Prompts (per-tenant prompt repository; disabled in enterprise)
+	if s.Config.Registry() != nil && ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
 		s.registerPluginWithStatus(ctx, prompts.PluginName, nil, nil, false)
 	} else {
 		s.markPluginDisabled(prompts.PluginName)

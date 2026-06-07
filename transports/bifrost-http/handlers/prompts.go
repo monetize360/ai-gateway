@@ -24,17 +24,17 @@ type PromptCacheReloader interface {
 
 // PromptsHandler handles prompt repository endpoints
 type PromptsHandler struct {
-	store    configstore.ConfigStore
+	cfg      *lib.Config
 	reloader PromptCacheReloader // optional; nil when the prompts plugin is not loaded
 }
 
 // NewPromptsHandler creates a new PromptsHandler.
 // reloader may be nil; when set, the in-memory prompt cache is refreshed after mutations.
-func NewPromptsHandler(store configstore.ConfigStore, reloader PromptCacheReloader) *PromptsHandler {
-	if store == nil {
+func NewPromptsHandler(cfg *lib.Config, reloader PromptCacheReloader) *PromptsHandler {
+	if cfg == nil || cfg.TenantStore == nil {
 		return nil
 	}
-	return &PromptsHandler{store: store, reloader: reloader}
+	return &PromptsHandler{cfg: cfg, reloader: reloader}
 }
 
 // reloadCache triggers a cache refresh if a reloader is configured.
@@ -178,7 +178,7 @@ type CommitSessionRequest struct {
 
 // getFolders handles GET /api/prompt-repo/folders
 func (h *PromptsHandler) getFolders(ctx *fasthttp.RequestCtx) {
-	folders, err := h.store.GetFolders(ctx)
+	folders, err := h.cfg.StoreFromRequestCtx(ctx).GetFolders(ctx)
 	if err != nil {
 		logger.Error("failed to get folders: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
@@ -203,7 +203,7 @@ func (h *PromptsHandler) getFolderByID(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	folder, err := h.store.GetFolderByID(ctx, id)
+	folder, err := h.cfg.StoreFromRequestCtx(ctx).GetFolderByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "folder not found")
@@ -238,7 +238,7 @@ func (h *PromptsHandler) createFolder(ctx *fasthttp.RequestCtx) {
 		Description: req.Description,
 	}
 
-	if err := h.store.CreateFolder(ctx, folder); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreateFolder(ctx, folder); err != nil {
 		logger.Error("failed to create folder: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -268,7 +268,7 @@ func (h *PromptsHandler) updateFolder(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	folder, err := h.store.GetFolderByID(ctx, id)
+	folder, err := h.cfg.StoreFromRequestCtx(ctx).GetFolderByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "folder not found")
@@ -286,7 +286,7 @@ func (h *PromptsHandler) updateFolder(ctx *fasthttp.RequestCtx) {
 		folder.Description = req.Description
 	}
 
-	if err := h.store.UpdateFolder(ctx, folder); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdateFolder(ctx, folder); err != nil {
 		logger.Error("failed to update folder: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -310,7 +310,7 @@ func (h *PromptsHandler) deleteFolder(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.store.DeleteFolder(ctx, id); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteFolder(ctx, id); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "folder not found")
 			return
@@ -337,7 +337,7 @@ func (h *PromptsHandler) getPrompts(ctx *fasthttp.RequestCtx) {
 		folderID = &folderIDParam
 	}
 
-	prompts, err := h.store.GetPrompts(ctx, folderID)
+	prompts, err := h.cfg.StoreFromRequestCtx(ctx).GetPrompts(ctx, folderID)
 	if err != nil {
 		logger.Error("failed to get prompts: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
@@ -362,7 +362,7 @@ func (h *PromptsHandler) getPromptByID(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	prompt, err := h.store.GetPromptByID(ctx, id)
+	prompt, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
@@ -396,7 +396,7 @@ func (h *PromptsHandler) createPrompt(ctx *fasthttp.RequestCtx) {
 	}
 	// Verify folder exists if folder_id is provided
 	if req.FolderID != nil {
-		if _, err := h.store.GetFolderByID(ctx, *req.FolderID); err != nil {
+		if _, err := h.cfg.StoreFromRequestCtx(ctx).GetFolderByID(ctx, *req.FolderID); err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, fasthttp.StatusBadRequest, "folder not found")
 				return
@@ -413,7 +413,7 @@ func (h *PromptsHandler) createPrompt(ctx *fasthttp.RequestCtx) {
 		FolderID: req.FolderID,
 	}
 
-	if err := h.store.CreatePrompt(ctx, prompt); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePrompt(ctx, prompt); err != nil {
 		logger.Error("failed to create prompt: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -452,7 +452,7 @@ func (h *PromptsHandler) updatePrompt(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	prompt, err := h.store.GetPromptByID(ctx, id)
+	prompt, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
@@ -474,7 +474,7 @@ func (h *PromptsHandler) updatePrompt(ctx *fasthttp.RequestCtx) {
 			prompt.FolderID = nil
 		} else {
 			// Verify folder exists
-			if _, err := h.store.GetFolderByID(ctx, *req.FolderID); err != nil {
+			if _, err := h.cfg.StoreFromRequestCtx(ctx).GetFolderByID(ctx, *req.FolderID); err != nil {
 				if errors.Is(err, configstore.ErrNotFound) {
 					SendError(ctx, fasthttp.StatusBadRequest, "folder not found")
 					return
@@ -487,7 +487,7 @@ func (h *PromptsHandler) updatePrompt(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	if err := h.store.UpdatePrompt(ctx, prompt); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdatePrompt(ctx, prompt); err != nil {
 		logger.Error("failed to update prompt: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -512,7 +512,7 @@ func (h *PromptsHandler) deletePrompt(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.store.DeletePrompt(ctx, id); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeletePrompt(ctx, id); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
 			return
@@ -545,7 +545,7 @@ func (h *PromptsHandler) getPromptVersions(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	versions, err := h.store.GetPromptVersions(ctx, promptID)
+	versions, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptVersions(ctx, promptID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
@@ -579,7 +579,7 @@ func (h *PromptsHandler) getVersionByID(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	version, err := h.store.GetPromptVersionByID(ctx, uint(id))
+	version, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptVersionByID(ctx, uint(id))
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "version not found")
@@ -615,7 +615,7 @@ func (h *PromptsHandler) createVersion(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Verify prompt exists
-	if _, err := h.store.GetPromptByID(ctx, promptID); err != nil {
+	if _, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptByID(ctx, promptID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
 			return
@@ -653,7 +653,7 @@ func (h *PromptsHandler) createVersion(ctx *fasthttp.RequestCtx) {
 		Messages:      messages,
 	}
 
-	if err := h.store.CreatePromptVersion(ctx, version); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePromptVersion(ctx, version); err != nil {
 		logger.Error("failed to create version: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -683,7 +683,7 @@ func (h *PromptsHandler) deleteVersion(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.store.DeletePromptVersion(ctx, uint(id)); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeletePromptVersion(ctx, uint(id)); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "version not found")
 			return
@@ -716,7 +716,7 @@ func (h *PromptsHandler) getPromptSessions(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	sessions, err := h.store.GetPromptSessions(ctx, promptID)
+	sessions, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptSessions(ctx, promptID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
@@ -750,7 +750,7 @@ func (h *PromptsHandler) getSessionByID(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	session, err := h.store.GetPromptSessionByID(ctx, uint(id))
+	session, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptSessionByID(ctx, uint(id))
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "session not found")
@@ -786,7 +786,7 @@ func (h *PromptsHandler) createSession(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Verify prompt exists
-	if _, err := h.store.GetPromptByID(ctx, promptID); err != nil {
+	if _, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptByID(ctx, promptID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "prompt not found")
 			return
@@ -799,7 +799,7 @@ func (h *PromptsHandler) createSession(ctx *fasthttp.RequestCtx) {
 	// If version_id is provided, copy messages from that version
 	var messages []tables.TablePromptSessionMessage
 	if req.VersionID != nil {
-		version, err := h.store.GetPromptVersionByID(ctx, *req.VersionID)
+		version, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptVersionByID(ctx, *req.VersionID)
 		if err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, fasthttp.StatusBadRequest, "version not found")
@@ -858,7 +858,7 @@ func (h *PromptsHandler) createSession(ctx *fasthttp.RequestCtx) {
 		Messages:    messages,
 	}
 
-	if err := h.store.CreatePromptSession(ctx, session); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePromptSession(ctx, session); err != nil {
 		logger.Error("failed to create session: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -893,7 +893,7 @@ func (h *PromptsHandler) updateSession(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	session, err := h.store.GetPromptSessionByID(ctx, uint(id))
+	session, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptSessionByID(ctx, uint(id))
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "session not found")
@@ -924,7 +924,7 @@ func (h *PromptsHandler) updateSession(ctx *fasthttp.RequestCtx) {
 	}
 	session.Messages = messages
 
-	if err := h.store.UpdatePromptSession(ctx, session); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdatePromptSession(ctx, session); err != nil {
 		logger.Error("failed to update session: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -953,7 +953,7 @@ func (h *PromptsHandler) deleteSession(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.store.DeletePromptSession(ctx, uint(id)); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeletePromptSession(ctx, uint(id)); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "session not found")
 			return
@@ -992,7 +992,7 @@ func (h *PromptsHandler) renameSession(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	session, err := h.store.GetPromptSessionByID(ctx, uint(id))
+	session, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptSessionByID(ctx, uint(id))
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "session not found")
@@ -1003,7 +1003,7 @@ func (h *PromptsHandler) renameSession(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.store.RenamePromptSession(ctx, session.ID, req.Name); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).RenamePromptSession(ctx, session.ID, req.Name); err != nil {
 		logger.Error("failed to rename session: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
@@ -1044,7 +1044,7 @@ func (h *PromptsHandler) commitSession(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	session, err := h.store.GetPromptSessionByID(ctx, uint(id))
+	session, err := h.cfg.StoreFromRequestCtx(ctx).GetPromptSessionByID(ctx, uint(id))
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "session not found")
@@ -1108,7 +1108,7 @@ func (h *PromptsHandler) commitSession(ctx *fasthttp.RequestCtx) {
 		Messages:      messages,
 	}
 
-	if err := h.store.CreatePromptVersion(ctx, version); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePromptVersion(ctx, version); err != nil {
 		logger.Error("failed to create version: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return

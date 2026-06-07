@@ -2,51 +2,80 @@ package tenantstore
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/valyala/fasthttp"
 )
 
-// TenantConfigRegistry bridges TenantDBManager into context-aware ConfigStore
-// resolution. Call GetStoreFromContext(ctx) wherever a ConfigStore is needed;
-// it returns the tenant-specific store when the context carries a
-// BifrostContextKeyTenantID value, or falls back to the default store for
-// requests that have no tenant context (e.g. admin / health-check routes).
+// Resolver resolves per-tenant ConfigStore instances from request or context.
+type Resolver interface {
+	GetStoreFromContext(ctx context.Context) configstore.ConfigStore
+	GetStoreFromRequestCtx(ctx *fasthttp.RequestCtx) configstore.ConfigStore
+	RequireStoreFromRequestCtx(ctx *fasthttp.RequestCtx) (configstore.ConfigStore, error)
+	ListTenantIDs(ctx context.Context) []string
+	SyncTenants(ctx context.Context) error
+	GetStoreForTenant(ctx context.Context, tenantID string) configstore.ConfigStore
+}
+
+// TenantConfigRegistry resolves per-tenant ConfigStore instances from request
+// or context. Every read/write path must carry BifrostContextKeyTenantID (set by
+// TenantMiddleware on authenticated routes).
 type TenantConfigRegistry struct {
-	manager      *TenantDBManager
-	defaultStore configstore.ConfigStore
+	manager *TenantDBManager
 }
 
 // NewTenantConfigRegistry creates a registry backed by the given TenantDBManager.
-// defaultStore is used when no tenantID is present in the context; it is
-// typically the shared single-tenant ConfigStore loaded from config.json.
-func NewTenantConfigRegistry(manager *TenantDBManager, defaultStore configstore.ConfigStore) *TenantConfigRegistry {
+func NewTenantConfigRegistry(manager *TenantDBManager) *TenantConfigRegistry {
 	return &TenantConfigRegistry{
-		manager:      manager,
-		defaultStore: defaultStore,
+		manager: manager,
 	}
 }
 
 // GetStoreFromContext returns the ConfigStore for the tenant identified by
-// BifrostContextKeyTenantID in ctx. Falls back to the defaultStore when:
-//   - there is no tenantID in the context
-//   - manager fails to load the tenant store (error is logged, not propagated)
+// BifrostContextKeyTenantID in ctx. Returns nil when tenantID is absent or the
+// tenant is not registered.
 func (r *TenantConfigRegistry) GetStoreFromContext(ctx context.Context) configstore.ConfigStore {
+	if r == nil || r.manager == nil {
+		return nil
+	}
 	tenantID, _ := ctx.Value(schemas.BifrostContextKeyTenantID).(string)
 	if tenantID == "" {
-		return r.defaultStore
+		return nil
 	}
-
 	store, err := r.manager.GetStore(ctx, tenantID)
 	if err != nil || store == nil {
-		return r.defaultStore
+		return nil
 	}
 	return store
 }
 
-// DefaultStore returns the fallback ConfigStore (non-tenant path).
-func (r *TenantConfigRegistry) DefaultStore() configstore.ConfigStore {
-	return r.defaultStore
+// GetStoreFromRequestCtx reads the tenant ID from fasthttp user values (set by
+// TenantMiddleware) and returns the matching ConfigStore.
+func (r *TenantConfigRegistry) GetStoreFromRequestCtx(ctx *fasthttp.RequestCtx) configstore.ConfigStore {
+	if r == nil || ctx == nil {
+		return nil
+	}
+	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
+	if tenantID == "" {
+		return nil
+	}
+	store, err := r.manager.GetStore(ctx, tenantID)
+	if err != nil || store == nil {
+		return nil
+	}
+	return store
+}
+
+// RequireStoreFromRequestCtx returns the tenant ConfigStore or an error when the
+// request has no tenant context.
+func (r *TenantConfigRegistry) RequireStoreFromRequestCtx(ctx *fasthttp.RequestCtx) (configstore.ConfigStore, error) {
+	store := r.GetStoreFromRequestCtx(ctx)
+	if store == nil {
+		return nil, fmt.Errorf("tenant context required")
+	}
+	return store, nil
 }
 
 // ListTenantIDs returns the tenant IDs currently registered with the manager.

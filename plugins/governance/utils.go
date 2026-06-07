@@ -125,8 +125,11 @@ func (p *GovernancePlugin) filterModelsForVirtualKey(
 	models []schemas.Model,
 	virtualKeyValue string,
 ) []schemas.Model {
-	// Get virtual key configuration
-	vk, exists := p.store.GetVirtualKey(ctx, virtualKeyValue)
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return []schemas.Model{}
+	}
+	vk, exists := comp.store.GetVirtualKey(ctx, virtualKeyValue)
 	if !exists {
 		p.logger.Warn("[Governance] Virtual key not found for list models filtering: %s", virtualKeyValue)
 		return []schemas.Model{} // VK not found, return empty list

@@ -2,11 +2,13 @@ package governance
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/valyala/fasthttp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,6 +21,14 @@ type stubTenantGovernanceSyncSource struct {
 
 func (s *stubTenantGovernanceSyncSource) GetStoreFromContext(ctx context.Context) configstore.ConfigStore {
 	return nil
+}
+
+func (s *stubTenantGovernanceSyncSource) GetStoreFromRequestCtx(_ *fasthttp.RequestCtx) configstore.ConfigStore {
+	return nil
+}
+
+func (s *stubTenantGovernanceSyncSource) RequireStoreFromRequestCtx(_ *fasthttp.RequestCtx) (configstore.ConfigStore, error) {
+	return nil, fmt.Errorf("tenant context required")
 }
 
 func (s *stubTenantGovernanceSyncSource) ListTenantIDs(context.Context) []string {
@@ -47,17 +57,17 @@ func TestStartTenantGovernanceSyncRunsImmediatelyAndOnTicker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	plugin := &GovernancePlugin{
-		ctx:    ctx,
-		logger: logger,
-		store:  store,
-	}
 	source := &stubTenantGovernanceSyncSource{
 		tenantIDs: []string{"tenant-a"},
 		stores:    map[string]configstore.ConfigStore{},
 	}
+	plugin := &GovernancePlugin{
+		ctx:      ctx,
+		logger:   logger,
+		registry: source,
+	}
+	plugin.tenantComponents.Store("tenant-a", &tenantGovernanceComponents{store: store})
 
-	plugin.tenantConfigProvider = source
 	plugin.StartTenantGovernanceSync(20 * time.Millisecond)
 
 	require.Eventually(t, func() bool {

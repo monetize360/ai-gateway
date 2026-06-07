@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"gorm.io/gorm"
 )
@@ -132,15 +131,14 @@ func ReplicateModelCatalogData(
 	})
 }
 
-func syncModelCatalogToAllTenants(
+func syncModelCatalogRowsToAllTenants(
 	ctx context.Context,
 	manager *TenantDBManager,
-	sourceStore configstore.ConfigStore,
 	logger schemas.Logger,
-	replicate func(context.Context, modelCatalogSource, modelCatalogTarget) error,
+	replicate func(context.Context, modelCatalogTarget, *gorm.DB) error,
 	kind string,
 ) {
-	if manager == nil || sourceStore == nil || replicate == nil {
+	if manager == nil || replicate == nil {
 		return
 	}
 	if err := manager.SyncTenantsFromGlobalDB(ctx); err != nil {
@@ -164,7 +162,9 @@ func syncModelCatalogToAllTenants(
 			logger.Warn("tenant model catalog %s sync: config store for tenant %s does not support catalog replication", kind, tenantID)
 			continue
 		}
-		if err := replicate(ctx, sourceStore, target); err != nil {
+		if err := target.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+			return replicate(ctx, target, tx)
+		}); err != nil {
 			logger.Warn("tenant model catalog %s sync failed for tenant %s: %v", kind, tenantID, err)
 			continue
 		}
@@ -175,34 +175,54 @@ func syncModelCatalogToAllTenants(
 	}
 }
 
-// SyncModelCatalogPricingToAllTenants copies model pricing from sourceStore into every tenant DB.
-func SyncModelCatalogPricingToAllTenants(
+// SyncModelPricingRowsToAllTenants upserts pricing rows into every tenant DB.
+func SyncModelPricingRowsToAllTenants(
 	ctx context.Context,
 	manager *TenantDBManager,
-	sourceStore configstore.ConfigStore,
+	pricingRows []configstoreTables.TableModelPricing,
 	logger schemas.Logger,
 ) {
-	syncModelCatalogToAllTenants(ctx, manager, sourceStore, logger, ReplicateModelPricingData, "pricing")
+	if len(pricingRows) == 0 {
+		return
+	}
+	syncModelCatalogRowsToAllTenants(ctx, manager, logger, func(ctx context.Context, target modelCatalogTarget, tx *gorm.DB) error {
+		return replicateModelPricingRows(ctx, target, pricingRows, tx)
+	}, "pricing")
 }
 
-// SyncModelCatalogParametersToAllTenants copies model parameters from sourceStore into every tenant DB.
-func SyncModelCatalogParametersToAllTenants(
+// SyncModelParameterRowsToAllTenants upserts model parameter rows into every tenant DB.
+func SyncModelParameterRowsToAllTenants(
 	ctx context.Context,
 	manager *TenantDBManager,
-	sourceStore configstore.ConfigStore,
+	paramRows []configstoreTables.TableModelParameters,
 	logger schemas.Logger,
 ) {
-	syncModelCatalogToAllTenants(ctx, manager, sourceStore, logger, ReplicateModelParametersData, "parameters")
+	if len(paramRows) == 0 {
+		return
+	}
+	syncModelCatalogRowsToAllTenants(ctx, manager, logger, func(ctx context.Context, target modelCatalogTarget, tx *gorm.DB) error {
+		return replicateModelParameterRows(ctx, target, paramRows, tx)
+	}, "parameters")
 }
 
-// SyncModelCatalogToAllTenants copies model pricing and parameters from sourceStore
-// into every tenant config store. Tenants that fail to sync are logged and skipped.
-func SyncModelCatalogToAllTenants(
+// SyncModelCatalogFromSource copies model pricing and parameters from source into every tenant DB.
+func SyncModelCatalogFromSource(
 	ctx context.Context,
 	manager *TenantDBManager,
-	sourceStore configstore.ConfigStore,
+	source modelCatalogSource,
 	logger schemas.Logger,
 ) {
-	SyncModelCatalogPricingToAllTenants(ctx, manager, sourceStore, logger)
-	SyncModelCatalogParametersToAllTenants(ctx, manager, sourceStore, logger)
+	if manager == nil || source == nil {
+		return
+	}
+	pricingRows, err := source.GetModelPrices(ctx)
+	if err != nil {
+		logger.Warn("tenant model catalog sync: failed to read pricing from source: %v", err)
+	}
+	paramRows, err := source.GetModelParameters(ctx)
+	if err != nil {
+		logger.Warn("tenant model catalog sync: failed to read parameters from source: %v", err)
+	}
+	SyncModelPricingRowsToAllTenants(ctx, manager, pricingRows, logger)
+	SyncModelParameterRowsToAllTenants(ctx, manager, paramRows, logger)
 }

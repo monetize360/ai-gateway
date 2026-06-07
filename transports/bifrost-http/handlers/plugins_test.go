@@ -8,6 +8,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
@@ -100,7 +101,7 @@ func TestUpdatePlugin_ConfigMerge(t *testing.T) {
 
 	h := &PluginsHandler{
 		pluginsLoader: noopPluginsLoader{},
-		configStore:   store,
+		cfg:           lib.NewTestConfig(store),
 	}
 
 	// The UI OTEL form sends only the base fields — no plugin_span_filter.
@@ -143,7 +144,7 @@ func TestUpdatePlugin_ConfigMerge_NewPlugin(t *testing.T) {
 	store := &capturePluginsStore{existingPlugin: nil}
 	h := &PluginsHandler{
 		pluginsLoader: noopPluginsLoader{},
-		configStore:   store,
+		cfg:           lib.NewTestConfig(store),
 	}
 
 	reqBody := map[string]any{

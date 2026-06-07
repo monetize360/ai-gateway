@@ -32,15 +32,15 @@ type PluginsLoader interface {
 
 // PluginsHandler is the handler for the plugins API
 type PluginsHandler struct {
-	configStore   configstore.ConfigStore
+	cfg           *lib.Config
 	pluginsLoader PluginsLoader
 }
 
 // NewPluginsHandler creates a new PluginsHandler
-func NewPluginsHandler(pluginsLoader PluginsLoader, configStore configstore.ConfigStore) *PluginsHandler {
+func NewPluginsHandler(pluginsLoader PluginsLoader, cfg *lib.Config) *PluginsHandler {
 	return &PluginsHandler{
 		pluginsLoader: pluginsLoader,
-		configStore:   configStore,
+		cfg:           cfg,
 	}
 }
 
@@ -168,7 +168,7 @@ func (h *PluginsHandler) getBuiltinPlugins(ctx *fasthttp.RequestCtx) {
 
 // getPlugins gets all plugins
 func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		pluginStatus := h.pluginsLoader.GetPluginStatus(ctx)
 		finalPlugins := []PluginResponse{}
 		for name, pluginStatus := range pluginStatus {
@@ -188,7 +188,7 @@ func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 		})
 		return
 	}
-	plugins, err := h.configStore.GetPlugins(ctx)
+	plugins, err := h.cfg.StoreFromRequestCtx(ctx).GetPlugins(ctx)
 	if err != nil {
 		logger.Error("failed to get plugins: %v", err)
 		SendError(ctx, 500, "Failed to retrieve plugins")
@@ -208,7 +208,7 @@ func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 
 // getPlugin gets a plugin by name
 func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		pluginStatus := h.pluginsLoader.GetPluginStatus(ctx)
 		pluginInfo := PluginResponse{}
 		for name, pluginStatus := range pluginStatus {
@@ -249,7 +249,7 @@ func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	plugin, err := h.configStore.GetPlugin(ctx, name)
+	plugin, err := h.cfg.StoreFromRequestCtx(ctx).GetPlugin(ctx, name)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Plugin not found")
@@ -267,7 +267,7 @@ func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
 
 // createPlugin creates a new plugin
 func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, 400, "Plugins creation is  not supported when configstore is disabled")
 		return
 	}
@@ -297,7 +297,7 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 		request.Path = nil
 	}
 	// Check if plugin already exists
-	existingPlugin, err := h.configStore.GetPlugin(ctx, request.Name)
+	existingPlugin, err := h.cfg.StoreFromRequestCtx(ctx).GetPlugin(ctx, request.Name)
 	if err == nil && existingPlugin != nil {
 		SendError(ctx, fasthttp.StatusConflict, "Plugin already exists")
 		return
@@ -315,7 +315,7 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Create DB entry first to avoid orphaned in-memory state if DB write fails
-	if err := h.configStore.CreatePlugin(ctx, &configstoreTables.TablePlugin{
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePlugin(ctx, &configstoreTables.TablePlugin{
 		Name:      request.Name,
 		Enabled:   request.Enabled,
 		Config:    normalizedConfig,
@@ -333,7 +333,7 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 	if request.Enabled {
 		if err := h.pluginsLoader.ReloadPlugin(ctx, request.Name, request.Path, normalizedConfig, request.Placement, request.Order); err != nil {
 			logger.Error("failed to load plugin: %v", err)
-			if rbErr := h.configStore.DeletePlugin(ctx, request.Name); rbErr != nil {
+			if rbErr := h.cfg.StoreFromRequestCtx(ctx).DeletePlugin(ctx, request.Name); rbErr != nil {
 				logger.Error("failed to rollback plugin creation: %v", rbErr)
 			}
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Plugin created in database but failed to load: %v", err))
@@ -341,7 +341,7 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	plugin, err := h.configStore.GetPlugin(ctx, request.Name)
+	plugin, err := h.cfg.StoreFromRequestCtx(ctx).GetPlugin(ctx, request.Name)
 	if err != nil {
 		logger.Error("failed to get plugin: %v", err)
 		SendError(ctx, 500, "Failed to retrieve plugin")
@@ -357,7 +357,7 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 
 // updatePlugin updates an existing plugin
 func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, 400, "Plugins update is not supported when configstore is disabled")
 		return
 	}
@@ -385,7 +385,7 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 	var err error
 	// Fetch the existing plugin to enable config merging below.
 	var existingPlugin *configstoreTables.TablePlugin
-	existingPlugin, err = h.configStore.GetPlugin(ctx, name)
+	existingPlugin, err = h.cfg.StoreFromRequestCtx(ctx).GetPlugin(ctx, name)
 	if err != nil {
 		// If doesn't exist, create it
 		if errors.Is(err, configstore.ErrNotFound) {
@@ -396,7 +396,7 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 				Path:     nil,
 				IsCustom: false,
 			}
-			if err := h.configStore.CreatePlugin(ctx, plugin); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreatePlugin(ctx, plugin); err != nil {
 				logger.Error("failed to create plugin: %v", err)
 				SendError(ctx, 500, "Failed to create plugin")
 				return
@@ -456,7 +456,7 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Updating the plugin
-	if err := h.configStore.UpdatePlugin(ctx, &configstoreTables.TablePlugin{
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdatePlugin(ctx, &configstoreTables.TablePlugin{
 		Name:      name,
 		Enabled:   request.Enabled,
 		Config:    mergedConfig,
@@ -469,7 +469,7 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 500, "Failed to update plugin")
 		return
 	}
-	plugin, err = h.configStore.GetPlugin(ctx, name)
+	plugin, err = h.cfg.StoreFromRequestCtx(ctx).GetPlugin(ctx, name)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Plugin not found")
@@ -505,7 +505,7 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 
 // deletePlugin deletes an existing plugin
 func (h *PluginsHandler) deletePlugin(ctx *fasthttp.RequestCtx) {
-	if h.configStore == nil {
+	if h.cfg.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, 400, "Plugins deletion is not supported when configstore is disabled")
 		return
 	}
@@ -530,7 +530,7 @@ func (h *PluginsHandler) deletePlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := h.configStore.DeletePlugin(ctx, name); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeletePlugin(ctx, name); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Plugin not found")
 			return

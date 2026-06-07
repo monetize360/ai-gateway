@@ -34,7 +34,6 @@ type ModelsManager interface {
 
 // ProviderHandler manages HTTP requests for provider operations
 type ProviderHandler struct {
-	dbStore       configstore.ConfigStore
 	inMemoryStore *lib.Config
 	client        *bifrost.Bifrost
 	modelsManager ModelsManager
@@ -43,7 +42,6 @@ type ProviderHandler struct {
 // NewProviderHandler creates a new provider handler instance
 func NewProviderHandler(modelsManager ModelsManager, inMemoryStore *lib.Config, client *bifrost.Bifrost) *ProviderHandler {
 	return &ProviderHandler{
-		dbStore:       inMemoryStore.ConfigStore,
 		inMemoryStore: inMemoryStore,
 		client:        client,
 		modelsManager: modelsManager,
@@ -134,9 +132,9 @@ func (h *ProviderHandler) RegisterRoutes(r *router.Router, middlewares ...schema
 func (h *ProviderHandler) listProviders(ctx *fasthttp.RequestCtx) {
 	// Fetching providers from database or in-memory store
 	var providers map[schemas.ModelProvider]configstore.ProviderConfig
-	if h.dbStore != nil {
+	if h.inMemoryStore.StoreFromRequestCtx(ctx) != nil {
 		var err error
-		providers, err = h.dbStore.GetProvidersConfig(ctx)
+		providers, err = h.inMemoryStore.StoreFromRequestCtx(ctx).GetProvidersConfig(ctx)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get providers: %v", err))
 			return
@@ -189,8 +187,8 @@ func (h *ProviderHandler) getProvider(ctx *fasthttp.RequestCtx) {
 	}
 
 	var config *configstore.ProviderConfig
-	if h.dbStore != nil {
-		config, err = h.dbStore.GetProviderConfig(ctx, provider)
+	if h.inMemoryStore.StoreFromRequestCtx(ctx) != nil {
+		config, err = h.inMemoryStore.StoreFromRequestCtx(ctx).GetProviderConfig(ctx, provider)
 		if err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, fasthttp.StatusNotFound, fmt.Sprintf("Provider not found: %v", err))
@@ -755,12 +753,12 @@ func (h *ProviderHandler) parseModelListQuery(ctx *fasthttp.RequestCtx, defaultL
 	if vkValue := governanceplugin.ParseVirtualKeyFromFastHTTPRequest(ctx); vkValue != nil {
 		trimmedVKValue := strings.TrimSpace(*vkValue)
 
-		if h.dbStore == nil {
+		if h.inMemoryStore.StoreFromRequestCtx(ctx) == nil {
 			SendError(ctx, fasthttp.StatusServiceUnavailable, "database store unavailable")
 			return query, false
 		}
 
-		vk, err := h.dbStore.GetVirtualKeyByValue(ctx, trimmedVKValue)
+		vk, err := h.inMemoryStore.StoreFromRequestCtx(ctx).GetVirtualKeyByValue(ctx, trimmedVKValue)
 		if err != nil {
 			if !errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to resolve virtual key: %v", err))
@@ -900,12 +898,12 @@ func (h *ProviderHandler) getModelParameters(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if h.dbStore == nil {
+	if h.inMemoryStore.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "database store not available")
 		return
 	}
 
-	params, err := h.dbStore.GetModelParametersByModel(ctx, modelParam)
+	params, err := h.inMemoryStore.StoreFromRequestCtx(ctx).GetModelParametersByModel(ctx, modelParam)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, fmt.Sprintf("no parameters found for model %s", modelParam))

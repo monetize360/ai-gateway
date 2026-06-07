@@ -13,6 +13,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/plugins/governance"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
@@ -740,7 +741,7 @@ func TestRotateVirtualKey_OnlyChangesValueAndReloads(t *testing.T) {
 					{ID: "budget-1", MaxLimit: 100, CurrentUsage: 42, ResetDuration: "1d"},
 				},
 				ProviderConfigs: []configstoreTables.TableVirtualKeyProviderConfig{
-					{ID: 7, VirtualKeyID: "vk-1", Provider: "openai"},
+					{ID: "7", VirtualKeyID: "vk-1", Provider: "openai"},
 				},
 				MCPConfigs: []configstoreTables.TableVirtualKeyMCPConfig{
 					{ID: "00000000-0000-0000-0000-000000000009", VirtualKeyID: "vk-1", MCPClientID: "00000000-0000-0000-0000-000000000003"},
@@ -749,7 +750,7 @@ func TestRotateVirtualKey_OnlyChangesValueAndReloads(t *testing.T) {
 		},
 	}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.SetUserValue("vk_id", "vk-1")
@@ -782,10 +783,10 @@ func TestRotateVirtualKey_OnlyChangesValueAndReloads(t *testing.T) {
 	if len(updated.Budgets) != 1 || updated.Budgets[0].CurrentUsage != 42 {
 		t.Fatalf("rotation changed budgets: %#v", updated.Budgets)
 	}
-	if len(updated.ProviderConfigs) != 1 || updated.ProviderConfigs[0].ID != 7 {
+	if len(updated.ProviderConfigs) != 1 || updated.ProviderConfigs[0].ID != "7" {
 		t.Fatalf("rotation changed provider configs: %#v", updated.ProviderConfigs)
 	}
-	if len(updated.MCPConfigs) != 1 || updated.MCPConfigs[0].ID != 9 {
+	if len(updated.MCPConfigs) != 1 || updated.MCPConfigs[0].ID != "00000000-0000-0000-0000-000000000009" {
 		t.Fatalf("rotation changed MCP configs: %#v", updated.MCPConfigs)
 	}
 
@@ -806,7 +807,7 @@ func TestRotateVirtualKey_NotFound(t *testing.T) {
 
 	store := &mockRotateConfigStore{virtualKeys: map[string]*configstoreTables.TableVirtualKey{}}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.SetUserValue("vk_id", "missing")
@@ -834,7 +835,7 @@ func TestRotateVirtualKey_UpdateFailureDoesNotReload(t *testing.T) {
 		updateErr: errors.New("database unavailable"),
 	}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.SetUserValue("vk_id", "vk-1")
@@ -861,7 +862,7 @@ func TestRotateVirtualKey_ReloadFailureReturnsErrorAfterUpdate(t *testing.T) {
 		},
 	}
 	manager := &mockRotateGovernanceManager{store: store, reloadErr: errors.New("reload failed")}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.SetUserValue("vk_id", "vk-1")
@@ -895,7 +896,7 @@ func TestRotateVirtualKeys_PartialSuccess(t *testing.T) {
 		},
 	}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetBodyString(`{"ids":["vk-1","missing","vk-2","vk-1"]}`)
@@ -951,7 +952,7 @@ func TestRotateVirtualKeys_RejectsInvalidRequests(t *testing.T) {
 				},
 			}
 			manager := &mockRotateGovernanceManager{store: store}
-			h := &GovernanceHandler{configStore: store, governanceManager: manager}
+			h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 			ctx := &fasthttp.RequestCtx{}
 			ctx.Request.SetBodyString(tt.body)
@@ -984,7 +985,7 @@ func TestRotateVirtualKeys_TrimsAndDeduplicatesIDs(t *testing.T) {
 		},
 	}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetBodyString(`{"ids":[" vk-1 ","vk-1","vk-2"]}`)
@@ -1007,7 +1008,7 @@ func TestRotateVirtualKeys_AllFailuresReturnsServerError(t *testing.T) {
 
 	store := &mockRotateConfigStore{virtualKeys: map[string]*configstoreTables.TableVirtualKey{}}
 	manager := &mockRotateGovernanceManager{store: store}
-	h := &GovernanceHandler{configStore: store, governanceManager: manager}
+	h := &GovernanceHandler{cfg: lib.NewTestConfig(store), governanceManager: manager}
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetBodyString(`{"ids":["missing-1","missing-2"]}`)
@@ -1046,7 +1047,7 @@ func TestGetVirtualKeys_PaginatedEndpoint_ResponseShape(t *testing.T) {
 	SetLogger(&mockLogger{})
 
 	h := &GovernanceHandler{
-		configStore:       &mockConfigStoreForVK{},
+		cfg:               lib.NewTestConfig(&mockConfigStoreForVK{}),
 		governanceManager: &mockGovernanceManagerForVK{},
 	}
 
@@ -1119,7 +1120,7 @@ func TestGetVirtualKeys_PaginatedEndpoint_QueryParams(t *testing.T) {
 	SetLogger(&mockLogger{})
 
 	h := &GovernanceHandler{
-		configStore:       &mockConfigStoreForVK{},
+		cfg:               lib.NewTestConfig(&mockConfigStoreForVK{}),
 		governanceManager: &mockGovernanceManagerForVK{},
 	}
 
