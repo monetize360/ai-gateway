@@ -518,10 +518,9 @@ func TestListModelDetails_UnfilteredIgnoresKeys(t *testing.T) {
 
 // --- VK-based filtering tests ---
 
-// TestParseVKValueFromRequest verifies that the VK value is extracted from each
-// supported header, in priority order, and that non-VK values are ignored.
-func TestParseVKValueFromRequest(t *testing.T) {
-	const vk = "sk-bf-test-virtual-key"
+// TestVirtualKeyIDFromFastHTTPContext verifies virtual key ID is read from tenant JWT user values only.
+func TestVirtualKeyIDFromFastHTTPContext(t *testing.T) {
+	const vkID = "550e8400-e29b-41d4-a716-446655440000"
 
 	cases := []struct {
 		name   string
@@ -529,52 +528,30 @@ func TestParseVKValueFromRequest(t *testing.T) {
 		wantVK string
 	}{
 		{
-			name: "x-bf-vk header",
+			name: "governance virtual key id user value",
 			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("x-bf-vk", vk)
+				ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, vkID)
 			},
-			wantVK: vk,
+			wantVK: vkID,
 		},
 		{
-			name: "Authorization Bearer header",
+			name: "virtual key user value fallback",
 			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("Authorization", "Bearer "+vk)
+				ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, vkID)
 			},
-			wantVK: vk,
+			wantVK: vkID,
 		},
 		{
-			name: "x-api-key header",
-			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("x-api-key", vk)
-			},
-			wantVK: vk,
-		},
-		{
-			name: "x-goog-api-key header",
-			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("x-goog-api-key", vk)
-			},
-			wantVK: vk,
-		},
-		{
-			name:   "no header returns empty string",
+			name:   "no user value returns empty string",
 			setup:  func(*fasthttp.RequestCtx) {},
 			wantVK: "",
 		},
 		{
-			name: "non-VK Bearer token returns empty string",
+			name: "x-bf-vk header is ignored",
 			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("Authorization", "Bearer regular-api-key-123")
+				ctx.Request.Header.Set("x-bf-vk", "sk-bf-ignored")
 			},
 			wantVK: "",
-		},
-		{
-			name: "x-bf-vk takes priority over Authorization",
-			setup: func(ctx *fasthttp.RequestCtx) {
-				ctx.Request.Header.Set("x-bf-vk", vk)
-				ctx.Request.Header.Set("Authorization", "Bearer sk-bf-other")
-			},
-			wantVK: vk,
 		},
 	}
 
@@ -582,13 +559,9 @@ func TestParseVKValueFromRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := &fasthttp.RequestCtx{}
 			tc.setup(ctx)
-			got := governanceplugin.ParseVirtualKeyFromFastHTTPRequest(ctx)
-			gotValue := ""
-			if got != nil {
-				gotValue = *got
-			}
-			if gotValue != tc.wantVK {
-				t.Fatalf("expected %q, got %q", tc.wantVK, gotValue)
+			got := governanceplugin.VirtualKeyIDFromFastHTTPContext(ctx)
+			if got != tc.wantVK {
+				t.Fatalf("expected %q, got %q", tc.wantVK, got)
 			}
 		})
 	}

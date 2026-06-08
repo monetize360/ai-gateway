@@ -1397,7 +1397,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyBudgetExceeded(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1428,7 +1428,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyRateLimitExceeded_Token(t *testi
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1459,7 +1459,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyRateLimitExceeded_Request(t *tes
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1491,7 +1491,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyChecksPass(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1517,7 +1517,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyNotFound(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-nonexistent")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk-missing")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1546,7 +1546,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyBlocked(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1578,7 +1578,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyProviderBlocked(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1610,7 +1610,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyModelBlocked(t *testing.T) {
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{
@@ -1647,7 +1647,7 @@ func TestPreLLMHook_ModelProviderPass_VirtualKeyBudgetExceeded_WithModelProvider
 	plugin, err := InitFromStore(context.Background(), &Config{IsVkMandatory: boolPtr(false)}, logger, store, nil, nil, nil, nil)
 	require.NoError(t, err)
 
-	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "sk-bf-test")
+	parentCtx := context.WithValue(context.Background(), schemas.BifrostContextKeyVirtualKey, "vk1")
 	parentCtx = context.WithValue(parentCtx, schemas.BifrostContextKeyRequestID, "req-1")
 	ctx := schemas.NewBifrostContext(parentCtx, schemas.NoDeadline)
 	req := &schemas.BifrostRequest{

@@ -53,6 +53,10 @@ type LocalGovernanceStore struct {
 
 	// Logger
 	logger schemas.Logger
+
+	// Incremental DB refresh watermark (UTC). Zero until the first full load completes.
+	refreshMu      sync.Mutex
+	lastRefreshAt  time.Time
 }
 
 type GovernanceData struct {
@@ -216,14 +220,48 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	return store, nil
 }
 
-// RefreshFromDatabase reloads all governance entities from the backing config store
-// into memory. Callers should flush in-memory usage counters to the database
-// before refreshing when usage tracking is active.
+// RefreshFromDatabase reloads governance entities from the backing config store.
+// After the initial full load, only rows with updated_at within the refresh window
+// are fetched and merged into the in-memory maps. Callers should flush in-memory
+// usage counters to the database before refreshing when usage tracking is active.
 func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 	if gs.configStore == nil {
 		return fmt.Errorf("config store is not configured")
 	}
-	return gs.loadFromDatabase(ctx)
+
+	refreshStartedAt := time.Now().UTC()
+	gs.refreshMu.Lock()
+	since := gs.lastRefreshAt
+	gs.refreshMu.Unlock()
+
+	if since.IsZero() {
+		if err := gs.loadFromDatabase(ctx); err != nil {
+			return err
+		}
+		gs.refreshMu.Lock()
+		gs.lastRefreshAt = refreshStartedAt
+		gs.refreshMu.Unlock()
+		return nil
+	}
+
+	watermark := since.Add(-configstore.RefreshOverlap)
+	delta, err := gs.configStore.GetGovernanceRefreshDelta(ctx, watermark)
+	if err != nil {
+		return err
+	}
+	if delta.IsEmpty() {
+		gs.refreshMu.Lock()
+		gs.lastRefreshAt = refreshStartedAt
+		gs.refreshMu.Unlock()
+		return nil
+	}
+
+	gs.applyGovernanceRefreshDelta(ctx, delta)
+
+	gs.refreshMu.Lock()
+	gs.lastRefreshAt = refreshStartedAt
+	gs.refreshMu.Unlock()
+	return nil
 }
 
 // LoadBudget loads a budget by its ID from the local store.
@@ -725,9 +763,17 @@ func (gs *LocalGovernanceStore) GetGovernanceData(ctx context.Context) *Governan
 	}
 }
 
-// GetVirtualKey retrieves a virtual key by its value (lock-free) with all relationships preloaded
-func (gs *LocalGovernanceStore) GetVirtualKey(ctx context.Context, vkValue string) (*configstoreTables.TableVirtualKey, bool) {
-	value, exists := gs.virtualKeys.Load(vkValue)
+// storeVirtualKey indexes a virtual key by governance_virtual_keys.id (lock-free).
+func (gs *LocalGovernanceStore) storeVirtualKey(vk *configstoreTables.TableVirtualKey) {
+	if vk == nil || vk.ID == "" {
+		return
+	}
+	gs.virtualKeys.Store(vk.ID, vk)
+}
+
+// GetVirtualKey retrieves a virtual key by ID (lock-free).
+func (gs *LocalGovernanceStore) GetVirtualKey(ctx context.Context, vkKey string) (*configstoreTables.TableVirtualKey, bool) {
+	value, exists := gs.virtualKeys.Load(vkKey)
 	if !exists || value == nil {
 		return nil, false
 	}
@@ -1620,7 +1666,84 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	// Rebuild in-memory structures (lock-free)
 	gs.rebuildInMemoryStructures(ctx, organizations, orgLimits, virtualKeys, budgets, rateLimits, modelConfigs, providers, routingRules)
 
+	gs.refreshMu.Lock()
+	gs.lastRefreshAt = time.Now().UTC()
+	gs.refreshMu.Unlock()
+
 	return nil
+}
+
+func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context, delta *configstore.GovernanceRefreshDelta) {
+	if delta == nil {
+		return
+	}
+
+	for i := range delta.Organizations {
+		org := &delta.Organizations[i]
+		if org.Deleted {
+			gs.organizations.Delete(org.ID)
+			continue
+		}
+		gs.organizations.Store(org.ID, org)
+	}
+
+	for i := range delta.OrgLimits {
+		limit := &delta.OrgLimits[i]
+		if limit.Deleted {
+			gs.DeleteOrgLimitInMemory(ctx, limit.OrgID)
+			continue
+		}
+		gs.UpdateOrgLimitInMemory(ctx, limit, nil, nil, nil)
+	}
+
+	for i := range delta.Budgets {
+		budget := &delta.Budgets[i]
+		if budget.Deleted {
+			gs.DeleteBudget(ctx, budget.ID)
+			continue
+		}
+		gs.UpsertBudgetConfig(ctx, budget.ID, budget)
+	}
+
+	for i := range delta.RateLimits {
+		rl := &delta.RateLimits[i]
+		if rl.Deleted {
+			gs.DeleteRateLimit(ctx, rl.ID)
+			continue
+		}
+		gs.UpsertRateLimitConfig(ctx, rl.ID, rl)
+	}
+
+	for i := range delta.ModelConfigs {
+		mc := &delta.ModelConfigs[i]
+		if mc.Deleted {
+			gs.DeleteModelConfigInMemory(ctx, mc.ID)
+			continue
+		}
+		gs.UpdateModelConfigInMemory(ctx, mc)
+	}
+
+	for i := range delta.Providers {
+		provider := &delta.Providers[i]
+		if provider.Deleted {
+			gs.DeleteProviderInMemory(ctx, provider.Name)
+			continue
+		}
+		gs.UpdateProviderInMemory(ctx, provider)
+	}
+
+	for i := range delta.VirtualKeys {
+		vk := &delta.VirtualKeys[i]
+		if vk.Deleted {
+			gs.DeleteVirtualKeyInMemory(ctx, vk.ID)
+			continue
+		}
+		gs.UpdateVirtualKeyInMemory(ctx, vk, nil, nil, nil)
+	}
+
+	for i := range delta.RoutingRules {
+		_ = gs.UpdateRoutingRuleInMemory(ctx, &delta.RoutingRules[i])
+	}
 }
 
 // loadFromConfigMemory loads all governance data from the config's memory into store's memory
@@ -1765,7 +1888,7 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	// Build virtual keys map and track active VKs
 	for i := range virtualKeys {
 		vk := &virtualKeys[i]
-		gs.virtualKeys.Store(vk.Value, vk)
+		gs.storeVirtualKey(vk)
 	}
 
 	// Build model configs map
@@ -2076,7 +2199,7 @@ func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk
 		}
 	}
 
-	gs.virtualKeys.Store(vk.Value, vk)
+	gs.storeVirtualKey(vk)
 }
 
 // UpdateVirtualKeyInMemory updates an existing virtual key in the in-memory store (lock-free)
@@ -2087,26 +2210,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 
 	// Do not update the current usage of the rate limit, as it will be updated by the usage tracker.
 	// But update if max limit or reset duration changes.
-	existingVKKey := vk.Value
-	existingVKValue, exists := gs.virtualKeys.Load(vk.Value)
-	if exists && existingVKValue != nil {
-		if existingVK, ok := existingVKValue.(*configstoreTables.TableVirtualKey); !ok || existingVK == nil || existingVK.ID != vk.ID {
-			exists = false
-			existingVKValue = nil
-		}
-	}
-	if !exists || existingVKValue == nil {
-		gs.virtualKeys.Range(func(key, value interface{}) bool {
-			existingVK, ok := value.(*configstoreTables.TableVirtualKey)
-			if !ok || existingVK == nil || existingVK.ID != vk.ID {
-				return true
-			}
-			existingVKKey, _ = key.(string)
-			existingVKValue = value
-			exists = true
-			return false
-		})
-	}
+	existingVKValue, exists := gs.virtualKeys.Load(vk.ID)
 	if exists && existingVKValue != nil {
 		existingVK, ok := existingVKValue.(*configstoreTables.TableVirtualKey)
 		if !ok || existingVK == nil {
@@ -2251,10 +2355,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 				}
 			}
 		}
-		if existingVKKey != "" && existingVKKey != vk.Value {
-			gs.virtualKeys.Delete(existingVKKey)
-		}
-		gs.virtualKeys.Store(vk.Value, &clone)
+		gs.storeVirtualKey(&clone)
 	} else {
 		gs.CreateVirtualKeyInMemory(ctx, vk)
 	}
@@ -2266,42 +2367,33 @@ func (gs *LocalGovernanceStore) DeleteVirtualKeyInMemory(ctx context.Context, vk
 		return // Nothing to delete
 	}
 
-	// Find and delete the VK by ID (lock-free)
-	gs.virtualKeys.Range(func(key, value interface{}) bool {
-		// Type-safe conversion
-		vk, ok := value.(*configstoreTables.TableVirtualKey)
-		if !ok || vk == nil {
-			return true // continue iteration
-		}
+	value, exists := gs.virtualKeys.Load(vkID)
+	if !exists || value == nil {
+		return
+	}
+	vk, ok := value.(*configstoreTables.TableVirtualKey)
+	if !ok || vk == nil {
+		gs.virtualKeys.Delete(vkID)
+		return
+	}
 
-		if vk.ID == vkID {
-			// Delete budgets
-			for _, b := range vk.Budgets {
+	for _, b := range vk.Budgets {
+		gs.DeleteBudget(ctx, b.ID)
+	}
+	if vk.RateLimitID != nil {
+		gs.DeleteRateLimit(ctx, *vk.RateLimitID)
+	}
+	if vk.ProviderConfigs != nil {
+		for _, pc := range vk.ProviderConfigs {
+			for _, b := range pc.Budgets {
 				gs.DeleteBudget(ctx, b.ID)
 			}
-
-			// Delete associated rate limit if exists
-			if vk.RateLimitID != nil {
-				gs.DeleteRateLimit(ctx, *vk.RateLimitID)
+			if pc.RateLimitID != nil {
+				gs.DeleteRateLimit(ctx, *pc.RateLimitID)
 			}
-
-			// Delete provider config budgets and rate limits
-			if vk.ProviderConfigs != nil {
-				for _, pc := range vk.ProviderConfigs {
-					for _, b := range pc.Budgets {
-						gs.DeleteBudget(ctx, b.ID)
-					}
-					if pc.RateLimitID != nil {
-						gs.DeleteRateLimit(ctx, *pc.RateLimitID)
-					}
-				}
-			}
-
-			gs.virtualKeys.Delete(key)
-			return false // stop iteration
 		}
-		return true // continue iteration
-	})
+	}
+	gs.virtualKeys.Delete(vkID)
 }
 
 // CreateOrgLimitInMemory adds or replaces the org limit for an organization (one row per org_id).

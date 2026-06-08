@@ -148,12 +148,15 @@ func GetTenantIDFromContext(ctx context.Context) string {
 	return v
 }
 
-// GetAccessKeyFromContext returns the JWT accessKey claim from context.
-func GetAccessKeyFromContext(ctx context.Context) string {
+// GetVirtualKeyFromContext returns the JWT virtualKey claim from context.
+func GetVirtualKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	v, _ := ctx.Value(schemas.BifrostContextKeyAccessKey).(string)
+	if v, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string); v != "" {
+		return v
+	}
+	v, _ := ctx.Value(schemas.BifrostContextKeyVirtualKey).(string)
 	return v
 }
 

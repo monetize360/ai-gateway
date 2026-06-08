@@ -2,6 +2,7 @@ package lib
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,6 +19,45 @@ type stubProviderRuntime struct {
 func (s *stubProviderRuntime) UpdateProvider(provider schemas.ModelProvider) error {
 	s.updated = append(s.updated, provider)
 	return nil
+}
+
+func TestSyncTenantProvidersIncrementalAppliesChangedOnly(t *testing.T) {
+	defaultCBS := schemas.DefaultConcurrencyAndBufferSize
+	initialCfg := configstore.ProviderConfig{
+		ConcurrencyAndBufferSize: &defaultCBS,
+		CustomProviderConfig: &schemas.CustomProviderConfig{
+			IsKeyLess:        true,
+			BaseProviderType: schemas.OpenAI,
+			AllowedRequests:  &schemas.AllowedRequests{ChatCompletion: schemas.Ptr(true)},
+		},
+	}
+	updatedCfg := initialCfg
+	updatedCfg.CustomProviderConfig.BaseURL = "https://example.com/v1"
+
+	store := NewMockConfigStore()
+	store.providers = map[schemas.ModelProvider]configstore.ProviderConfig{
+		"fakellm": initialCfg,
+	}
+
+	cfg := &Config{Providers: make(map[schemas.ModelProvider]configstore.ProviderConfig)}
+	runtime := &stubProviderRuntime{}
+
+	require.NoError(t, syncTenantProviders(context.Background(), cfg, runtime, "tenant-a", store))
+	cfg.setTenantProviderRefreshWatermark("tenant-a", time.Now().UTC().Add(-time.Minute))
+
+	store.providers = map[schemas.ModelProvider]configstore.ProviderConfig{
+		"fakellm": updatedCfg,
+	}
+	store.providerRefreshDelta = &configstore.ProviderConfigRefreshDelta{
+		Changed: map[schemas.ModelProvider]configstore.ProviderConfig{
+			"fakellm": updatedCfg,
+		},
+	}
+
+	runtime.updated = nil
+	require.NoError(t, syncTenantProviders(context.Background(), cfg, runtime, "tenant-a", store))
+	require.Equal(t, "https://example.com/v1", cfg.Providers["fakellm"].CustomProviderConfig.BaseURL)
+	require.Equal(t, []schemas.ModelProvider{"fakellm"}, runtime.updated)
 }
 
 func TestSyncTenantProvidersLoadsValidProviders(t *testing.T) {
@@ -112,6 +152,13 @@ type stubTenantProviderStore struct {
 
 func (s *stubTenantProviderStore) GetProvidersConfig(context.Context) (map[schemas.ModelProvider]configstore.ProviderConfig, error) {
 	return s.providers, nil
+}
+
+func (s *stubTenantProviderStore) GetProviderConfigRefreshDelta(_ context.Context, since time.Time) (*configstore.ProviderConfigRefreshDelta, error) {
+	if since.IsZero() {
+		return nil, fmt.Errorf("provider config refresh since watermark is required")
+	}
+	return &configstore.ProviderConfigRefreshDelta{Changed: make(map[schemas.ModelProvider]configstore.ProviderConfig)}, nil
 }
 
 func (s *stubTenantProviderSyncSource) GetStoreFromContext(context.Context) configstore.ConfigStore {

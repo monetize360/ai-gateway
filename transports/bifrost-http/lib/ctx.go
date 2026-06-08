@@ -17,7 +17,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/maxim"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/valyala/fasthttp"
@@ -101,10 +100,7 @@ func ParseSessionIDFromBaggage(header string) string {
 //   - These headers enable MCP client and tool filtering
 //   - Values are stored using MCP context keys for consistency
 //
-// 4. Governance Headers:
-//   - x-bf-vk: Virtual key for governance (required for governance to work)
-//
-// 5. API Key Headers:
+// 4. API Key Headers:
 //   - Authorization: Bearer token format only (e.g., "Bearer sk-...") - OpenAI style
 //   - x-api-key: Direct API key value - Anthropic style
 //   - x-goog-api-key: Direct API key value - Google Gemini style
@@ -337,30 +333,6 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 				}
 				bifrostCtx.SetValue(schemas.BifrostContextKeyMCPSessionID, v)
 			}
-			return true
-		}
-		// Handle virtual key header (x-bf-vk, authorization, x-api-key, x-goog-api-key headers)
-		if keyStr == string(schemas.BifrostContextKeyVirtualKey) {
-			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
-			return true
-		}
-		if keyStr == "authorization" {
-			valueStr := string(value)
-			// Only accept Bearer token format: "Bearer ..."
-			if strings.HasPrefix(strings.ToLower(valueStr), "bearer ") {
-				authHeaderValue := strings.TrimSpace(valueStr[7:]) // Remove "Bearer " prefix
-				if authHeaderValue != "" && strings.HasPrefix(strings.ToLower(authHeaderValue), governance.VirtualKeyPrefix) {
-					bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, authHeaderValue)
-					return true
-				}
-			}
-		}
-		if keyStr == "x-api-key" && strings.HasPrefix(strings.ToLower(string(value)), governance.VirtualKeyPrefix) {
-			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
-			return true
-		}
-		if keyStr == "x-goog-api-key" && strings.HasPrefix(strings.ToLower(string(value)), governance.VirtualKeyPrefix) {
-			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
 			return true
 		}
 		if keyStr == "x-bf-api-key" {

@@ -4034,22 +4034,15 @@ func validateRoutingFallbacks(fallbacks []string) error {
 }
 
 // getVirtualKeyQuota handles GET /api/governance/virtual-keys/quota
-// This is a self-service endpoint — no admin auth required. The VK value in the header is the credential.
+// This is a self-service endpoint — no admin auth required. Requires tenant JWT with virtualKey claim.
 func (h *GovernanceHandler) getVirtualKeyQuota(ctx *fasthttp.RequestCtx) {
-	// Extract virtual key using the same logic as the inference path (lib/ctx.go):
-	// x-bf-vk accepts any value; other headers require the sk-bf- prefix.
-	var vkValue string
-	if v := string(ctx.Request.Header.Peek("x-bf-vk")); v != "" {
-		vkValue = v
-	} else if v := governance.ParseVirtualKeyFromFastHTTPRequest(ctx); v != nil {
-		vkValue = *v
-	}
-	if vkValue == "" {
-		SendError(ctx, 401, "Missing virtual key. Provide it via x-bf-vk header, Authorization Bearer, x-api-key, or x-goog-api-key header.")
+	vkID := governance.VirtualKeyIDFromFastHTTPContext(ctx)
+	if vkID == "" {
+		SendError(ctx, 401, "Missing virtual key. Authenticate with a tenant JWT that includes a virtualKey claim.")
 		return
 	}
 
-	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKeyQuotaByValue(ctx, vkValue)
+	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 401, "Virtual key not found")

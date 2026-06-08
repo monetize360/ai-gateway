@@ -106,12 +106,67 @@ func syncTenantProviders(
 	tenantID string,
 	store configstore.ConfigStore,
 ) error {
+	refreshStartedAt := time.Now().UTC()
+	since := cfg.tenantProviderRefreshWatermark(tenantID)
+
+	if since.IsZero() {
+		return syncTenantProvidersFull(ctx, cfg, client, tenantID, store, refreshStartedAt)
+	}
+
+	watermark := since.Add(-configstore.RefreshOverlap)
+	delta, err := store.GetProviderConfigRefreshDelta(ctx, watermark)
+	if err != nil {
+		return err
+	}
+	if len(delta.Removed) > 0 {
+		// Provider removal changes the tenant snapshot shape; fall back to full reload.
+		return syncTenantProvidersFull(ctx, cfg, client, tenantID, store, refreshStartedAt)
+	}
+	if delta.IsEmpty() {
+		cfg.setTenantProviderRefreshWatermark(tenantID, refreshStartedAt)
+		return nil
+	}
+
+	validProviders := make(map[schemas.ModelProvider]configstore.ProviderConfig, len(delta.Changed))
+	for provider, providerCfg := range delta.Changed {
+		normalizeSyncedProviderConfig(&providerCfg)
+		if err := ValidateCustomProvider(providerCfg, provider); err != nil {
+			logger.Warn("tenant provider sync: skipping invalid provider %s for tenant %s: %v", provider, tenantID, err)
+			continue
+		}
+		validProviders[provider] = providerCfg
+		cfg.upsertTenantProviderEntry(tenantID, provider, providerCfg)
+	}
+
+	updated := cfg.mergeTenantProvidersIntoGlobal(tenantID, validProviders)
+	for _, provider := range updated {
+		if err := client.UpdateProvider(provider); err != nil {
+			logger.Warn("tenant provider sync: failed to update runtime provider %s for tenant %s: %v", provider, tenantID, err)
+		}
+	}
+	if len(validProviders) > 0 {
+		logger.Debug("tenant provider sync: tenant %s applied %d changed provider(s)", tenantID, len(validProviders))
+	}
+
+	cfg.setTenantProviderRefreshWatermark(tenantID, refreshStartedAt)
+	return nil
+}
+
+func syncTenantProvidersFull(
+	ctx context.Context,
+	cfg *Config,
+	client tenantProviderRuntimeUpdater,
+	tenantID string,
+	store configstore.ConfigStore,
+	refreshStartedAt time.Time,
+) error {
 	providers, err := store.GetProvidersConfig(ctx)
 	if err != nil {
 		return err
 	}
 	if len(providers) == 0 {
 		cfg.setTenantProvidersSnapshot(tenantID, nil)
+		cfg.setTenantProviderRefreshWatermark(tenantID, refreshStartedAt)
 		return nil
 	}
 
@@ -135,6 +190,8 @@ func syncTenantProviders(
 	if len(validProviders) > 0 {
 		logger.Debug("tenant provider sync: tenant %s loaded %d provider(s)", tenantID, len(validProviders))
 	}
+
+	cfg.setTenantProviderRefreshWatermark(tenantID, refreshStartedAt)
 	return nil
 }
 

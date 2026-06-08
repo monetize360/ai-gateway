@@ -322,8 +322,10 @@ type Config struct {
 	// In-memory storage
 	ClientConfig     *configstore.ClientConfig
 	Providers        map[schemas.ModelProvider]configstore.ProviderConfig
-	tenantProvidersMu sync.RWMutex
-	tenantProviders   map[string]map[schemas.ModelProvider]configstore.ProviderConfig
+	tenantProvidersMu        sync.RWMutex
+	tenantProviders          map[string]map[schemas.ModelProvider]configstore.ProviderConfig
+	tenantProviderRefreshMu  sync.Mutex
+	tenantProviderRefreshAt  map[string]time.Time
 	MCPConfig        *schemas.MCPConfig
 	GovernanceConfig *configstore.GovernanceConfig
 	FrameworkConfig  *framework.FrameworkConfig
@@ -3398,6 +3400,24 @@ func (c *Config) upsertTenantProviderEntry(tenantID string, provider schemas.Mod
 		c.tenantProviders[tenantID] = make(map[schemas.ModelProvider]configstore.ProviderConfig)
 	}
 	c.tenantProviders[tenantID][provider] = cfg
+}
+
+func (c *Config) tenantProviderRefreshWatermark(tenantID string) time.Time {
+	c.tenantProviderRefreshMu.Lock()
+	defer c.tenantProviderRefreshMu.Unlock()
+	if c.tenantProviderRefreshAt == nil {
+		return time.Time{}
+	}
+	return c.tenantProviderRefreshAt[tenantID]
+}
+
+func (c *Config) setTenantProviderRefreshWatermark(tenantID string, at time.Time) {
+	c.tenantProviderRefreshMu.Lock()
+	defer c.tenantProviderRefreshMu.Unlock()
+	if c.tenantProviderRefreshAt == nil {
+		c.tenantProviderRefreshAt = make(map[string]time.Time)
+	}
+	c.tenantProviderRefreshAt[tenantID] = at
 }
 
 // GetPluginOrder returns the names of all base plugins in their sorted placement order.
