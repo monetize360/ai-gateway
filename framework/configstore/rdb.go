@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
-	"github.com/google/uuid"
 	bifrost "github.com/maximhq/bifrost/core"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -95,14 +94,6 @@ func lockBudgetOwner(ctx context.Context, txDB *gorm.DB, budget tables.TableBudg
 	case budget.ProviderConfigID != nil:
 		var providerConfig tables.TableVirtualKeyProviderConfig
 		if err := dbForUpdate(txDB.WithContext(ctx)).First(&providerConfig, "id = ?", *budget.ProviderConfigID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
-			return err
-		}
-	case budget.TeamID != nil && *budget.TeamID != "":
-		var team tables.TableTeam
-		if err := dbForUpdate(txDB.WithContext(ctx)).First(&team, "id = ?", *budget.TeamID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
@@ -1990,63 +1981,6 @@ func (s *RDBConfigStore) UpdateConfig(ctx context.Context, config *tables.TableG
 	return txDB.WithContext(ctx).Save(config).Error
 }
 
-// GetModelPrices retrieves all model pricing records from the database.
-func (s *RDBConfigStore) GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error) {
-	var modelPrices []tables.TableModelPricing
-	if err := GovernanceActive(s.DB().WithContext(ctx)).Find(&modelPrices).Error; err != nil {
-		return nil, err
-	}
-	return modelPrices, nil
-}
-
-func prepareCatalogUpsertRow(id *string, system *tables.SystemColumns) {
-	if id != nil && *id == "" {
-		*id = uuid.NewString()
-	}
-	if system == nil {
-		return
-	}
-	now := time.Now().UTC()
-	if system.CreatedAt.IsZero() {
-		system.CreatedAt = now
-	}
-	system.UpdatedAt = now
-}
-
-// UpsertModelPrices creates or updates a model pricing record in the database.
-// Uses a single atomic ON CONFLICT statement to avoid deadlocks in multinode deployments
-// where multiple nodes may attempt concurrent upserts for the same model on startup.
-func (s *RDBConfigStore) UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	db := txDB.WithContext(ctx)
-
-	prepareCatalogUpsertRow(&pricing.ID, &pricing.SystemColumns)
-
-	if err := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "model"}, {Name: "provider"}, {Name: "mode"}},
-		UpdateAll: true,
-	}).Create(pricing).Error; err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-// DeleteModelPrices deletes all model pricing records from the database.
-func (s *RDBConfigStore) DeleteModelPrices(ctx context.Context, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	return txDB.WithContext(ctx).Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&tables.TableModelPricing{}).Error
-}
-
 func (s *RDBConfigStore) GetPricingOverrides(ctx context.Context, filters PricingOverrideFilters) ([]tables.TablePricingOverride, error) {
 	var overrides []tables.TablePricingOverride
 	q := GovernanceActive(s.DB().WithContext(ctx)).Model(&tables.TablePricingOverride{})
@@ -2172,55 +2106,6 @@ func (s *RDBConfigStore) DeletePricingOverride(ctx context.Context, id string, t
 		return s.parseGormError(err)
 	}
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TablePricingOverride{}, "id = ?", id); err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-// MODEL PARAMETERS METHODS
-
-// GetModelParameters returns all stored model parameter rows.
-func (s *RDBConfigStore) GetModelParameters(ctx context.Context) ([]tables.TableModelParameters, error) {
-	var rows []tables.TableModelParameters
-	if err := s.DB().WithContext(ctx).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rows, nil
-}
-
-// GetModelParametersByModel retrieves model parameters for a specific model.
-func (s *RDBConfigStore) GetModelParametersByModel(ctx context.Context, model string) (*tables.TableModelParameters, error) {
-	var params tables.TableModelParameters
-	if err := s.DB().WithContext(ctx).Where("model = ?", model).First(&params).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &params, nil
-}
-
-// UpsertModelParameters inserts or updates model parameters for a specific model.
-// Uses a single atomic ON CONFLICT statement to avoid deadlocks in multinode deployments
-// where multiple nodes may attempt concurrent upserts for the same model on startup.
-func (s *RDBConfigStore) UpsertModelParameters(ctx context.Context, params *tables.TableModelParameters, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	db := txDB.WithContext(ctx)
-
-	prepareCatalogUpsertRow(&params.ID, &params.SystemColumns)
-
-	if err := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "model"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"data",
-			"updated_at",
-		}),
-	}).Create(params).Error; err != nil {
 		return s.parseGormError(err)
 	}
 	return nil
@@ -2424,9 +2309,6 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 		}
 	}
 	return GovernanceActive(db).
-		Preload("Team", active("governance_teams")).
-		Preload("Team.Customer", active("governance_customers")).
-		Preload("Customer", active("governance_customers")).
 		Preload("Budgets", active("governance_budgets")).
 		Preload("RateLimit", active("governance_rate_limits")).
 		Preload("ProviderConfigs", active("governance_virtual_key_provider_configs")).
@@ -2444,7 +2326,7 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 
 // preloadVirtualKeyDetailRelations preloads the detail relationships for a virtual key.
 func preloadVirtualKeyDetailRelations(db *gorm.DB) *gorm.DB {
-	return preloadCustomerRelations(preloadVirtualKeyBaseRelations(db), "Customer.")
+	return preloadVirtualKeyBaseRelations(db)
 }
 
 // GetVirtualKeys retrieves all virtual keys from the database.
@@ -2468,14 +2350,8 @@ func (s *RDBConfigStore) GetVirtualKeysPaginated(ctx context.Context, params Vir
 	// on what the caller is allowed to see.
 	baseQuery := GovernanceActive(s.ScopedDB(ctx).Model(&tables.TableVirtualKey{}))
 
-	// Virtual keys are either customer-scoped or team-scoped, never both.
-	// When both filters are provided, use OR to match keys belonging to either.
-	if params.CustomerID != "" && params.TeamID != "" {
-		baseQuery = baseQuery.Where("(customer_id = ? OR team_id = ?)", params.CustomerID, params.TeamID)
-	} else if params.CustomerID != "" {
-		baseQuery = baseQuery.Where("customer_id = ?", params.CustomerID)
-	} else if params.TeamID != "" {
-		baseQuery = baseQuery.Where("team_id = ?", params.TeamID)
+	if params.OrgID != "" {
+		baseQuery = baseQuery.Where("org_id = ?", params.OrgID)
 	}
 	if params.Search != "" {
 		search := "%" + strings.ToLower(params.Search) + "%"
@@ -3654,9 +3530,6 @@ func (s *RDBConfigStore) UpdateBudget(ctx context.Context, budget *tables.TableB
 		if ownerBudget.ProviderConfigID == nil {
 			ownerBudget.ProviderConfigID = existing.ProviderConfigID
 		}
-		if ownerBudget.TeamID == nil {
-			ownerBudget.TeamID = existing.TeamID
-		}
 		if err := lockBudgetOwner(ctx, txDB, ownerBudget); err != nil {
 			return err
 		}
@@ -3816,17 +3689,19 @@ func (s *RDBConfigStore) GetRoutingRulesPaginated(ctx context.Context, params Ro
 	return rules, totalCount, nil
 }
 
-// GetRoutingRulesByScope retrieves routing rules by scope and scope ID, ordered by priority ASC.
+// GetRoutingRulesByScope retrieves routing rules by scope level and entity ID, ordered by priority ASC.
+// Scope values: global (scopeID ignored), org (scopeID = org_id), virtual_key (scopeID = virtual_key_id).
 func (s *RDBConfigStore) GetRoutingRulesByScope(ctx context.Context, scope string, scopeID string) ([]tables.TableRoutingRule, error) {
-	if scope != "global" && scopeID == "" {
+	if scope != "global" && scope != "" && strings.TrimSpace(scopeID) == "" {
 		return nil, fmt.Errorf("scopeID is required for non-global scope %q", scope)
 	}
 	var rules []tables.TableRoutingRule
 	scopeFilter := func(q *gorm.DB) *gorm.DB {
-		if scope == "global" {
-			return q.Where("scope = ?", "global")
+		q, filterErr := tables.RoutingRulesByScopeQuery(q, scope, scopeID)
+		if filterErr != nil {
+			return q.Where("1 = 0")
 		}
-		return q.Where("scope = ? AND scope_id = ?", scope, scopeID)
+		return q
 	}
 	if err := s.loadRoutingRulesOrdered(ctx, &rules, scopeFilter, func(q *gorm.DB) *gorm.DB {
 		return q.Where("enabled = ?", true)
@@ -3875,27 +3750,27 @@ func (s *RDBConfigStore) CreateRoutingRule(ctx context.Context, rule *tables.Tab
 		database = tx[0]
 	}
 
-	// Validate scopeID is required for non-global scope
-	if rule.Scope != "" && rule.Scope != "global" && rule.ScopeID == nil {
-		return fmt.Errorf("scopeID is required for non-global scope '%s'", rule.Scope)
+	// Validate association and check duplicate priority within the same org/vk/global bucket.
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		return err
 	}
 
-	// Check if there is already a routing rule with the same priority for the same scope+scopeID
 	var count int64
-	query := database.WithContext(ctx).Where("scope = ? AND priority = ? AND id != ?", rule.Scope, rule.Priority, rule.ID)
-	if rule.ScopeID != nil {
-		query = query.Where("scope_id = ?", *rule.ScopeID)
-	} else {
-		query = query.Where("scope_id IS NULL")
+	assocQuery, err := tables.RoutingRuleAssociationQuery(database.WithContext(ctx).Model(&tables.TableRoutingRule{}), rule)
+	if err != nil {
+		return err
 	}
-	if err := query.Model(&tables.TableRoutingRule{}).Count(&count).Error; err != nil {
+	if err := assocQuery.Where("priority = ? AND id != ?", rule.Priority, rule.ID).Count(&count).Error; err != nil {
 		return s.parseGormError(err)
 	}
 	if count > 0 {
-		if rule.ScopeID != nil {
-			return fmt.Errorf("routing rule with priority %d already exists for scope '%s' with scopeID '%v'", rule.Priority, rule.Scope, rule.ScopeID)
+		if rule.OrgID != nil && strings.TrimSpace(*rule.OrgID) != "" {
+			return fmt.Errorf("routing rule with priority %d already exists for org %s", rule.Priority, *rule.OrgID)
 		}
-		return fmt.Errorf("routing rule with priority %d already exists for scope '%s'", rule.Priority, rule.Scope)
+		if rule.VirtualKeyID != nil && strings.TrimSpace(*rule.VirtualKeyID) != "" {
+			return fmt.Errorf("routing rule with priority %d already exists for virtual key %s", rule.Priority, *rule.VirtualKeyID)
+		}
+		return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
 	}
 
 	return s.parseGormError(database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -3924,9 +3799,9 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 		database = tx[0]
 	}
 
-	// Validate scopeID is required for non-global scope
-	if rule.Scope != "" && rule.Scope != "global" && rule.ScopeID == nil {
-		return fmt.Errorf("scopeID is required for non-global scope '%s'", rule.Scope)
+	// Validate association and enforce unique priority within the same org/vk/global bucket.
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		return err
 	}
 
 	return s.parseGormError(database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -3938,22 +3813,22 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 			return err
 		}
 
-		// Check for another tables.TableRoutingRule with same scope (Scope + ScopeID) and Priority but different ID
 		var count int64
-		query := tx.Where("scope = ? AND priority = ? AND id != ?", rule.Scope, rule.Priority, rule.ID)
-		if rule.ScopeID != nil {
-			query = query.Where("scope_id = ?", *rule.ScopeID)
-		} else {
-			query = query.Where("scope_id IS NULL")
+		assocQuery, err := tables.RoutingRuleAssociationQuery(tx.Model(&tables.TableRoutingRule{}), rule)
+		if err != nil {
+			return err
 		}
-		if err := query.Model(&tables.TableRoutingRule{}).Count(&count).Error; err != nil {
+		if err := assocQuery.Where("priority = ? AND id != ?", rule.Priority, rule.ID).Count(&count).Error; err != nil {
 			return s.parseGormError(err)
 		}
 		if count > 0 {
-			if rule.ScopeID != nil {
-				return fmt.Errorf("routing rule with priority %d already exists for scope '%s' with scopeID '%v'", rule.Priority, rule.Scope, rule.ScopeID)
+			if rule.OrgID != nil && strings.TrimSpace(*rule.OrgID) != "" {
+				return fmt.Errorf("routing rule with priority %d already exists for org %s", rule.Priority, *rule.OrgID)
 			}
-			return fmt.Errorf("routing rule with priority %d already exists for scope '%s'", rule.Priority, rule.Scope)
+			if rule.VirtualKeyID != nil && strings.TrimSpace(*rule.VirtualKeyID) != "" {
+				return fmt.Errorf("routing rule with priority %d already exists for virtual key %s", rule.Priority, *rule.VirtualKeyID)
+			}
+			return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
 		}
 
 		targets := rule.Targets

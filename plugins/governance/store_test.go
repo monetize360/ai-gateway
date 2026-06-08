@@ -169,24 +169,24 @@ func TestGovernanceStore_CheckBudget_HierarchyValidation(t *testing.T) {
 
 	// Create budgets at different levels
 	vkBudget := buildBudgetWithUsage("vk-budget", 100.0, 50.0, "1d")
-	teamBudget := buildBudgetWithUsage("team-budget", 500.0, 200.0, "1d")
-	customerBudget := buildBudgetWithUsage("customer-budget", 1000.0, 400.0, "1d")
+	childOrgBudget := buildBudgetWithUsage("org-child-budget", 500.0, 200.0, "1d")
+	parentOrgBudget := buildBudgetWithUsage("org-parent-budget", 1000.0, 400.0, "1d")
 
-	// Build hierarchy
-	team := buildTeam("team1", "Team 1", teamBudget)
-	customer := buildCustomer("customer1", "Customer 1", customerBudget)
-	team.CustomerID = &customer.ID
-	team.Customer = customer
+	parentOrgID := "org-parent"
+	childOrgID := "org-child"
+	parentOrg := buildOrganization(parentOrgID, "Parent Org", nil)
+	childOrg := buildOrganization(childOrgID, "Child Org", &parentOrgID)
+	childLimit := buildOrgLimit("limit-child", childOrgID, childOrgBudget)
+	parentLimit := buildOrgLimit("limit-parent", parentOrgID, parentOrgBudget)
 
 	vk := buildVirtualKeyWithBudget("vk1", "sk-bf-test", "Test VK", vkBudget)
-	vk.TeamID = &team.ID
-	vk.Team = team
+	vk.OrgID = &childOrgID
 
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
-		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
-		Budgets:     []configstoreTables.TableBudget{*vkBudget, *teamBudget, *customerBudget},
-		Teams:       []configstoreTables.TableTeam{*team},
-		Customers:   []configstoreTables.TableCustomer{*customer},
+		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
+		Budgets:       []configstoreTables.TableBudget{*vkBudget, *childOrgBudget, *parentOrgBudget},
+		Organizations: []configstoreTables.TableOrganization{*parentOrg, *childOrg},
+		OrgLimits:     []configstoreTables.TableOrgLimit{*childLimit, *parentLimit},
 	}, nil)
 	require.NoError(t, err)
 
@@ -779,12 +779,12 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 		UpdatedAt:       time.Now(),
 	}
 
-	// Create a team-scoped routing rule
-	teamID := "team-123"
+	// Create an org-scoped routing rule
+	orgID := "org-123"
 	rule2 := &configstoreTables.TableRoutingRule{
 		ID:            "2",
-		Name:          "Team Rule",
-		Description:   "Test team routing rule",
+		Name:          "Org Rule",
+		Description:   "Test org routing rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: "model in ['gpt-4o', 'gpt-4-turbo']",
 		Targets: []configstoreTables.TableRoutingTarget{
@@ -792,8 +792,7 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 		},
 		Fallbacks:       nil,
 		ParsedFallbacks: []string{"groq/mixtral-8x7b"},
-		Scope:           "team",
-		ScopeID:         &teamID,
+		OrgID:           &orgID,
 		Priority:        20,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -810,9 +809,9 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 	assert.Equal(t, 1, len(globalRules))
 	assert.Equal(t, "Global Rule", globalRules[0].Name)
 
-	teamRules := store.GetScopedRoutingRules(context.Background(), "team", teamID)
-	assert.Equal(t, 1, len(teamRules))
-	assert.Equal(t, "Team Rule", teamRules[0].Name)
+	orgRules := store.GetScopedRoutingRules(context.Background(), "org", orgID)
+	assert.Equal(t, 1, len(orgRules))
+	assert.Equal(t, "Org Rule", orgRules[0].Name)
 
 	// Test ListRoutingRules
 	allRules := store.GetAllRoutingRules(context.Background())
@@ -1007,45 +1006,45 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
 	require.NoError(t, err)
 
-	customerID := "cust-123"
-	teamID := "team-456"
+	orgID := "org-456"
+	vkID := "vk-789"
 
 	// Create rules for different scopes
 	globalRule := &configstoreTables.TableRoutingRule{
-		ID: "1", Name: "Global", Scope: "global", ScopeID: nil, Priority: 10, Enabled: bifrost.Ptr(true),
+		ID: "1", Name: "Global", Priority: 10, Enabled: bifrost.Ptr(true),
 	}
-	customerRule := &configstoreTables.TableRoutingRule{
-		ID: "2", Name: "Customer", Scope: "customer", ScopeID: &customerID, Priority: 20, Enabled: bifrost.Ptr(true),
+	orgRule := &configstoreTables.TableRoutingRule{
+		ID: "2", Name: "Org", OrgID: &orgID, Priority: 20, Enabled: bifrost.Ptr(true),
 	}
-	teamRule := &configstoreTables.TableRoutingRule{
-		ID: "3", Name: "Team", Scope: "team", ScopeID: &teamID, Priority: 30, Enabled: bifrost.Ptr(true),
+	vkRule := &configstoreTables.TableRoutingRule{
+		ID: "3", Name: "VirtualKey", VirtualKeyID: &vkID, Priority: 30, Enabled: bifrost.Ptr(true),
 	}
 
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), globalRule))
-	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), customerRule))
-	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), teamRule))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgRule))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), vkRule))
 
 	// Test global scope
 	globalRules := store.GetScopedRoutingRules(context.Background(), "global", "")
 	assert.Equal(t, 1, len(globalRules))
 	assert.Equal(t, "Global", globalRules[0].Name)
 
-	// Test customer scope
-	custRules := store.GetScopedRoutingRules(context.Background(), "customer", customerID)
-	assert.Equal(t, 1, len(custRules))
-	assert.Equal(t, "Customer", custRules[0].Name)
+	// Test org scope
+	orgRules := store.GetScopedRoutingRules(context.Background(), "org", orgID)
+	assert.Equal(t, 1, len(orgRules))
+	assert.Equal(t, "Org", orgRules[0].Name)
 
-	// Test team scope
-	teamRules := store.GetScopedRoutingRules(context.Background(), "team", teamID)
-	assert.Equal(t, 1, len(teamRules))
-	assert.Equal(t, "Team", teamRules[0].Name)
+	// Test virtual_key scope
+	vkRules := store.GetScopedRoutingRules(context.Background(), "virtual_key", vkID)
+	assert.Equal(t, 1, len(vkRules))
+	assert.Equal(t, "VirtualKey", vkRules[0].Name)
 
 	// ListAll should return all rules sorted by priority ASC (lower numbers = higher priority)
 	allRules := store.GetAllRoutingRules(context.Background())
 	assert.Equal(t, 3, len(allRules))
 	assert.Equal(t, 10, allRules[0].Priority) // Global (highest)
-	assert.Equal(t, 20, allRules[1].Priority) // Customer
-	assert.Equal(t, 30, allRules[2].Priority) // Team (lowest)
+	assert.Equal(t, 20, allRules[1].Priority) // Org
+	assert.Equal(t, 30, allRules[2].Priority) // Virtual key (lowest)
 }
 
 // TestCompileAndCacheProgram tests CEL program compilation and caching

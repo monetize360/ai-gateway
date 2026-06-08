@@ -1985,22 +1985,15 @@ func updateGovernanceConfigInStore(
 	logger.Debug("updating governance config in store with merged items")
 	return config.StoreFromContext(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Owner-scoped budgets require owner rows to exist first:
-		// - team_id -> governance_teams
 		// - virtual_key_id -> governance_virtual_keys
 		// - provider_config_id -> governance_virtual_key_provider_configs
-		pendingTeamBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
-		pendingTeamBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 
 		// Create budgets
 		for _, budget := range budgetsToAdd {
-			if budget.TeamID != nil {
-				pendingTeamBudgetsToAdd = append(pendingTeamBudgetsToAdd, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgetsToAdd = append(pendingVirtualKeyBudgetsToAdd, budget)
 				continue
@@ -2016,10 +2009,6 @@ func updateGovernanceConfigInStore(
 
 		// Update budgets (config.json changed)
 		for _, budget := range budgetsToUpdate {
-			if budget.TeamID != nil {
-				pendingTeamBudgetsToUpdate = append(pendingTeamBudgetsToUpdate, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgetsToUpdate = append(pendingVirtualKeyBudgetsToUpdate, budget)
 				continue
@@ -2072,20 +2061,6 @@ func updateGovernanceConfigInStore(
 		for _, team := range teamsToUpdate {
 			if err := config.StoreFromContext(ctx).UpdateTeam(ctx, &team, tx); err != nil {
 				return fmt.Errorf("failed to update team %s: %w", team.ID, err)
-			}
-		}
-
-		// Create team-owned budgets after teams exist.
-		for _, budget := range pendingTeamBudgetsToAdd {
-			if err := config.StoreFromContext(ctx).CreateBudget(ctx, &budget, tx); err != nil {
-				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
-			}
-		}
-
-		// Update team-owned budgets after teams exist.
-		for _, budget := range pendingTeamBudgetsToUpdate {
-			if err := config.StoreFromContext(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
-				return fmt.Errorf("failed to update budget %s: %w", budget.ID, err)
 			}
 		}
 
@@ -2294,14 +2269,14 @@ func validateBudgetLinkOwnership(tx *gorm.DB, budgetID *string, ownerType, owner
 	}
 
 	var budget configstoreTables.TableBudget
-	if err := tx.Select("id", "team_id", "virtual_key_id", "provider_config_id").Where("id = ?", id).First(&budget).Error; err != nil {
+	if err := tx.Select("id", "virtual_key_id", "provider_config_id").Where("id = ?", id).First(&budget).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("budget_id %q referenced by %s %q does not exist", id, ownerType, ownerID)
 		}
 		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerID, err)
 	}
 
-	if budget.TeamID != nil || budget.VirtualKeyID != nil || budget.ProviderConfigID != nil {
+	if budget.VirtualKeyID != nil || budget.ProviderConfigID != nil {
 		return fmt.Errorf("budget_id %q is already owned by another governance entity and cannot be linked to %s %q", id, ownerType, ownerID)
 	}
 
@@ -2418,18 +2393,12 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 		}
 
 		// Owner-scoped budgets require owner rows to exist first:
-		// - team_id -> governance_teams
 		// - virtual_key_id -> governance_virtual_keys
 		// - provider_config_id -> governance_virtual_key_provider_configs
-		pendingTeamBudgets := make([]*configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgets := make([]*configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgets := make([]*configstoreTables.TableBudget, 0)
 		for i := range config.GovernanceConfig.Budgets {
 			budget := &config.GovernanceConfig.Budgets[i]
-			if budget.TeamID != nil {
-				pendingTeamBudgets = append(pendingTeamBudgets, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgets = append(pendingVirtualKeyBudgets, budget)
 				continue
@@ -2517,12 +2486,6 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			}
 			if err := config.StoreFromContext(ctx).CreateTeam(ctx, team, tx); err != nil {
 				return fmt.Errorf("failed to create team %s: %w", team.ID, err)
-			}
-		}
-
-		for _, budget := range pendingTeamBudgets {
-			if err := createBudget(budget); err != nil {
-				return err
 			}
 		}
 
@@ -2927,206 +2890,18 @@ func buildMCPPricingDataFromConfig(ctx context.Context, configData *ConfigData) 
 }
 
 // ResolveFrameworkPricingConfig resolves framework pricing configuration.
-//
-// Precedence order (highest → lowest): DB > config.json > built-in defaults.
-//
-// DB values are authoritative once written — this allows runtime changes via the
-// management API to persist across restarts without requiring a config.json edit.
-// When the DB is absent or contains a corrupted/zero value the file config is used,
-// with the DB backfilled so the next startup finds a valid value.
-//
-// pricing_url supports the "env.VAR_NAME" prefix for full-string env substitution.
-// The check is explicit (strings.HasPrefix "env.") so that non-prefixed URLs are
-// never passed through the env lookup — partial/embedded references such as
-// "https://host/env.PATH" are treated as plain strings without any expansion.
-//
-// NOTE on pricingSyncInterval naming:
-// Despite its name, pricingSyncInterval is NOT a scheduling frequency.
-// It defines the minimum allowed elapsed time between sync executions.
-// The actual check occurs on a fixed ticker (syncWorkerTickerPeriod).
-// Effective sync frequency = max(syncWorkerTickerPeriod, pricingSyncInterval).
+// Model catalog data is embedded in the binary; remote URLs are no longer used.
 func ResolveFrameworkPricingConfig(
 	dbConfig *configstoreTables.TableFrameworkConfig,
-	fileConfig *framework.FrameworkConfig,
+	_ *framework.FrameworkConfig,
 ) (*configstoreTables.TableFrameworkConfig, *modelcatalog.Config, bool) {
-	defaultPricingURL := modelcatalog.DefaultPricingURL
-	defaultModelParametersURL := modelcatalog.DefaultModelParametersURL
-	defaultSyncSeconds := int64(modelcatalog.DefaultSyncInterval.Seconds())
-
-	filePricingURL := (*string)(nil)
-	fileModelParametersURL := (*string)(nil)
-	fileSyncSeconds := (*int64)(nil)
-	skipURLBackfill := false // prevent DB backfill of unresolved env references
-	skipModelParamsURLBackfill := false
-	if fileConfig != nil && fileConfig.Pricing != nil {
-		if fileConfig.Pricing.PricingURL != nil {
-			raw := *fileConfig.Pricing.PricingURL
-			if strings.HasPrefix(raw, "env.") {
-				resolvedURL, err := envutils.ProcessEnvValue(raw)
-				if err != nil {
-					logger.Warn("pricing_url: env variable not found (%v); keeping original value %q", err, raw)
-					filePricingURL = fileConfig.Pricing.PricingURL
-					skipURLBackfill = true
-				} else {
-					filePricingURL = &resolvedURL
-				}
-			} else {
-				filePricingURL = &raw
-			}
-		}
-		if fileConfig.Pricing.ModelParametersURL != nil {
-			raw := strings.TrimSpace(*fileConfig.Pricing.ModelParametersURL)
-			if raw == "" {
-				// Blank is treated as "not set"; fall back to default.
-			} else if strings.HasPrefix(raw, "env.") {
-				resolvedURL, err := envutils.ProcessEnvValue(raw)
-				if err != nil {
-					logger.Warn("model_parameters_url: env variable not found (%v); keeping original value %q", err, raw)
-					fileModelParametersURL = fileConfig.Pricing.ModelParametersURL
-					skipModelParamsURLBackfill = true
-				} else {
-					resolved := strings.TrimSpace(resolvedURL)
-					if resolved != "" {
-						fileModelParametersURL = &resolved
-					}
-				}
-			} else {
-				fileModelParametersURL = &raw
-			}
-		}
-		if fileConfig.Pricing.PricingSyncInterval != nil {
-			val := *fileConfig.Pricing.PricingSyncInterval
-			switch {
-			case val <= 0:
-				logger.Warn("pricing_sync_interval in config.json is invalid (%d seconds), ignoring — using default (%d seconds)", val, defaultSyncSeconds)
-			case val < modelcatalog.MinimumPricingSyncIntervalSec:
-				clamped := modelcatalog.MinimumPricingSyncIntervalSec
-				logger.Warn("pricing_sync_interval in config.json is below minimum (%d seconds), clamping to %d seconds", val, clamped)
-				fileSyncSeconds = &clamped
-			default:
-				fileSyncSeconds = &val
-			}
-		}
-	}
-
-	// --- Phase 2: apply file config over defaults ---
-
-	resolvedPricingURL := &defaultPricingURL
-	resolvedModelParametersURL := &defaultModelParametersURL
-	resolvedSyncSeconds := &defaultSyncSeconds
-
-	if filePricingURL != nil {
-		resolvedPricingURL = filePricingURL
-		logger.Debug("pricing_url resolved from file")
-	}
-	if fileModelParametersURL != nil {
-		resolvedModelParametersURL = fileModelParametersURL
-		logger.Debug("model_parameters_url resolved from file")
-	}
-	if fileSyncSeconds != nil {
-		resolvedSyncSeconds = fileSyncSeconds
-		logger.Debug("pricing_sync_interval resolved from file: %d seconds", *fileSyncSeconds)
-	}
-
-	// --- Phase 3: DB values applied; file wins on hash mismatch (file changed since last write) ---
-
-	needsDBUpdate := false
 	configID := uint(0)
-
-	// Hash the file-resolved values; skip if nothing valid survived Phase 1.
-	fileHash := ""
-	if fileConfig != nil && fileConfig.Pricing != nil && !skipURLBackfill && (filePricingURL != nil || fileSyncSeconds != nil) {
-		h, err := configstore.GenerateFrameworkConfigHash(filePricingURL, fileModelParametersURL, fileSyncSeconds)
-		if err != nil {
-			logger.Warn("failed to compute framework config hash: %v", err)
-		} else {
-			fileHash = h
-		}
-	}
-
-	storedHash := ""
-	if dbConfig != nil {
-		storedHash = dbConfig.ConfigHash
-	}
-	fileChanged := fileHash != "" && fileHash != storedHash
-
 	if dbConfig != nil {
 		configID = dbConfig.ID
-
-		if dbConfig.PricingURL != nil {
-			if fileChanged && filePricingURL != nil {
-				logger.Info("pricing_url from config.json overrides DB (file hash changed) — updating DB")
-				needsDBUpdate = true
-			} else {
-				resolvedPricingURL = dbConfig.PricingURL
-			}
-		} else if !skipURLBackfill {
-			needsDBUpdate = true
-		}
-		if dbConfig.ModelParametersURL != nil && *dbConfig.ModelParametersURL != "" {
-			resolvedModelParametersURL = dbConfig.ModelParametersURL
-		} else if !skipModelParamsURLBackfill {
-			needsDBUpdate = true
-		}
-
-		if dbConfig.PricingSyncInterval != nil {
-			val := *dbConfig.PricingSyncInterval
-			if val <= 0 {
-				logger.Warn("pricing_sync_interval in DB is corrupted (%d seconds), ignoring — backfilling with %d seconds", val, *resolvedSyncSeconds)
-				needsDBUpdate = true
-			} else if val < modelcatalog.MinimumPricingSyncIntervalSec {
-				logger.Warn("pricing_sync_interval in DB is below minimum (%d seconds) — backfilling", val)
-				if !fileChanged || fileSyncSeconds == nil {
-					clamped := modelcatalog.MinimumPricingSyncIntervalSec
-					resolvedSyncSeconds = &clamped
-				}
-				needsDBUpdate = true
-			} else if fileChanged && fileSyncSeconds != nil {
-				logger.Info("pricing_sync_interval from config.json overrides DB (file hash changed): file=%d db=%d seconds — updating DB", *fileSyncSeconds, val)
-				needsDBUpdate = true
-			} else {
-				resolvedSyncSeconds = dbConfig.PricingSyncInterval
-			}
-		} else {
-			needsDBUpdate = true
-		}
 	}
-
-	// --- Phase 4: nil guard ---
-	if resolvedPricingURL == nil {
-		logger.Warn("invariant violation: pricing_url resolved to nil — falling back to default %q", defaultPricingURL)
-		resolvedPricingURL = &defaultPricingURL
-	}
-	if resolvedModelParametersURL == nil {
-		logger.Warn("invariant violation: model_parameters_url resolved to nil — falling back to default %q", defaultModelParametersURL)
-		resolvedModelParametersURL = &defaultModelParametersURL
-	}
-	if resolvedSyncSeconds == nil {
-		logger.Warn("invariant violation: pricing_sync_interval resolved to nil — falling back to default %d seconds", defaultSyncSeconds)
-		resolvedSyncSeconds = &defaultSyncSeconds
-	}
-
-	// Only update the stored hash when the file actually changed; preserve the
-	// existing hash for correction-only DB updates (null backfill, corruption fix).
-	persistedHash := ""
-	if dbConfig != nil {
-		persistedHash = dbConfig.ConfigHash
-	}
-	if fileChanged {
-		persistedHash = fileHash
-	}
-
 	return &configstoreTables.TableFrameworkConfig{
-			ID:                  configID,
-			PricingURL:          resolvedPricingURL,
-			PricingSyncInterval: resolvedSyncSeconds,
-			ModelParametersURL:  resolvedModelParametersURL,
-			ConfigHash:          persistedHash,
-		}, &modelcatalog.Config{
-			PricingURL:          resolvedPricingURL,
-			PricingSyncInterval: resolvedSyncSeconds,
-			ModelParametersURL:  resolvedModelParametersURL,
-		}, needsDBUpdate
+			ID: configID,
+		}, &modelcatalog.Config{}, false
 }
 
 // initFrameworkConfig initializes framework config and pricing manager from file

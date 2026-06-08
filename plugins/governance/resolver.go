@@ -126,65 +126,29 @@ func (r *BudgetResolver) EvaluateModelAndProviderRequest(ctx *schemas.BifrostCon
 	}
 }
 
-func (r *BudgetResolver) EvaluateCustomerRequest(ctx *schemas.BifrostContext, customerID string, request *EvaluationRequest) *EvaluationResult {
-	// Skip if no customerID
-	if customerID == "" {
+func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext, orgID string, request *EvaluationRequest) *EvaluationResult {
+	if orgID == "" {
 		return &EvaluationResult{
 			Decision: DecisionAllow,
-			Reason:   "No customer ID provided, skipping customer-level checks",
+			Reason:   "No org ID provided, skipping org-level checks",
 		}
 	}
-	// Check customer-level rate limits
-	if decision, err := r.store.CheckCustomerRateLimit(ctx, customerID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
+	if decision, err := r.store.CheckOrgHierarchyRateLimit(ctx, orgID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
 		return &EvaluationResult{
 			Decision: decision,
-			Reason:   fmt.Sprintf("Customer-level rate limit exceeded: %s", reasonFromErr(err, decision)),
+			Reason:   fmt.Sprintf("Org-level rate limit exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
-
-	// Check customer-level budget
-	if decision, err := r.store.CheckCustomerBudget(ctx, customerID, request, nil); err != nil || isBudgetViolation(decision) {
+	if decision, err := r.store.CheckOrgHierarchyBudget(ctx, orgID, request, nil); err != nil || isBudgetViolation(decision) {
 		return &EvaluationResult{
 			Decision: decision,
-			Reason:   fmt.Sprintf("Customer-level budget exceeded: %s", reasonFromErr(err, decision)),
+			Reason:   fmt.Sprintf("Org-level budget exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
-
 	return &EvaluationResult{
 		Decision: DecisionAllow,
-		Reason:   "Customer-level checks passed",
+		Reason:   "Org-level checks passed",
 	}
-}
-
-func (r *BudgetResolver) EvaluateTeamRequest(ctx *schemas.BifrostContext, teamID string, request *EvaluationRequest) *EvaluationResult {
-	// Skip if no teamID
-	if teamID == "" {
-		return &EvaluationResult{
-			Decision: DecisionAllow,
-			Reason:   "No team ID provided, skipping team-level checks",
-		}
-	}
-	// Check team-level rate limits
-	if decision, err := r.store.CheckTeamRateLimit(ctx, teamID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
-		return &EvaluationResult{
-			Decision: decision,
-			Reason:   fmt.Sprintf("Team-level rate limit exceeded: %s", reasonFromErr(err, decision)),
-		}
-	}
-
-	// Check team-level budget
-	if decision, err := r.store.CheckTeamBudget(ctx, teamID, request, nil); err != nil || isBudgetViolation(decision) {
-		return &EvaluationResult{
-			Decision: decision,
-			Reason:   fmt.Sprintf("Team-level budget exceeded: %s", reasonFromErr(err, decision)),
-		}
-	}
-
-	return &EvaluationResult{
-		Decision: DecisionAllow,
-		Reason:   "Team-level checks passed",
-	}
-
 }
 
 // EvaluateUserRequest evaluates user-level rate limits and budgets (enterprise-only)
@@ -246,17 +210,8 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	// Set virtual key id and name in context
 	ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, vk.ID)
 	ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyName, vk.Name)
-	if vk.Team != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, vk.Team.ID)
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, vk.Team.Name)
-		if vk.Team.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, vk.Team.Customer.ID)
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, vk.Team.Customer.Name)
-		}
-	}
-	if vk.Customer != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, vk.Customer.ID)
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, vk.Customer.Name)
+	if vk.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *vk.OrgID)
 	}
 	if !vk.IsActiveValue() {
 		return &EvaluationResult{

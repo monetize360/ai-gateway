@@ -18,8 +18,7 @@ type VirtualKeyQueryParams struct {
 	Limit                              int
 	Offset                             int
 	Search                             string
-	CustomerID                         string
-	TeamID                             string
+	OrgID                              string
 	SortBy                             string // name, budget_spent, created_at, status (default: created_at)
 	Order                              string // asc, desc (default: asc)
 	Export                             bool   // When true, skip default pagination limits (caller controls limit)
@@ -197,6 +196,17 @@ type ConfigStore interface {
 	UpdateCustomer(ctx context.Context, customer *tables.TableCustomer, tx ...*gorm.DB) error
 	DeleteCustomer(ctx context.Context, id string) error
 
+	// Organization hierarchy (read-only; sourced from mpilotv2 organizations table)
+	GetOrganizations(ctx context.Context) ([]tables.TableOrganization, error)
+
+	// Org limit CRUD (per-org budget/rate-limit references)
+	GetOrgLimits(ctx context.Context) ([]tables.TableOrgLimit, error)
+	GetOrgLimit(ctx context.Context, id string) (*tables.TableOrgLimit, error)
+	GetOrgLimitByOrgID(ctx context.Context, orgID string) (*tables.TableOrgLimit, error)
+	CreateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
+	UpdateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
+	DeleteOrgLimit(ctx context.Context, id string, tx ...*gorm.DB) error
+
 	// Rate limit CRUD
 	GetRateLimits(ctx context.Context) ([]tables.TableRateLimit, error)
 	GetRateLimit(ctx context.Context, id string, tx ...*gorm.DB) (*tables.TableRateLimit, error)
@@ -266,11 +276,6 @@ type ConfigStore interface {
 	DeleteTempTokensByResourceID(ctx context.Context, scope, resourceID string, tx ...*gorm.DB) (int64, error)
 	DeleteExpiredTempTokens(ctx context.Context, before time.Time) (int64, error)
 
-	// Model pricing CRUD
-	GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error)
-	UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error
-	DeleteModelPrices(ctx context.Context, tx ...*gorm.DB) error
-
 	// Governance pricing overrides CRUD
 	GetPricingOverrides(ctx context.Context, filters PricingOverrideFilters) ([]tables.TablePricingOverride, error)
 	GetPricingOverridesPaginated(ctx context.Context, params PricingOverridesQueryParams) ([]tables.TablePricingOverride, int64, error)
@@ -278,11 +283,6 @@ type ConfigStore interface {
 	CreatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
 	UpdatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
 	DeletePricingOverride(ctx context.Context, id string, tx ...*gorm.DB) error
-
-	// Model parameters
-	GetModelParameters(ctx context.Context) ([]tables.TableModelParameters, error)
-	GetModelParametersByModel(ctx context.Context, model string) (*tables.TableModelParameters, error)
-	UpsertModelParameters(ctx context.Context, params *tables.TableModelParameters, tx ...*gorm.DB) error
 
 	// Key management
 	GetKeysByIDs(ctx context.Context, ids []string) ([]tables.TableKey, error)

@@ -898,24 +898,21 @@ func (h *ProviderHandler) getModelParameters(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if h.inMemoryStore.StoreFromRequestCtx(ctx) == nil {
-		SendError(ctx, fasthttp.StatusServiceUnavailable, "database store not available")
+	catalog := h.inMemoryStore.ModelCatalog
+	if catalog == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "model catalog not available")
 		return
 	}
 
-	params, err := h.inMemoryStore.StoreFromRequestCtx(ctx).GetModelParametersByModel(ctx, modelParam)
-	if err != nil {
-		if errors.Is(err, configstore.ErrNotFound) {
-			SendError(ctx, fasthttp.StatusNotFound, fmt.Sprintf("no parameters found for model %s", modelParam))
-			return
-		}
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get model parameters: %v", err))
+	params, ok := catalog.GetModelParametersJSON(modelParam)
+	if !ok {
+		SendError(ctx, fasthttp.StatusNotFound, fmt.Sprintf("no parameters found for model %s", modelParam))
 		return
 	}
 
 	ctx.SetContentType("application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetBodyString(params.Data)
+	ctx.SetBody(params)
 }
 
 // keyAllowsModelForList reports whether a provider key permits model for catalog listing.

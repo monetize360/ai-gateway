@@ -2,7 +2,7 @@ package tables
 
 import "github.com/maximhq/bifrost/core/schemas"
 
-// TableModelPricing represents pricing information for AI models
+// TableModelPricing represents in-memory pricing information for AI models.
 type TableModelPricing struct {
 	ID              string                `gorm:"primaryKey;type:uuid" json:"id"`
 	Model           string                `gorm:"type:varchar(255);not null;uniqueIndex:idx_model_provider_mode" json:"model"`
@@ -95,5 +95,5 @@ type TableModelPricing struct {
 	SystemColumns
 }
 
-// TableName sets the table name for each model
+// TableName is retained for legacy schema references; catalog rows are not persisted.
 func (TableModelPricing) TableName() string { return "governance_model_pricing" }

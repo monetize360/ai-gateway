@@ -18,7 +18,7 @@ import (
 
 // TestBuildScopeChain_GlobalOnly tests scope chain with no VirtualKey
 func TestBuildScopeChain_GlobalOnly(t *testing.T) {
-	chain := buildScopeChain(nil)
+	chain := buildScopeChain(nil, nil)
 
 	require.Equal(t, 1, len(chain))
 	assert.Equal(t, "global", chain[0].ScopeName)
@@ -32,7 +32,7 @@ func TestBuildScopeChain_VirtualKeyOnly(t *testing.T) {
 		Name: "test-vk",
 	}
 
-	chain := buildScopeChain(vk)
+	chain := buildScopeChain(vk, nil)
 
 	require.Equal(t, 2, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
@@ -41,59 +41,50 @@ func TestBuildScopeChain_VirtualKeyOnly(t *testing.T) {
 	assert.Equal(t, "", chain[1].ScopeID)
 }
 
-// TestBuildScopeChain_WithTeam tests scope chain with VirtualKey and Team
-func TestBuildScopeChain_WithTeam(t *testing.T) {
-	team := &configstoreTables.TableTeam{
-		ID:   "team-456",
-		Name: "premium-team",
-	}
-
+// TestBuildScopeChain_WithOrg tests scope chain with VirtualKey and org ancestors
+func TestBuildScopeChain_WithOrg(t *testing.T) {
+	orgID := "org-456"
 	vk := &configstoreTables.TableVirtualKey{
-		ID:   "vk-123",
-		Name: "test-vk",
-		Team: team,
+		ID:    "vk-123",
+		Name:  "test-vk",
+		OrgID: &orgID,
 	}
 
-	chain := buildScopeChain(vk)
+	chain := buildScopeChain(vk, []string{orgID})
 
 	require.Equal(t, 3, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
 	assert.Equal(t, "vk-123", chain[0].ScopeID)
-	assert.Equal(t, "team", chain[1].ScopeName)
-	assert.Equal(t, "team-456", chain[1].ScopeID)
+	assert.Equal(t, "org", chain[1].ScopeName)
+	assert.Equal(t, "org-456", chain[1].ScopeID)
 	assert.Equal(t, "global", chain[2].ScopeName)
 }
 
-// TestBuildScopeChain_FullHierarchy tests scope chain with full hierarchy
+// TestBuildScopeChain_FullHierarchy tests scope chain with org ancestor chain
 func TestBuildScopeChain_FullHierarchy(t *testing.T) {
-	customer := &configstoreTables.TableCustomer{
-		ID:   "cust-789",
-		Name: "acme-corp",
-	}
-
-	team := &configstoreTables.TableTeam{
-		ID:       "team-456",
-		Name:     "premium-team",
-		Customer: customer,
-	}
+	orgID := "org-child"
+	parentOrgID := "org-parent"
+	rootOrgID := "org-root"
 
 	vk := &configstoreTables.TableVirtualKey{
-		ID:   "vk-123",
-		Name: "test-vk",
-		Team: team,
+		ID:    "vk-123",
+		Name:  "test-vk",
+		OrgID: &orgID,
 	}
 
-	chain := buildScopeChain(vk)
+	chain := buildScopeChain(vk, []string{orgID, parentOrgID, rootOrgID})
 
-	require.Equal(t, 4, len(chain))
+	require.Equal(t, 5, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
 	assert.Equal(t, "vk-123", chain[0].ScopeID)
-	assert.Equal(t, "team", chain[1].ScopeName)
-	assert.Equal(t, "team-456", chain[1].ScopeID)
-	assert.Equal(t, "customer", chain[2].ScopeName)
-	assert.Equal(t, "cust-789", chain[2].ScopeID)
-	assert.Equal(t, "global", chain[3].ScopeName)
-	assert.Equal(t, "", chain[3].ScopeID)
+	assert.Equal(t, "org", chain[1].ScopeName)
+	assert.Equal(t, "org-child", chain[1].ScopeID)
+	assert.Equal(t, "org", chain[2].ScopeName)
+	assert.Equal(t, "org-parent", chain[2].ScopeID)
+	assert.Equal(t, "org", chain[3].ScopeName)
+	assert.Equal(t, "org-root", chain[3].ScopeID)
+	assert.Equal(t, "global", chain[4].ScopeName)
+	assert.Equal(t, "", chain[4].ScopeID)
 }
 
 // TestGetDefaultRouting tests getting default routing from context
@@ -1432,21 +1423,16 @@ func TestExtractRoutingVariables_WithVirtualKey(t *testing.T) {
 
 	assert.Equal(t, "vk-123", variables["virtual_key_id"])
 	assert.Equal(t, "test-vk", variables["virtual_key_name"])
-	assert.Equal(t, "", variables["team_id"])
-	assert.Equal(t, "", variables["team_name"])
+	assert.Equal(t, "", variables["org_id"])
 }
 
-// TestExtractRoutingVariables_WithTeam tests extracting with Team context
-func TestExtractRoutingVariables_WithTeam(t *testing.T) {
-	team := &configstoreTables.TableTeam{
-		ID:   "team-456",
-		Name: "premium-team",
-	}
-
+// TestExtractRoutingVariables_WithOrg tests extracting with org context
+func TestExtractRoutingVariables_WithOrg(t *testing.T) {
+	orgID := "org-456"
 	vk := &configstoreTables.TableVirtualKey{
-		ID:   "vk-123",
-		Name: "test-vk",
-		Team: team,
+		ID:    "vk-123",
+		Name:  "test-vk",
+		OrgID: &orgID,
 	}
 
 	ctx := &RoutingContext{
@@ -1459,40 +1445,9 @@ func TestExtractRoutingVariables_WithTeam(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "vk-123", variables["virtual_key_id"])
-	assert.Equal(t, "team-456", variables["team_id"])
-	assert.Equal(t, "premium-team", variables["team_name"])
-}
-
-// TestExtractRoutingVariables_WithCustomer tests extracting with Customer context
-func TestExtractRoutingVariables_WithCustomer(t *testing.T) {
-	customer := &configstoreTables.TableCustomer{
-		ID:   "cust-789",
-		Name: "acme-corp",
-	}
-
-	team := &configstoreTables.TableTeam{
-		ID:       "team-456",
-		Name:     "premium-team",
-		Customer: customer,
-	}
-
-	vk := &configstoreTables.TableVirtualKey{
-		ID:   "vk-123",
-		Name: "test-vk",
-		Team: team,
-	}
-
-	ctx := &RoutingContext{
-		VirtualKey: vk,
-		Provider:   schemas.OpenAI,
-		Model:      "gpt-4o",
-	}
-
-	variables, err := extractRoutingVariables(ctx)
-	require.NoError(t, err)
-
-	assert.Equal(t, "cust-789", variables["customer_id"])
-	assert.Equal(t, "acme-corp", variables["customer_name"])
+	assert.Equal(t, "org-456", variables["org_id"])
+	assert.Equal(t, "", variables["team_id"])
+	assert.Equal(t, "", variables["customer_id"])
 }
 
 // TestExtractRoutingVariables_WithRateLimits tests extracting with rate limit data
@@ -1615,23 +1570,13 @@ func TestBuildRoutingContext(t *testing.T) {
 	assert.Equal(t, params, ctx.QueryParams)
 }
 
-// TestExtractRoutingVariables_ComplexHierarchy tests full organizational hierarchy
+// TestExtractRoutingVariables_ComplexHierarchy tests org + request context variables
 func TestExtractRoutingVariables_ComplexHierarchy(t *testing.T) {
-	customer := &configstoreTables.TableCustomer{
-		ID:   "cust-789",
-		Name: "acme-corp",
-	}
-
-	team := &configstoreTables.TableTeam{
-		ID:       "team-456",
-		Name:     "premium-team",
-		Customer: customer,
-	}
-
+	orgID := "org-789"
 	vk := &configstoreTables.TableVirtualKey{
-		ID:   "vk-123",
-		Name: "test-vk",
-		Team: team,
+		ID:    "vk-123",
+		Name:  "test-vk",
+		OrgID: &orgID,
 	}
 
 	ctx := &RoutingContext{
@@ -1650,13 +1595,10 @@ func TestExtractRoutingVariables_ComplexHierarchy(t *testing.T) {
 	variables, err := extractRoutingVariables(ctx)
 	require.NoError(t, err)
 
-	// Verify all hierarchy levels
+	// Verify org context
 	assert.Equal(t, "vk-123", variables["virtual_key_id"])
 	assert.Equal(t, "test-vk", variables["virtual_key_name"])
-	assert.Equal(t, "team-456", variables["team_id"])
-	assert.Equal(t, "premium-team", variables["team_name"])
-	assert.Equal(t, "cust-789", variables["customer_id"])
-	assert.Equal(t, "acme-corp", variables["customer_name"])
+	assert.Equal(t, "org-789", variables["org_id"])
 
 	// Verify request context
 	assert.Equal(t, "gpt-4o", variables["model"])

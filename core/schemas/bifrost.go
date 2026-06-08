@@ -205,7 +205,9 @@ const (
 	BifrostContextKeySelectedKeyName                     BifrostContextKey = "bifrost-selected-key-name"             // string (to store the selected key name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceVirtualKeyID              BifrostContextKey = "bifrost-governance-virtual-key-id"     // string (to store the virtual key ID (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceVirtualKeyName            BifrostContextKey = "bifrost-governance-virtual-key-name"   // string (to store the virtual key name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
-	BifrostContextKeyGovernanceTeamID                    BifrostContextKey = "bifrost-governance-team-id"            // string (to store the team ID (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
+	BifrostContextKeyGovernanceOrgID                     BifrostContextKey = "bifrost-governance-org-id"             // string (to store the org ID (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
+	BifrostContextKeyGovernanceOrgName                   BifrostContextKey = "bifrost-governance-org-name"           // string (to store the org name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
+	BifrostContextKeyGovernanceTeamID                    BifrostContextKey = "bifrost-governance-team-id"            // deprecated: use BifrostContextKeyGovernanceOrgID
 	BifrostContextKeyGovernanceTeamName                  BifrostContextKey = "bifrost-governance-team-name"          // string (to store the team name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceCustomerID                BifrostContextKey = "bifrost-governance-customer-id"        // string (to store the customer ID (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceCustomerName              BifrostContextKey = "bifrost-governance-customer-name"      // string (to store the customer name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))

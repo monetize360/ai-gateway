@@ -207,7 +207,7 @@ func (mc *TableVirtualKeyMCPConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TableVirtualKey represents a virtual key with budget, rate limits, and team/customer association
+// TableVirtualKey represents a virtual key with budget, rate limits, and org association
 type TableVirtualKey struct {
 	ID              string                          `gorm:"primaryKey;type:uuid" json:"id"`
 	Name            string                          `gorm:"uniqueIndex:idx_virtual_key_name;type:varchar(255);not null" json:"name"`
@@ -217,16 +217,12 @@ type TableVirtualKey struct {
 	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means no providers allowed (deny-by-default)
 	MCPConfigs      []TableVirtualKeyMCPConfig      `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
-	// Foreign key relationships (mutually exclusive: either TeamID or CustomerID, not both)
-	TeamID      *string `gorm:"type:uuid;index" json:"team_id,omitempty"`
-	CustomerID  *string `gorm:"type:uuid;index" json:"customer_id,omitempty"`
+	OrgID       *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	RateLimitID *string `gorm:"type:uuid;index" json:"rate_limit_id,omitempty"`
 
 	CalendarAligned bool `gorm:"default:false" json:"calendar_aligned"`
 
 	// Relationships
-	Team      *TableTeam      `gorm:"foreignKey:TeamID" json:"team,omitempty"`
-	Customer  *TableCustomer  `gorm:"foreignKey:CustomerID" json:"customer,omitempty"`
 	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
 	Budgets   []TableBudget   `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"` // Multiple budgets with different reset intervals
 
@@ -254,15 +250,9 @@ func (vk *TableVirtualKey) IsActiveValue() bool {
 	return *vk.IsActive
 }
 
-// BeforeSave is a GORM hook that enforces mutual exclusion (team vs customer), computes
-// a SHA-256 hash of the plaintext value for indexed lookups, and encrypts the virtual key
-// value before writing to the database.
+// BeforeSave computes a SHA-256 hash of the plaintext value for indexed lookups and
+// encrypts the virtual key value before writing to the database.
 func (vk *TableVirtualKey) BeforeSave(tx *gorm.DB) error {
-	// Enforce mutual exclusion: VK can belong to either Team OR Customer, not both
-	if vk.TeamID != nil && vk.CustomerID != nil {
-		return fmt.Errorf("virtual key cannot belong to both team and customer")
-	}
-
 	// Hash must be computed before encryption (from plaintext value)
 	if vk.Value != "" {
 		vk.ValueHash = encrypt.HashSHA256(vk.Value)

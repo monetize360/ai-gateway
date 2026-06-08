@@ -5,20 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/fasthttp/router"
-	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/network"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
-	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -263,38 +259,6 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Validating framework config
-	if payload.FrameworkConfig.PricingURL != nil && *payload.FrameworkConfig.PricingURL != modelcatalog.DefaultPricingURL {
-		// Checking the accessibility of the pricing URL
-		resp, err := http.Get(*payload.FrameworkConfig.PricingURL)
-		if err != nil {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", err)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", resp.StatusCode)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", resp.StatusCode))
-			return
-		}
-	}
-	if payload.FrameworkConfig.ModelParametersURL != nil && *payload.FrameworkConfig.ModelParametersURL != "" && *payload.FrameworkConfig.ModelParametersURL != modelcatalog.DefaultModelParametersURL {
-		urlCheckClient := &http.Client{Timeout: 60 * time.Second}
-		resp, err := urlCheckClient.Get(*payload.FrameworkConfig.ModelParametersURL)
-		if err != nil {
-			logger.Warn("failed to check the accessibility of the model parameters URL: %v", err)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the model parameters URL: %v", err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("failed to check the accessibility of the model parameters URL: %v", resp.StatusCode)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the model parameters URL: %v", resp.StatusCode))
-			return
-		}
-	}
-
-	// Checking the pricing sync interval
 	if payload.FrameworkConfig.PricingSyncInterval != nil && *payload.FrameworkConfig.PricingSyncInterval <= 0 {
 		logger.Warn("pricing sync interval must be greater than 0")
 		SendError(ctx, fasthttp.StatusBadRequest, "pricing sync interval must be greater than 0")
@@ -533,107 +497,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to reload client config from config store: %v", err))
 		return
 	}
-	// Fetching existing framework config
-	frameworkConfig, err := h.store.StoreFromRequestCtx(ctx).GetFrameworkConfig(ctx)
-	if err != nil {
-		logger.Warn("failed to get framework config from store: %v", err)
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get framework config from store: %v", err))
-		return
-	}
-	// if framework config is nil, we will use the default pricing config
-	if frameworkConfig == nil {
-		frameworkConfig = &configstoreTables.TableFrameworkConfig{
-			ID:                  0,
-			PricingURL:          bifrost.Ptr(modelcatalog.DefaultPricingURL),
-			PricingSyncInterval: bifrost.Ptr(int64(modelcatalog.DefaultSyncInterval.Seconds())),
-			ModelParametersURL:  bifrost.Ptr(modelcatalog.DefaultModelParametersURL),
-		}
-	}
-	// Handling individual nil cases
-	if frameworkConfig.PricingURL == nil {
-		frameworkConfig.PricingURL = bifrost.Ptr(modelcatalog.DefaultPricingURL)
-	}
-	if frameworkConfig.PricingSyncInterval == nil {
-		frameworkConfig.PricingSyncInterval = bifrost.Ptr(int64(modelcatalog.DefaultSyncInterval.Seconds()))
-	}
-	if frameworkConfig.ModelParametersURL == nil {
-		frameworkConfig.ModelParametersURL = bifrost.Ptr(modelcatalog.DefaultModelParametersURL)
-	}
-	// Updating framework config
-	shouldReloadFrameworkConfig := false
-	if payload.FrameworkConfig.PricingURL != nil && *payload.FrameworkConfig.PricingURL != *frameworkConfig.PricingURL {
-		// Checking the accessibility of the pricing URL
-		resp, err := http.Get(*payload.FrameworkConfig.PricingURL)
-		if err != nil {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", err)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", resp.StatusCode)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", resp.StatusCode))
-			return
-		}
-		frameworkConfig.PricingURL = payload.FrameworkConfig.PricingURL
-		shouldReloadFrameworkConfig = true
-	}
-	if payload.FrameworkConfig.PricingSyncInterval != nil {
-		syncInterval := int64(*payload.FrameworkConfig.PricingSyncInterval)
-		if syncInterval != *frameworkConfig.PricingSyncInterval {
-			frameworkConfig.PricingSyncInterval = &syncInterval
-			shouldReloadFrameworkConfig = true
-		}
-	}
-	if payload.FrameworkConfig.ModelParametersURL != nil {
-		effectiveModelParamsURL := *payload.FrameworkConfig.ModelParametersURL
-		if effectiveModelParamsURL == "" {
-			effectiveModelParamsURL = modelcatalog.DefaultModelParametersURL
-		}
-		if effectiveModelParamsURL != *frameworkConfig.ModelParametersURL {
-			if effectiveModelParamsURL != modelcatalog.DefaultModelParametersURL {
-				urlCheckClient := &http.Client{Timeout: 60 * time.Second}
-				resp, err := urlCheckClient.Get(effectiveModelParamsURL)
-				if err != nil {
-					logger.Warn("failed to check the accessibility of the model parameters URL: %v", err)
-					SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the model parameters URL: %v", err))
-					return
-				}
-				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					logger.Warn("failed to check the accessibility of the model parameters URL: %v", resp.StatusCode)
-					SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the model parameters URL: %v", resp.StatusCode))
-					return
-				}
-			}
-			frameworkConfig.ModelParametersURL = &effectiveModelParamsURL
-			shouldReloadFrameworkConfig = true
-		}
-	}
-	// Reload config if required
-	if shouldReloadFrameworkConfig {
-		var syncSeconds int64
-		if frameworkConfig.PricingSyncInterval != nil {
-			syncSeconds = *frameworkConfig.PricingSyncInterval
-		} else {
-			syncSeconds = int64(modelcatalog.DefaultSyncInterval.Seconds())
-		}
-		h.store.FrameworkConfig = &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL:          frameworkConfig.PricingURL,
-				PricingSyncInterval: &syncSeconds,
-				ModelParametersURL:  frameworkConfig.ModelParametersURL,
-			},
-		}
-		// Saving framework config
-		if err := h.store.StoreFromRequestCtx(ctx).UpdateFrameworkConfig(ctx, frameworkConfig); err != nil {
-			logger.Warn("failed to save framework configuration: %v", err)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to save framework configuration: %v", err))
-			return
-		}
-		// Reloading pricing manager
-		h.configManager.UpdateSyncConfig(ctx)
-	}
+	// Framework pricing is embedded in the binary; ignore legacy framework pricing fields.
 	// Checking auth config and trying to update if required
 	if payload.AuthConfig != nil {
 		// Getting current governance config

@@ -92,8 +92,7 @@ type CreateVirtualKeyRequest struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"` // Empty means no MCP clients allowed (deny-by-default)
-	TeamID          *string                 `json:"team_id,omitempty"`     // Mutually exclusive with CustomerID
-	CustomerID      *string                 `json:"customer_id,omitempty"` // Mutually exclusive with TeamID
+	OrgID           *string                 `json:"org_id,omitempty"`
 	Budgets         []CreateBudgetRequest   `json:"budgets,omitempty"`     // Multi-budget: each must have a unique reset_duration
 	RateLimit       *CreateRateLimitRequest `json:"rate_limit,omitempty"`
 	IsActive        *bool                   `json:"is_active,omitempty"`
@@ -119,8 +118,7 @@ type UpdateVirtualKeyRequest struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"`
-	TeamID           *string                 `json:"team_id,omitempty"`
-	CustomerID       *string                 `json:"customer_id,omitempty"`
+	OrgID            *string                 `json:"org_id,omitempty"`
 	Budgets          []CreateBudgetRequest   `json:"budgets,omitempty"` // Multi-budget: replaces all VK-level budgets
 	RateLimit        *UpdateRateLimitRequest `json:"rate_limit,omitempty"`
 	IsActive         *bool                   `json:"is_active,omitempty"`
@@ -164,8 +162,8 @@ type CreateRoutingRuleRequest struct {
 	CelExpression string          `json:"cel_expression"`
 	Targets       []RoutingTarget `json:"targets"` // Required; weights must sum to 1
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
-	Scope         string          `json:"scope,omitempty"` // Defaults to "global" if not provided
-	ScopeID       *string         `json:"scope_id,omitempty"`
+	OrgID         *string         `json:"org_id,omitempty"`
+	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      int             `json:"priority,omitempty"` // Defaults to 0 if not provided
 }
@@ -181,8 +179,8 @@ type UpdateRoutingRuleRequest struct {
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      *int            `json:"priority,omitempty"`
-	Scope         *string         `json:"scope,omitempty"`
-	ScopeID       *string         `json:"scope_id,omitempty"`
+	OrgID         *string         `json:"org_id,omitempty"`
+	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 }
 
 // CreateRateLimitRequest represents the request body for creating a rate limit using flexible approach
@@ -473,19 +471,17 @@ func (h *GovernanceHandler) getVirtualKeys(ctx *fasthttp.RequestCtx) {
 	limitStr := string(ctx.QueryArgs().Peek("limit"))
 	offsetStr := string(ctx.QueryArgs().Peek("offset"))
 	search := string(ctx.QueryArgs().Peek("search"))
-	customerID := string(ctx.QueryArgs().Peek("customer_id"))
-	teamID := string(ctx.QueryArgs().Peek("team_id"))
+	orgID := string(ctx.QueryArgs().Peek("org_id"))
 	sortBy := string(ctx.QueryArgs().Peek("sort_by"))
 	order := string(ctx.QueryArgs().Peek("order"))
 	isExport := string(ctx.QueryArgs().Peek("export")) == "true"
 	excludeAccessProfileManagedVirtual := string(ctx.QueryArgs().Peek("exclude_access_profile_managed_virtual")) == "true"
 
-	if limitStr != "" || offsetStr != "" || search != "" || customerID != "" || teamID != "" || sortBy != "" || isExport || excludeAccessProfileManagedVirtual {
+	if limitStr != "" || offsetStr != "" || search != "" || orgID != "" || sortBy != "" || isExport || excludeAccessProfileManagedVirtual {
 		// Paginated/filtered path
 		params := configstore.VirtualKeyQueryParams{
 			Search:                             search,
-			CustomerID:                         customerID,
-			TeamID:                             teamID,
+			OrgID:                              orgID,
 			SortBy:                             sortBy,
 			Order:                              order,
 			Export:                             isExport,
@@ -565,11 +561,6 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Virtual key name is required")
 		return
 	}
-	// Validate mutually exclusive TeamID and CustomerID
-	if req.TeamID != nil && req.CustomerID != nil {
-		SendError(ctx, 400, "VirtualKey cannot be attached to both Team and Customer")
-		return
-	}
 	// Validate budgets if provided
 	if len(req.Budgets) > 0 {
 		seenDurations := make(map[string]bool)
@@ -611,8 +602,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			Name:            req.Name,
 			Value:           governance.GenerateVirtualKey(),
 			Description:     req.Description,
-			TeamID:          req.TeamID,
-			CustomerID:      req.CustomerID,
+			OrgID:           req.OrgID,
 			IsActive:        isActive,
 			CalendarAligned: req.CalendarAligned,
 		}
@@ -844,11 +834,6 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Invalid JSON")
 		return
 	}
-	// Validate mutually exclusive TeamID and CustomerID
-	if req.TeamID != nil && req.CustomerID != nil {
-		SendError(ctx, 400, "VirtualKey cannot be attached to both Team and Customer")
-		return
-	}
 	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
@@ -896,18 +881,12 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		if req.Description != nil {
 			vk.Description = *req.Description
 		}
-		if req.TeamID != nil {
-			vk.TeamID = req.TeamID
-			vk.CustomerID = nil // Clear CustomerID if setting TeamID
-		}
-		if req.CustomerID != nil {
-			vk.CustomerID = req.CustomerID
-			vk.TeamID = nil // Clear TeamID if setting CustomerID
-		}
-		// When both TeamID and CustomerID are nil
-		if req.TeamID == nil && req.CustomerID == nil {
-			vk.TeamID = nil
-			vk.CustomerID = nil
+		if req.OrgID != nil {
+			if strings.TrimSpace(*req.OrgID) == "" {
+				vk.OrgID = nil
+			} else {
+				vk.OrgID = req.OrgID
+			}
 		}
 		if req.IsActive != nil {
 			vk.IsActive = req.IsActive
@@ -1623,34 +1602,7 @@ func (h *GovernanceHandler) getTeams(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		if customerID != "" {
-			teams := make(map[string]*configstoreTables.TableTeam)
-			for _, team := range data.Teams {
-				if team.CustomerID != nil && *team.CustomerID == customerID {
-					teams[team.ID] = team
-				}
-			}
-			SendJSON(ctx, map[string]interface{}{
-				"teams":       teams,
-				"count":       len(teams),
-				"total_count": len(teams),
-				"limit":       len(teams),
-				"offset":      0,
-			})
-		} else {
-			SendJSON(ctx, map[string]interface{}{
-				"teams":       data.Teams,
-				"count":       len(data.Teams),
-				"total_count": len(data.Teams),
-				"limit":       len(data.Teams),
-				"offset":      0,
-			})
-		}
+		SendError(ctx, 410, "teams are deprecated; use organizations and org_limits")
 		return
 	}
 
@@ -1712,6 +1664,10 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Team name is required")
 		return
 	}
+	if len(req.Budgets) > 0 {
+		SendError(ctx, 400, "team budgets are deprecated; attach budgets via org_limits")
+		return
+	}
 	// Validate rate limit if provided
 	if req.RateLimit != nil {
 		rateLimit := configstoreTables.TableRateLimit{
@@ -1753,35 +1709,6 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 		if err := h.cfg.StoreFromRequestCtx(ctx).CreateTeam(ctx, &team, tx); err != nil {
 			return err
 		}
-		// Create owned multi-budgets; enforce unique reset_duration per team
-		seenDurations := make(map[string]bool)
-		for _, b := range req.Budgets {
-			if b.MaxLimit < 0 {
-				return &badRequestError{err: fmt.Errorf("budget max_limit cannot be negative: %.2f", b.MaxLimit)}
-			}
-			if _, err := configstoreTables.ParseDuration(b.ResetDuration); err != nil {
-				return &badRequestError{err: fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)}
-			}
-			if seenDurations[b.ResetDuration] {
-				return &badRequestError{err: fmt.Errorf("duplicate reset_duration in budgets: %s", b.ResetDuration)}
-			}
-			seenDurations[b.ResetDuration] = true
-			budget := configstoreTables.TableBudget{
-				ID:            uuid.NewString(),
-				MaxLimit:      b.MaxLimit,
-				ResetDuration: b.ResetDuration,
-				LastReset:     budgetLastReset(team.CalendarAligned, b.ResetDuration),
-				CurrentUsage:  0,
-				TeamID:        &team.ID,
-			}
-			if err := validateBudget(&budget); err != nil {
-				return err
-			}
-			if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
-				return err
-			}
-			team.Budgets = append(team.Budgets, budget)
-		}
 		return nil
 	}); err != nil {
 		var badReqErr *badRequestError
@@ -1811,19 +1738,7 @@ func (h *GovernanceHandler) getTeam(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		team, ok := data.Teams[teamID]
-		if !ok {
-			SendError(ctx, 404, "Team not found")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"team": team,
-		})
+		SendError(ctx, 410, "teams are deprecated; use organizations and org_limits")
 		return
 	}
 	team, err := h.cfg.StoreFromRequestCtx(ctx).GetTeam(ctx, teamID)
@@ -1887,73 +1802,9 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 		// below, so combined `calendar_aligned + budgets/rate_limit` updates see
 		// the final persisted state.
 
-		// Multi-budget reconciliation: match by reset_duration, preserve usage on update,
-		// create new budgets for new durations, delete unmatched existing budgets.
-		// Mirrors VK multi-budget handling above.
+		// Multi-budget reconciliation is deprecated — use org_limits.
 		if req.Budgets != nil {
-			// Validate incoming budgets
-			seenDurations := make(map[string]bool)
-			for _, b := range req.Budgets {
-				if b.MaxLimit < 0 {
-					return &badRequestError{err: fmt.Errorf("budget max_limit cannot be negative: %.2f", b.MaxLimit)}
-				}
-				if _, err := configstoreTables.ParseDuration(b.ResetDuration); err != nil {
-					return &badRequestError{err: fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)}
-				}
-				if seenDurations[b.ResetDuration] {
-					return &badRequestError{err: fmt.Errorf("duplicate reset_duration in budgets: %s", b.ResetDuration)}
-				}
-				seenDurations[b.ResetDuration] = true
-			}
-
-			existingByDuration := make(map[string]configstoreTables.TableBudget)
-			for _, existing := range team.Budgets {
-				existingByDuration[existing.ResetDuration] = existing
-			}
-
-			var reconciledBudgets []configstoreTables.TableBudget
-			matchedIDs := make(map[string]bool)
-			for _, b := range req.Budgets {
-				if existing, found := existingByDuration[b.ResetDuration]; found {
-					existing.MaxLimit = b.MaxLimit
-					// LastReset / CurrentUsage are preserved on update; if calendar
-					// alignment was just enabled in this request, the post-reconciliation
-					// snap block below resets them.
-					if err := validateBudget(&existing); err != nil {
-						return err
-					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, existing)
-					matchedIDs[existing.ID] = true
-				} else {
-					budget := configstoreTables.TableBudget{
-						ID:            uuid.NewString(),
-						MaxLimit:      b.MaxLimit,
-						ResetDuration: b.ResetDuration,
-						LastReset:     budgetLastReset(team.CalendarAligned, b.ResetDuration),
-						CurrentUsage:  0,
-						TeamID:        &team.ID,
-					}
-					if err := validateBudget(&budget); err != nil {
-						return err
-					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, budget)
-				}
-			}
-			// Delete budgets that are no longer present
-			for _, existing := range team.Budgets {
-				if !matchedIDs[existing.ID] {
-					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteBudget(ctx, existing.ID, tx); err != nil {
-						return fmt.Errorf("failed to delete removed team budget: %w", err)
-					}
-				}
-			}
-			team.Budgets = reconciledBudgets
+			return &badRequestError{err: fmt.Errorf("team budgets are deprecated; attach budgets via org_limits")}
 		}
 		// Handle rate limit updates
 		if req.RateLimit != nil {
@@ -2116,18 +1967,7 @@ func (h *GovernanceHandler) getCustomers(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"customers":   data.Customers,
-			"count":       len(data.Customers),
-			"total_count": len(data.Customers),
-			"limit":       len(data.Customers),
-			"offset":      0,
-		})
+		SendError(ctx, 410, "customers are deprecated; use organizations and org_limits")
 		return
 	}
 	limitStr := string(ctx.QueryArgs().Peek("limit"))
@@ -2261,19 +2101,7 @@ func (h *GovernanceHandler) getCustomer(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		customer, ok := data.Customers[customerID]
-		if !ok {
-			SendError(ctx, 404, "Customer not found")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"customer": customer,
-		})
+		SendError(ctx, 410, "customers are deprecated; use organizations and org_limits")
 		return
 	}
 	customer, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomer(ctx, customerID)
@@ -3329,6 +3157,8 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 	// Get query parameters for filtering
 	scope := string(ctx.QueryArgs().Peek("scope"))
 	scopeID := string(ctx.QueryArgs().Peek("scope_id"))
+	orgID := string(ctx.QueryArgs().Peek("org_id"))
+	virtualKeyID := string(ctx.QueryArgs().Peek("virtual_key_id"))
 
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
@@ -3343,15 +3173,30 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		// Filter rules by scope and scopeID
 		var rules []configstoreTables.TableRoutingRule
 		for _, rule := range inMemoryRules {
-			if scope != "" && rule.Scope != scope {
-				continue
-			}
-			if scopeID != "" {
-				ruleScope := ""
-				if rule.ScopeID != nil {
-					ruleScope = *rule.ScopeID
+			rule.HydrateAssociationFromLegacy()
+			if orgID != "" {
+				if rule.OrgID == nil || *rule.OrgID != orgID {
+					continue
 				}
-				if ruleScope != scopeID {
+			}
+			if virtualKeyID != "" {
+				if rule.VirtualKeyID == nil || *rule.VirtualKeyID != virtualKeyID {
+					continue
+				}
+			}
+			if scope != "" && orgID == "" && virtualKeyID == "" {
+				if rule.RoutingScopeName() != scope {
+					continue
+				}
+			}
+			if scopeID != "" && orgID == "" && virtualKeyID == "" {
+				ruleScopeID := ""
+				if rule.OrgID != nil {
+					ruleScopeID = *rule.OrgID
+				} else if rule.VirtualKeyID != nil {
+					ruleScopeID = *rule.VirtualKeyID
+				}
+				if ruleScopeID != scopeID {
 					continue
 				}
 			}
@@ -3368,7 +3213,14 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// If scope/scopeID filters are specified, use the existing non-paginated path
+	// If org_id/virtual_key_id or legacy scope filters are specified, use scoped lookup.
+	if orgID != "" {
+		scope = "org"
+		scopeID = orgID
+	} else if virtualKeyID != "" {
+		scope = "virtual_key"
+		scopeID = virtualKeyID
+	}
 	if scope != "" || scopeID != "" {
 		rules, err := h.cfg.StoreFromRequestCtx(ctx).GetRoutingRulesByScope(ctx, scope, scopeID)
 		if err != nil {
@@ -3532,23 +3384,8 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Set defaults and normalize scope/scope_id
-	scope := req.Scope
-	if scope == "" {
-		scope = "global"
-	}
-
-	// Validate scope value before normalization
-	if err := validateRoutingScope(scope); err != nil {
+	if err := validateRoutingAssociation(req.OrgID, req.VirtualKeyID); err != nil {
 		SendError(ctx, 400, err.Error())
-		return
-	}
-
-	// Validate: scope_id required for non-global scopes; must be nil/empty for global
-	if scope == "global" {
-		req.ScopeID = nil // normalize: global rules must not have scope_id
-	} else if req.ScopeID == nil || *req.ScopeID == "" {
-		SendError(ctx, 400, "scope_id field is required when scope is not global")
 		return
 	}
 
@@ -3582,11 +3419,15 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
 		Targets:         targets,
-		Scope:           scope,
-		ScopeID:         req.ScopeID,
+		OrgID:           req.OrgID,
+		VirtualKeyID:    req.VirtualKeyID,
 		Priority:        req.Priority,
 		ParsedFallbacks: req.Fallbacks,
 		ParsedQuery:     req.Query,
+	}
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
 	}
 
 	// Create in database
@@ -3678,23 +3519,14 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		}
 		rule.ParsedFallbacks = req.Fallbacks
 	}
-	if req.Scope != nil && *req.Scope != "" {
-		// Validate scope value before updating
-		if err := validateRoutingScope(*req.Scope); err != nil {
-			SendError(ctx, 400, err.Error())
-			return
-		}
-		rule.Scope = *req.Scope
+	if req.OrgID != nil {
+		rule.OrgID = req.OrgID
 	}
-	if req.ScopeID != nil {
-		rule.ScopeID = req.ScopeID
+	if req.VirtualKeyID != nil {
+		rule.VirtualKeyID = req.VirtualKeyID
 	}
-
-	// If scope is global, ensure scope_id is nil
-	if rule.Scope == "global" {
-		rule.ScopeID = nil
-	} else if rule.ScopeID == nil || *rule.ScopeID == "" {
-		SendError(ctx, 400, "scope_id field is required when scope is not global")
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		SendError(ctx, 400, err.Error())
 		return
 	}
 
@@ -4120,18 +3952,27 @@ func normalizeOptionalString(value *string) *string {
 // validRoutingScopes contains the allowed scope values for routing rules
 var validRoutingScopes = map[string]bool{
 	"global":      true,
-	"team":        true,
-	"customer":    true,
+	"org":         true,
 	"virtual_key": true,
 }
 
-// validateRoutingScope validates that the scope value is one of the allowed values
+// validateRoutingAssociation ensures org_id and virtual_key_id are not both set.
+func validateRoutingAssociation(orgID, virtualKeyID *string) error {
+	hasOrg := orgID != nil && strings.TrimSpace(*orgID) != ""
+	hasVK := virtualKeyID != nil && strings.TrimSpace(*virtualKeyID) != ""
+	if hasOrg && hasVK {
+		return fmt.Errorf("org_id and virtual_key_id are mutually exclusive")
+	}
+	return nil
+}
+
+// validateRoutingScope validates legacy scope query values (org replaces team/customer).
 func validateRoutingScope(scope string) error {
 	if scope == "" {
-		return nil // Empty scope will default to "global" later
+		return nil
 	}
 	if !validRoutingScopes[scope] {
-		return fmt.Errorf("invalid scope %q: must be one of: global, team, customer, virtual_key", scope)
+		return fmt.Errorf("invalid scope %q: must be one of: global, org, virtual_key", scope)
 	}
 	return nil
 }

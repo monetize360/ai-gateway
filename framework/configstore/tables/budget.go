@@ -15,7 +15,6 @@ type TableBudget struct {
 	LastReset     time.Time `gorm:"index" json:"last_reset"`
 	CurrentUsage  float64   `gorm:"default:0" json:"current_usage"`
 
-	TeamID           *string `gorm:"type:uuid;index" json:"team_id,omitempty"`
 	VirtualKeyID     *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
 	ProviderConfigID *string `gorm:"type:uuid;index" json:"provider_config_id,omitempty"`
 
@@ -33,9 +32,6 @@ func (TableBudget) TableName() string { return "governance_budgets" }
 // BeforeSave hook for Budget to validate reset duration format and max limit
 func (b *TableBudget) BeforeSave(tx *gorm.DB) error {
 	owners := 0
-	if b.TeamID != nil {
-		owners++
-	}
 	if b.VirtualKeyID != nil {
 		owners++
 	}
@@ -43,7 +39,7 @@ func (b *TableBudget) BeforeSave(tx *gorm.DB) error {
 		owners++
 	}
 	if owners > 1 {
-		return fmt.Errorf("budget cannot have more than one owner (team/virtual key/provider config)")
+		return fmt.Errorf("budget cannot have more than one owner (virtual key/provider config)")
 	}
 	if d, err := ParseDuration(b.ResetDuration); err != nil {
 		return fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)

@@ -414,77 +414,40 @@ func (s *BifrostHTTPServer) RemoveVirtualKey(ctx context.Context, id string) err
 	return nil
 }
 
-// ReloadTeam reloads a team from the in-memory store
+// ReloadTeam loads a team from the database (teams are deprecated in the in-memory governance store).
 func (s *BifrostHTTPServer) ReloadTeam(ctx context.Context, id string) (*tables.TableTeam, error) {
-	// Load relationships for response
 	preloadedTeam, err := s.Config.StoreFromContext(ctx).GetTeam(ctx, id)
 	if err != nil {
-		logger.Error("failed to load relationships for created team: %v", err)
+		logger.Error("failed to load team: %v", err)
 		return nil, err
 	}
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
-		return nil, err
-	}
-	// Add to in-memory store
-	governancePlugin.GetGovernanceStore(ctx).UpdateTeamInMemory(ctx, preloadedTeam, nil)
 	return preloadedTeam, nil
 }
 
-// RemoveTeam removes a team from the in-memory store
+// RemoveTeam is a no-op for the deprecated team in-memory cache.
 func (s *BifrostHTTPServer) RemoveTeam(ctx context.Context, id string) error {
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
+	_, err := s.Config.StoreFromContext(ctx).GetTeam(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return err
 	}
-	preloadedTeam, err := s.Config.StoreFromContext(ctx).GetTeam(ctx, id)
-	if err != nil {
-		if !errors.Is(err, configstore.ErrNotFound) {
-			return err
-		}
-	}
-	if preloadedTeam == nil {
-		// At-least deleting from in-memory store to avoid conflicts
-		governancePlugin.GetGovernanceStore(ctx).DeleteTeamInMemory(ctx, id)
-		return nil
-	}
-	governancePlugin.GetGovernanceStore(ctx).DeleteTeamInMemory(ctx, id)
 	return nil
 }
 
-// ReloadCustomer reloads a customer from the in-memory store
+// ReloadCustomer loads a customer from the database (customers are deprecated in the in-memory governance store).
 func (s *BifrostHTTPServer) ReloadCustomer(ctx context.Context, id string) (*tables.TableCustomer, error) {
 	preloadedCustomer, err := s.Config.StoreFromContext(ctx).GetCustomer(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
-		return nil, err
-	}
-	// Add to in-memory store
-	governancePlugin.GetGovernanceStore(ctx).UpdateCustomerInMemory(ctx, preloadedCustomer, nil)
 	return preloadedCustomer, nil
 }
 
-// RemoveCustomer removes a customer from the in-memory store
+// RemoveCustomer is a no-op for the deprecated customer in-memory cache.
 func (s *BifrostHTTPServer) RemoveCustomer(ctx context.Context, id string) error {
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
+	_, err := s.Config.StoreFromContext(ctx).GetCustomer(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return err
 	}
-	preloadedCustomer, err := s.Config.StoreFromContext(ctx).GetCustomer(ctx, id)
-	if err != nil {
-		if !errors.Is(err, configstore.ErrNotFound) {
-			return err
-		}
-	}
-	if preloadedCustomer == nil {
-		// At-least deleting from in-memory store to avoid conflicts
-		governancePlugin.GetGovernanceStore(ctx).DeleteCustomerInMemory(ctx, id)
-		return nil
-	}
-	governancePlugin.GetGovernanceStore(ctx).DeleteCustomerInMemory(ctx, id)
 	return nil
 }
 
@@ -1358,7 +1321,6 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		s.Config.TenantStore = tenantHolder
 		if tenantHolder != nil {
 			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey)
-			lib.WireTenantModelCatalogSync(ctx, tenantHolder, s.Config.ModelCatalog, logger)
 		}
 	}
 	if s.Config.KVStore != nil {

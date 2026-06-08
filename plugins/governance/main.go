@@ -411,20 +411,9 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		}
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	//1. Apply routing rules only if we have rules or matched decision
@@ -514,20 +503,9 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 		virtualKey = vk
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
@@ -627,20 +605,9 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 		virtualKey = vk
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	// Apply routing rules
@@ -1267,42 +1234,12 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
 	}
 
-	// Step 2: Customer-level budget (customer attached directly to VK, or via the VK's team).
-	// Fall back to the loaded relation IDs so VKs populated via joins without FK
-	// pointer columns still participate in customer-level enforcement.
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
-		var customerID string
-		switch {
-		case hierarchyVK.CustomerID != nil:
-			customerID = *hierarchyVK.CustomerID
-		case hierarchyVK.Customer != nil:
-			customerID = hierarchyVK.Customer.ID
-		case hierarchyVK.Team != nil && hierarchyVK.Team.CustomerID != nil:
-			customerID = *hierarchyVK.Team.CustomerID
-		case hierarchyVK.Team != nil && hierarchyVK.Team.Customer != nil:
-			customerID = hierarchyVK.Team.Customer.ID
-		}
-		if customerID != "" {
-			result = resolver.EvaluateCustomerRequest(ctx, customerID, evaluationRequest)
-		}
+	// Step 2: Org hierarchy budget/rate-limit when VK-level checks were skipped (user auth path).
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil && hierarchyVK.OrgID != nil {
+		result = resolver.EvaluateOrgHierarchyRequest(ctx, *hierarchyVK.OrgID, evaluationRequest)
 	}
 
-	// Step 3: Team-level budget. Fall back to vk.Team.ID when the FK pointer is nil
-	// but the relation is populated.
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
-		var teamID string
-		switch {
-		case hierarchyVK.TeamID != nil:
-			teamID = *hierarchyVK.TeamID
-		case hierarchyVK.Team != nil:
-			teamID = hierarchyVK.Team.ID
-		}
-		if teamID != "" {
-			result = resolver.EvaluateTeamRequest(ctx, teamID, evaluationRequest)
-		}
-	}
-
-	// Step 4: User-level governance (enterprise-only).
+	// Step 3: User-level governance (enterprise-only).
 	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
 		result = resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
 	}

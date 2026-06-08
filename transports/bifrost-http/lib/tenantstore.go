@@ -8,9 +8,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
-	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/tenantstore"
-	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
 // TenantStoreFileConfig is the config.json shape for multi-tenant mode.
@@ -104,49 +102,6 @@ func InitTenantStore(
 
 	logger.Info("multi-tenant mode enabled")
 	return holder, nil
-}
-
-// WireTenantModelCatalogSync registers a ModelCatalog after-sync hook that writes
-// cloud-fetched pricing/parameters into every tenant database.
-func WireTenantModelCatalogSync(
-	ctx context.Context,
-	holder *TenantStoreHolder,
-	catalog *modelcatalog.ModelCatalog,
-	logger schemas.Logger,
-) {
-	if holder == nil || catalog == nil || holder.Manager == nil {
-		return
-	}
-
-	syncTenants := func(syncCtx context.Context) {
-		pricingRows := catalogSnapshotPricingRows(catalog)
-		paramRows := catalogSnapshotParameterRows(catalog)
-		tenantstore.SyncModelPricingRowsToAllTenants(syncCtx, holder.Manager, pricingRows, logger)
-		tenantstore.SyncModelParameterRowsToAllTenants(syncCtx, holder.Manager, paramRows, logger)
-	}
-
-	catalog.SetAfterSyncHook(syncTenants)
-
-	go func() {
-		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		catalog.WaitStartupBackgroundSync(waitCtx)
-		syncTenants(waitCtx)
-	}()
-}
-
-func catalogSnapshotPricingRows(catalog *modelcatalog.ModelCatalog) []configstoreTables.TableModelPricing {
-	if catalog == nil {
-		return nil
-	}
-	return catalog.SnapshotPricingRows()
-}
-
-func catalogSnapshotParameterRows(catalog *modelcatalog.ModelCatalog) []configstoreTables.TableModelParameters {
-	if catalog == nil {
-		return nil
-	}
-	return catalog.SnapshotParameterRows()
 }
 
 func postgresConfigFromFile(cfg *TenantStoreGlobalPostgresFile) *tenantstore.PostgresConfig {

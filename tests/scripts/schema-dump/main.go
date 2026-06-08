@@ -42,8 +42,6 @@ func main() {
 		&tables.TableTeam{},
 		&tables.TableVirtualKey{},
 		&tables.TableGovernanceConfig{},
-		&tables.TableModelPricing{},
-		&tables.TableModelParameters{},
 		&tables.TablePricingOverride{},
 		&tables.TablePlugin{},
 		&tables.TableVirtualKeyProviderConfig{},
