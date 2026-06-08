@@ -18,8 +18,7 @@ type VirtualKeyQueryParams struct {
 	Limit                              int
 	Offset                             int
 	Search                             string
-	CustomerID                         string
-	TeamID                             string
+	OrgID                              string
 	SortBy                             string // name, budget_spent, created_at, status (default: created_at)
 	Order                              string // asc, desc (default: asc)
 	Export                             bool   // When true, skip default pagination limits (caller controls limit)
@@ -168,16 +167,16 @@ type ConfigStore interface {
 	GetVirtualKeyProviderConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyProviderConfig, error)
 	CreateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error
 	UpdateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error
-	DeleteVirtualKeyProviderConfig(ctx context.Context, id uint, tx ...*gorm.DB) error
+	DeleteVirtualKeyProviderConfig(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Virtual key MCP config CRUD
 	GetVirtualKeyMCPConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyMCPConfig, error)
-	GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID uint) ([]tables.TableVirtualKeyMCPConfig, error)
-	GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []uint) ([]tables.TableVirtualKeyMCPConfig, error)
+	GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID string) ([]tables.TableVirtualKeyMCPConfig, error)
+	GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error)
 	GetVirtualKeyMCPConfigsByMCPClientStringIDs(ctx context.Context, clientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error)
 	CreateVirtualKeyMCPConfig(ctx context.Context, virtualKeyMCPConfig *tables.TableVirtualKeyMCPConfig, tx ...*gorm.DB) error
 	UpdateVirtualKeyMCPConfig(ctx context.Context, virtualKeyMCPConfig *tables.TableVirtualKeyMCPConfig, tx ...*gorm.DB) error
-	DeleteVirtualKeyMCPConfig(ctx context.Context, id uint, tx ...*gorm.DB) error
+	DeleteVirtualKeyMCPConfig(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Team CRUD
 	GetTeams(ctx context.Context, customerID string) ([]tables.TableTeam, error)
@@ -196,6 +195,17 @@ type ConfigStore interface {
 	CreateCustomer(ctx context.Context, customer *tables.TableCustomer, tx ...*gorm.DB) error
 	UpdateCustomer(ctx context.Context, customer *tables.TableCustomer, tx ...*gorm.DB) error
 	DeleteCustomer(ctx context.Context, id string) error
+
+	// Organization hierarchy (read-only; sourced from mpilotv2 organizations table)
+	GetOrganizations(ctx context.Context) ([]tables.TableOrganization, error)
+
+	// Org limit CRUD (per-org budget/rate-limit references)
+	GetOrgLimits(ctx context.Context) ([]tables.TableOrgLimit, error)
+	GetOrgLimit(ctx context.Context, id string) (*tables.TableOrgLimit, error)
+	GetOrgLimitByOrgID(ctx context.Context, orgID string) (*tables.TableOrgLimit, error)
+	CreateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
+	UpdateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
+	DeleteOrgLimit(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Rate limit CRUD
 	GetRateLimits(ctx context.Context) ([]tables.TableRateLimit, error)
@@ -266,11 +276,6 @@ type ConfigStore interface {
 	DeleteTempTokensByResourceID(ctx context.Context, scope, resourceID string, tx ...*gorm.DB) (int64, error)
 	DeleteExpiredTempTokens(ctx context.Context, before time.Time) (int64, error)
 
-	// Model pricing CRUD
-	GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error)
-	UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error
-	DeleteModelPrices(ctx context.Context, tx ...*gorm.DB) error
-
 	// Governance pricing overrides CRUD
 	GetPricingOverrides(ctx context.Context, filters PricingOverrideFilters) ([]tables.TablePricingOverride, error)
 	GetPricingOverridesPaginated(ctx context.Context, params PricingOverridesQueryParams) ([]tables.TablePricingOverride, int64, error)
@@ -278,11 +283,6 @@ type ConfigStore interface {
 	CreatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
 	UpdatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
 	DeletePricingOverride(ctx context.Context, id string, tx ...*gorm.DB) error
-
-	// Model parameters
-	GetModelParameters(ctx context.Context) ([]tables.TableModelParameters, error)
-	GetModelParametersByModel(ctx context.Context, model string) (*tables.TableModelParameters, error)
-	UpsertModelParameters(ctx context.Context, params *tables.TableModelParameters, tx ...*gorm.DB) error
 
 	// Key management
 	GetKeysByIDs(ctx context.Context, ids []string) ([]tables.TableKey, error)
@@ -427,20 +427,6 @@ type ConfigStore interface {
 	// should respect caller-driven row visibility; use DB().WithContext(ctx)
 	// for writes and internal lookups that must bypass scoping.
 	ScopedDB(ctx context.Context) *gorm.DB
-
-	// RunMigration opens a throwaway *gorm.DB against the same
-	// backing database, invokes fn with it, and closes the connection. Use
-	// this for DDL (typically downstream-consumer migrations) that must not
-	// leave cached prepared-statement plans on the runtime pool.
-	//
-	// After fn returns successfully, callers should invoke
-	// RefreshConnectionPool if the migration altered tables the runtime pool
-	// has already queried — otherwise SQLSTATE 0A000 can surface on reads
-	// whose cached plans predate the DDL.
-	//
-	// For SQLite backends, this is a pass-through that runs fn on the
-	// existing connection (no server-side plan cache, single-writer lock).
-	RunMigration(ctx context.Context, fn func(context.Context, *gorm.DB) error) error
 
 	// RefreshConnectionPool tears down the runtime pool and opens a fresh
 	// one against the same configuration. In-flight queries on the old

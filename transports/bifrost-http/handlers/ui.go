@@ -31,10 +31,16 @@ func (h *UIHandler) RegisterRoutes(router *router.Router, middlewares ...schemas
 	router.GET("/{filepath:*}", lib.ChainMiddlewares(h.serveDashboard, middlewares...))
 }
 
-// ServeDashboard serves the dashboard UI.
+// serveDashboard serves the dashboard UI.
 func (h *UIHandler) serveDashboard(ctx *fasthttp.RequestCtx) {
 	// Get the request path
 	requestPath := string(ctx.Path())
+
+	// API and inference routes are registered separately; do not serve SPA HTML for them.
+	if isNonUIRoutePath(requestPath) {
+		SendError(ctx, fasthttp.StatusNotFound, "Route not found: "+requestPath)
+		return
+	}
 
 	// Clean the path to prevent directory traversal
 	cleanPath := path.Clean(requestPath)
@@ -133,4 +139,22 @@ func (h *UIHandler) serveDashboard(ctx *fasthttp.RequestCtx) {
 
 	// Send the file content
 	ctx.SetBody(data)
+}
+
+// isNonUIRoutePath reports paths that belong to the HTTP API rather than the SPA.
+func isNonUIRoutePath(path string) bool {
+	path = strings.TrimSuffix(strings.ToLower(path), "/")
+	if path == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"/v1", "/api", "/metrics", "/health",
+		"/openai", "/anthropic", "/genai", "/bedrock", "/langchain",
+		"/litellm", "/pydanticai", "/mcp",
+	} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }

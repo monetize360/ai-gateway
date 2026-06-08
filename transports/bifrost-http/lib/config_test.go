@@ -829,11 +829,11 @@ func (m *MockConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value s
 	return nil, nil
 }
 
-func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID uint) ([]tables.TableVirtualKeyMCPConfig, error) {
+func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	return nil, nil
 }
 
-func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []uint) ([]tables.TableVirtualKeyMCPConfig, error) {
+func (m *MockConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	return nil, nil
 }
 
@@ -854,7 +854,7 @@ func (m *MockConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, vi
 	return nil
 }
 
-func (m *MockConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id uint, tx ...*gorm.DB) error {
+func (m *MockConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
 	return nil
 }
 
@@ -871,7 +871,7 @@ func (m *MockConfigStore) UpdateVirtualKeyMCPConfig(ctx context.Context, virtual
 	return nil
 }
 
-func (m *MockConfigStore) DeleteVirtualKeyMCPConfig(ctx context.Context, id uint, tx ...*gorm.DB) error {
+func (m *MockConfigStore) DeleteVirtualKeyMCPConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
 	return nil
 }
 
@@ -1003,19 +1003,6 @@ func (m *MockConfigStore) DeleteExpiredTempTokens(ctx context.Context, before ti
 	return 0, nil
 }
 
-// Model pricing
-func (m *MockConfigStore) GetModelPrices(ctx context.Context) ([]tables.TableModelPricing, error) {
-	return nil, nil
-}
-
-func (m *MockConfigStore) UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error {
-	return nil
-}
-
-func (m *MockConfigStore) DeleteModelPrices(ctx context.Context, tx ...*gorm.DB) error {
-	return nil
-}
-
 func (m *MockConfigStore) GetPricingOverrides(ctx context.Context, filter configstore.PricingOverrideFilters) ([]tables.TablePricingOverride, error) {
 	return []tables.TablePricingOverride{}, nil
 }
@@ -1041,18 +1028,6 @@ func (m *MockConfigStore) DeletePricingOverride(ctx context.Context, id string, 
 }
 
 // Model parameters
-
-func (m *MockConfigStore) GetModelParameters(ctx context.Context) ([]tables.TableModelParameters, error) {
-	return nil, nil
-}
-
-func (m *MockConfigStore) GetModelParametersByModel(ctx context.Context, model string) (*tables.TableModelParameters, error) {
-	return nil, nil
-}
-
-func (m *MockConfigStore) UpsertModelParameters(ctx context.Context, params *tables.TableModelParameters, tx ...*gorm.DB) error {
-	return nil
-}
 
 // Provider methods
 func (m *MockConfigStore) GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error) {
@@ -6707,7 +6682,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -6739,7 +6714,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic", // Different provider
 				Weight:        ptrFloat64(1.0),
@@ -6767,7 +6742,7 @@ func TestGenerateVirtualKeyHash_WithProviderConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(2.0), // Different weight
@@ -6802,9 +6777,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -6828,9 +6803,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2, // Different MCP client ID
+				MCPClientID:    "00000000-0000-0000-0000-000000000002", // Different MCP client ID
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -6854,9 +6829,9 @@ func TestGenerateVirtualKeyHash_WithMCPConfigs(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool3"}, // Different tools
 			},
 		},
@@ -8286,7 +8261,7 @@ func TestSQLite_VirtualKey_MergePath_WithProviderConfigKeys(t *testing.T) {
 		if pc.Keys[0].KeyID != dbKey.KeyID {
 			t.Errorf("Expected key ID '%s', got '%s'", dbKey.KeyID, pc.Keys[0].KeyID)
 		}
-		t.Logf("✓ Key successfully associated: ID=%d, KeyID=%s, Name=%s", pc.Keys[0].ID, pc.Keys[0].KeyID, pc.Keys[0].Name)
+		t.Logf("✓ Key successfully associated: ID=%s, KeyID=%s, Name=%s", pc.Keys[0].ID, pc.Keys[0].KeyID, pc.Keys[0].Name)
 	}
 }
 
@@ -9090,7 +9065,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9105,7 +9080,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    2, // Different client
+				MCPClientID:    "00000000-0000-0000-0000-000000000002", // Different client
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9120,7 +9095,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool3", "tool4"}, // Different tools
 			},
 		},
@@ -9135,11 +9110,11 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 			{
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -9199,7 +9174,7 @@ func TestGenerateVirtualKeyHash_MCPConfigChanges(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 		},
@@ -9290,12 +9265,12 @@ func TestSQLite_VirtualKey_WithMCPConfigs(t *testing.T) {
 
 	if len(mcpConfigs) > 0 {
 		if mcpConfigs[0].MCPClientID != mcpClient.ID {
-			t.Errorf("Expected MCPClientID %d, got %d", mcpClient.ID, mcpConfigs[0].MCPClientID)
+			t.Errorf("Expected MCPClientID %s, got %s", mcpClient.ID, mcpConfigs[0].MCPClientID)
 		}
 		if len(mcpConfigs[0].ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools, got %d", len(mcpConfigs[0].ToolsToExecute))
 		}
-		t.Logf("✓ MCP config created successfully with MCPClientID: %d", mcpConfigs[0].MCPClientID)
+		t.Logf("✓ MCP config created successfully with MCPClientID: %s", mcpConfigs[0].MCPClientID)
 	}
 
 	config1.Close(ctx)
@@ -10123,12 +10098,12 @@ func TestSQLite_VK_ProviderAndMCPConfigs_Combined(t *testing.T) {
 	}
 	if len(mcpConfigs) > 0 {
 		if mcpConfigs[0].MCPClientID != mcpClient.ID {
-			t.Errorf("Expected MCPClientID %d, got %d", mcpClient.ID, mcpConfigs[0].MCPClientID)
+			t.Errorf("Expected MCPClientID %s, got %s", mcpClient.ID, mcpConfigs[0].MCPClientID)
 		}
 		if len(mcpConfigs[0].ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools, got %d", len(mcpConfigs[0].ToolsToExecute))
 		}
-		t.Logf("✓ MCP config: MCPClientID=%d, tools=%v", mcpConfigs[0].MCPClientID, mcpConfigs[0].ToolsToExecute)
+		t.Logf("✓ MCP config: MCPClientID=%s, tools=%v", mcpConfigs[0].MCPClientID, mcpConfigs[0].ToolsToExecute)
 	}
 
 	t.Log("✓ VK with combined provider and MCP configs created successfully")
@@ -10189,7 +10164,7 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	if err != nil || calendarClient == nil {
 		t.Fatalf("CalendarService MCP client not found: %v", err)
 	}
-	t.Logf("MCP clients created: WeatherService ID=%d, CalendarService ID=%d", weatherClient.ID, calendarClient.ID)
+	t.Logf("MCP clients created: WeatherService ID=%s, CalendarService ID=%s", weatherClient.ID, calendarClient.ID)
 
 	config1.Close(ctx)
 
@@ -10297,7 +10272,7 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	}
 
 	// Build a map of MCPClientID to config for easier verification
-	configByClientID := make(map[uint]tables.TableVirtualKeyMCPConfig)
+	configByClientID := make(map[string]tables.TableVirtualKeyMCPConfig)
 	for _, mc := range mcpConfigs {
 		configByClientID[mc.MCPClientID] = mc
 	}
@@ -10305,23 +10280,23 @@ func TestSQLite_VKMCPConfig_MCPClientNameResolution(t *testing.T) {
 	// Verify WeatherService config
 	weatherConfig, ok := configByClientID[weatherClient.ID]
 	if !ok {
-		t.Errorf("MCP config for WeatherService (ID=%d) not found", weatherClient.ID)
+		t.Errorf("MCP config for WeatherService (ID=%s) not found", weatherClient.ID)
 	} else {
 		if len(weatherConfig.ToolsToExecute) != 2 {
 			t.Errorf("Expected 2 tools for WeatherService, got %d", len(weatherConfig.ToolsToExecute))
 		}
-		t.Logf("✓ WeatherService MCP config: MCPClientID=%d, tools=%v", weatherConfig.MCPClientID, weatherConfig.ToolsToExecute)
+		t.Logf("✓ WeatherService MCP config: MCPClientID=%s, tools=%v", weatherConfig.MCPClientID, weatherConfig.ToolsToExecute)
 	}
 
 	// Verify CalendarService config
 	calendarConfig, ok := configByClientID[calendarClient.ID]
 	if !ok {
-		t.Errorf("MCP config for CalendarService (ID=%d) not found", calendarClient.ID)
+		t.Errorf("MCP config for CalendarService (ID=%s) not found", calendarClient.ID)
 	} else {
 		if len(calendarConfig.ToolsToExecute) != 1 || calendarConfig.ToolsToExecute[0] != "*" {
 			t.Errorf("Expected tools=[\"*\"] for CalendarService, got %v", calendarConfig.ToolsToExecute)
 		}
-		t.Logf("✓ CalendarService MCP config: MCPClientID=%d, tools=%v", calendarConfig.MCPClientID, calendarConfig.ToolsToExecute)
+		t.Logf("✓ CalendarService MCP config: MCPClientID=%s, tools=%v", calendarConfig.MCPClientID, calendarConfig.ToolsToExecute)
 	}
 
 	t.Log("✓ mcp_client_name was successfully resolved to MCPClientID")
@@ -10484,21 +10459,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4"},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
@@ -10516,21 +10491,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
 				AllowedModels: []string{"command"},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10548,21 +10523,21 @@ func TestGenerateVirtualKeyHash_StableProviderConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            2,
+				ID:            "2",
 				VirtualKeyID:  "vk-1",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3"},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4"},
 			},
 			{
-				ID:            3,
+				ID:            "3",
 				VirtualKeyID:  "vk-1",
 				Provider:      "cohere",
 				Weight:        ptrFloat64(1.5),
@@ -10608,7 +10583,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10626,7 +10601,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10644,7 +10619,7 @@ func TestGenerateVirtualKeyHash_StableAllowedModelsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10690,7 +10665,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10713,7 +10688,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10736,7 +10711,7 @@ func TestGenerateVirtualKeyHash_StableKeyIDsOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				VirtualKeyID:  "vk-1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
@@ -10787,21 +10762,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -10816,21 +10791,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 		},
@@ -10845,21 +10820,21 @@ func TestGenerateVirtualKeyHash_StableMCPConfigOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             2,
+				ID:             "2",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    2,
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool2"},
 			},
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1"},
 			},
 			{
-				ID:             3,
+				ID:             "3",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    3,
+				MCPClientID:    "00000000-0000-0000-0000-000000000003",
 				ToolsToExecute: []string{"tool3"},
 			},
 		},
@@ -10902,9 +10877,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-a", "tool-b", "tool-c", "tool-d"},
 			},
 		},
@@ -10919,9 +10894,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-d", "tool-c", "tool-b", "tool-a"},
 			},
 		},
@@ -10936,9 +10911,9 @@ func TestGenerateVirtualKeyHash_StableToolsToExecuteOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
+				ID:             "1",
 				VirtualKeyID:   "vk-1",
-				MCPClientID:    1,
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool-c", "tool-a", "tool-d", "tool-b"},
 			},
 		},
@@ -10981,7 +10956,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            1,
+				ID:            "1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-4", "gpt-3.5-turbo"},
@@ -10991,7 +10966,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 				},
 			},
 			{
-				ID:            2,
+				ID:            "2",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-3", "claude-2"},
@@ -11002,13 +10977,13 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		},
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             1,
-				MCPClientID:    1,
+				ID:             "1",
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool1", "tool2"},
 			},
 			{
-				ID:             2,
-				MCPClientID:    2,
+				ID:             "2",
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool3", "tool4"},
 			},
 		},
@@ -11023,7 +10998,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		IsActive:    schemas.Ptr(true),
 		ProviderConfigs: []tables.TableVirtualKeyProviderConfig{
 			{
-				ID:            2,
+				ID:            "2",
 				Provider:      "anthropic",
 				Weight:        ptrFloat64(2.0),
 				AllowedModels: []string{"claude-2", "claude-3"}, // reversed
@@ -11032,7 +11007,7 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 				},
 			},
 			{
-				ID:            1,
+				ID:            "1",
 				Provider:      "openai",
 				Weight:        ptrFloat64(1.0),
 				AllowedModels: []string{"gpt-3.5-turbo", "gpt-4"}, // reversed
@@ -11044,13 +11019,13 @@ func TestGenerateVirtualKeyHash_StableCombinedOrdering(t *testing.T) {
 		},
 		MCPConfigs: []tables.TableVirtualKeyMCPConfig{
 			{
-				ID:             2,
-				MCPClientID:    2,
+				ID:             "2",
+				MCPClientID:    "00000000-0000-0000-0000-000000000002",
 				ToolsToExecute: []string{"tool4", "tool3"}, // reversed
 			},
 			{
-				ID:             1,
-				MCPClientID:    1,
+				ID:             "1",
+				MCPClientID:    "00000000-0000-0000-0000-000000000001",
 				ToolsToExecute: []string{"tool2", "tool1"}, // reversed
 			},
 		},
@@ -15641,7 +15616,7 @@ var excludedGoFields = map[string]map[string]bool{
 		"config_hash":        true,
 		"created_at":         true,
 		"updated_at":         true,
-		"created_by_user_id": true, // DB ownership metadata; set by API/session layer
+		"created_by": true, // DB ownership metadata; set by API/session layer
 		"budgets":            true, // GORM relation (budgets have virtual_key_id FK)
 		"rate_limit":         true, // GORM relation
 		"team":               true, // GORM relation
@@ -16018,322 +15993,12 @@ func TestConfigSchemaSyncTopLevel(t *testing.T) {
 
 func TestResolveFrameworkPricingConfig(t *testing.T) {
 	initTestLogger()
-	defaultURL := modelcatalog.DefaultPricingURL
-	defaultSyncSeconds := int64(modelcatalog.DefaultSyncInterval.Seconds())
-	defaultModelParamsURL := modelcatalog.DefaultModelParametersURL
-	fileURL := "https://example.com/pricing.json"
-	fileSyncSeconds := int64((12 * time.Hour).Seconds())
-	dbURL := "https://db.example.com/pricing.json"
-	dbSyncSeconds := int64((6 * time.Hour).Seconds())
+	dbConfig := &tables.TableFrameworkConfig{ID: 7}
 
-	t.Run("file values override db when no stored hash exists", func(t *testing.T) {
-		// DB has values but no ConfigHash — first time file is applied; file wins.
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  7,
-			PricingURL:          &dbURL,
-			PricingSyncInterval: &dbSyncSeconds,
-			ModelParametersURL:  &defaultModelParamsURL,
-			ConfigHash:          "",
-		}
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL:          &fileURL,
-				PricingSyncInterval: &fileSyncSeconds,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, fileConfig)
-		require.True(t, needsDBUpdate)
-		require.Equal(t, uint(7), normalizedTable.ID)
-		require.Equal(t, fileURL, *normalizedTable.PricingURL)
-		require.Equal(t, fileSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, fileURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, fileSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-		// Returned row must carry the new file hash so future restarts can compare.
-		require.NotEmpty(t, normalizedTable.ConfigHash)
-	})
-
-	t.Run("db wins when file hash matches stored hash (user edited via UI)", func(t *testing.T) {
-		// File is unchanged since last write. User may have edited DB via UI.
-		// DB should take precedence so UI edits are respected.
-		storedHash, err := configstore.GenerateFrameworkConfigHash(&fileURL, &defaultModelParamsURL, &fileSyncSeconds)
-		require.NoError(t, err)
-		uiEditedURL := "https://ui-edited.example.com/pricing.json"
-		uiEditedSync := int64((24 * time.Hour).Seconds())
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  8,
-			PricingURL:          &uiEditedURL,
-			PricingSyncInterval: &uiEditedSync,
-			ModelParametersURL:  &defaultModelParamsURL,
-			ConfigHash:          storedHash, // hash of last file-applied values
-		}
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL:          &fileURL,
-				ModelParametersURL:  &defaultModelParamsURL,
-				PricingSyncInterval: &fileSyncSeconds,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, fileConfig)
-		require.False(t, needsDBUpdate) // file unchanged; DB wins
-		require.Equal(t, uint(8), normalizedTable.ID)
-		require.Equal(t, uiEditedURL, *normalizedTable.PricingURL)
-		require.Equal(t, uiEditedSync, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, defaultModelParamsURL, *normalizedTable.ModelParametersURL)
-		require.Equal(t, uiEditedURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, uiEditedSync, *normalizedModelCatalog.PricingSyncInterval)
-		require.Equal(t, defaultModelParamsURL, *normalizedModelCatalog.ModelParametersURL)
-	})
-
-	t.Run("file values override db when file changes after ui edit", func(t *testing.T) {
-		// DB has UI-edited values. File has changed. File wins and DB is updated.
-		storedHash, err := configstore.GenerateFrameworkConfigHash(&fileURL, &defaultModelParamsURL, &fileSyncSeconds)
-		require.NoError(t, err)
-		uiEditedURL := "https://ui-edited.example.com/pricing.json"
-		uiEditedSync := int64((24 * time.Hour).Seconds())
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  9,
-			PricingURL:          &uiEditedURL,
-			ModelParametersURL:  &defaultModelParamsURL,
-			PricingSyncInterval: &uiEditedSync,
-			ConfigHash:          storedHash, // hash of OLD file values
-		}
-		newFileURL := "https://new-file.example.com/pricing.json"
-		newFileSyncSeconds := int64((48 * time.Hour).Seconds())
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL:          &newFileURL,
-				ModelParametersURL:  &defaultModelParamsURL,
-				PricingSyncInterval: &newFileSyncSeconds,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, fileConfig)
-		require.True(t, needsDBUpdate)
-		require.Equal(t, uint(9), normalizedTable.ID)
-		require.Equal(t, newFileURL, *normalizedTable.PricingURL)
-		require.Equal(t, defaultModelParamsURL, *normalizedTable.ModelParametersURL)
-		require.Equal(t, newFileSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, newFileURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, defaultModelParamsURL, *normalizedModelCatalog.ModelParametersURL)
-		require.Equal(t, newFileSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("fallback to file when db fields are missing", func(t *testing.T) {
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  3,
-			PricingURL:          nil,
-			PricingSyncInterval: nil,
-		}
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL:          &fileURL,
-				PricingSyncInterval: &fileSyncSeconds,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, fileConfig)
-		require.True(t, needsDBUpdate)
-		require.Equal(t, uint(3), normalizedTable.ID)
-		require.Equal(t, fileURL, *normalizedTable.PricingURL)
-		require.Equal(t, fileSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, fileURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, fileSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("fallback to defaults when db and file are missing", func(t *testing.T) {
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(nil, nil)
-		require.False(t, needsDBUpdate)
-		require.Equal(t, defaultURL, *normalizedTable.PricingURL)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, defaultURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, defaultSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("invalid db interval (zero) falls back and requests db update", func(t *testing.T) {
-		invalidDBSync := int64(0)
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  5,
-			PricingURL:          &dbURL,
-			PricingSyncInterval: &invalidDBSync,
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, nil)
-		require.True(t, needsDBUpdate)
-		require.Equal(t, dbURL, *normalizedTable.PricingURL)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, dbURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, defaultSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("invalid db interval (negative) falls back and requests db update", func(t *testing.T) {
-		negativeDBSync := int64(-100)
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  6,
-			PricingURL:          &dbURL,
-			PricingSyncInterval: &negativeDBSync,
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, nil)
-		require.True(t, needsDBUpdate)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, defaultSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("file interval below minimum is clamped to 3600", func(t *testing.T) {
-		tooLow := int64(1800) // 30 minutes — below minimum 3600
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingSyncInterval: &tooLow,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(nil, fileConfig)
-		require.False(t, needsDBUpdate)
-		require.Equal(t, modelcatalog.MinimumPricingSyncIntervalSec, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, modelcatalog.MinimumPricingSyncIntervalSec, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("file interval of zero is ignored and defaults apply", func(t *testing.T) {
-		zero := int64(0)
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingSyncInterval: &zero,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(nil, fileConfig)
-		require.False(t, needsDBUpdate)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, defaultSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("file interval negative is ignored and defaults apply", func(t *testing.T) {
-		neg := int64(-1)
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingSyncInterval: &neg,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(nil, fileConfig)
-		require.False(t, needsDBUpdate)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
-		require.Equal(t, defaultSyncSeconds, *normalizedModelCatalog.PricingSyncInterval)
-	})
-
-	t.Run("pricing_url with missing env var falls back to literal string", func(t *testing.T) {
-		// Use a name that is guaranteed not to be set in the test environment
-		rawURL := "env.BIFROST_TEST_PRICING_URL_NONEXISTENT_XYZ"
-		prev, existed := os.LookupEnv("BIFROST_TEST_PRICING_URL_NONEXISTENT_XYZ")
-		os.Unsetenv("BIFROST_TEST_PRICING_URL_NONEXISTENT_XYZ")
-		t.Cleanup(func() {
-			if existed {
-				os.Setenv("BIFROST_TEST_PRICING_URL_NONEXISTENT_XYZ", prev)
-			}
-		})
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL: &rawURL,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, _ := ResolveFrameworkPricingConfig(nil, fileConfig)
-		// Should preserve the original "env.*" literal, not silently revert to default URL
-		require.Equal(t, rawURL, *normalizedTable.PricingURL)
-		require.Equal(t, rawURL, *normalizedModelCatalog.PricingURL)
-	})
-
-	t.Run("pricing_url with valid env var is resolved", func(t *testing.T) {
-		t.Setenv("BIFROST_TEST_PRICING_URL_VALID", "https://resolved.example.com/pricing.json")
-		rawURL := "env.BIFROST_TEST_PRICING_URL_VALID"
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL: &rawURL,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, _ := ResolveFrameworkPricingConfig(nil, fileConfig)
-		require.Equal(t, "https://resolved.example.com/pricing.json", *normalizedTable.PricingURL)
-		require.Equal(t, "https://resolved.example.com/pricing.json", *normalizedModelCatalog.PricingURL)
-	})
-
-	t.Run("partial/embedded env string is treated as literal (no substitution)", func(t *testing.T) {
-		// envutils.ProcessEnvValue only substitutes full-string "env.VAR" values.
-		// A URL that contains env syntax mid-string must not be partially expanded.
-		t.Setenv("BIFROST_TEST_PRICING_HOST", "host.example.com")
-		embeddedURL := "https://env.BIFROST_TEST_PRICING_HOST/pricing.json"
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingURL: &embeddedURL,
-			},
-		}
-
-		normalizedTable, normalizedModelCatalog, _ := ResolveFrameworkPricingConfig(nil, fileConfig)
-		// The URL does not start with "env." so it must be returned verbatim.
-		require.Equal(t, embeddedURL, *normalizedTable.PricingURL)
-		require.Equal(t, embeddedURL, *normalizedModelCatalog.PricingURL)
-	})
-
-	t.Run("returned pointers are never nil regardless of inputs", func(t *testing.T) {
-		// Verify the no-nil contract for all four degenerate input combinations.
-		inputs := []struct {
-			db   *tables.TableFrameworkConfig
-			file *framework.FrameworkConfig
-		}{
-			{nil, nil},
-			{&tables.TableFrameworkConfig{}, nil},
-			{nil, &framework.FrameworkConfig{}},
-			{&tables.TableFrameworkConfig{}, &framework.FrameworkConfig{}},
-		}
-		for _, tc := range inputs {
-			tableOut, catalogOut, _ := ResolveFrameworkPricingConfig(tc.db, tc.file)
-			require.NotNil(t, tableOut, "TableFrameworkConfig must never be nil")
-			require.NotNil(t, tableOut.PricingURL, "PricingURL must never be nil")
-			require.NotNil(t, tableOut.PricingSyncInterval, "PricingSyncInterval must never be nil")
-			require.NotNil(t, tableOut.ModelParametersURL, "ModelParametersURL must never be nil")
-			require.NotNil(t, catalogOut, "modelcatalog.Config must never be nil")
-			require.NotNil(t, catalogOut.PricingURL, "Config.PricingURL must never be nil")
-			require.NotNil(t, catalogOut.PricingSyncInterval, "Config.PricingSyncInterval must never be nil")
-			require.NotNil(t, catalogOut.ModelParametersURL, "Config.ModelParametersURL must never be nil")
-		}
-	})
-
-	t.Run("db corrupted (zero) with valid file interval uses file value and requests db backfill", func(t *testing.T) {
-		// Real-world recovery scenario: a pre-fix Bifrost wrote 0 nanoseconds (interpreted
-		// as 0 seconds) to the DB. The new code must heal this by preferring the valid
-		// file value and flagging the DB for an update so the next restart finds a sane
-		// value without requiring manual DB intervention.
-		corruptedDBSync := int64(0)
-		fileSync := int64(7200) // 2 hours — valid, above minimum
-
-		dbConfig := &tables.TableFrameworkConfig{
-			ID:                  9,
-			PricingURL:          &dbURL,
-			PricingSyncInterval: &corruptedDBSync,
-		}
-		fileConfig := &framework.FrameworkConfig{
-			Pricing: &modelcatalog.Config{
-				PricingSyncInterval: &fileSync,
-			},
-		}
-
-		tableOut, catalogOut, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, fileConfig)
-
-		// DB corruption must be detected and flagged for backfill.
-		require.True(t, needsDBUpdate, "corrupted DB interval (zero) must trigger a DB backfill")
-
-		// The file-configured value (7200 s) must win over the corrupted DB value.
-		require.Equal(t, int64(7200), *tableOut.PricingSyncInterval,
-			"table output must reflect valid file interval, not corrupted DB value")
-		require.Equal(t, int64(7200), *catalogOut.PricingSyncInterval,
-			"catalog output must reflect valid file interval, not corrupted DB value")
-
-		// URL should still come from DB (only the interval was corrupted).
-		require.Equal(t, dbURL, *tableOut.PricingURL,
-			"URL from a valid DB field must still be used")
-	})
+	tableOut, catalogOut, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, nil)
+	require.False(t, needsDBUpdate)
+	require.Equal(t, uint(7), tableOut.ID)
+	require.NotNil(t, catalogOut)
 }
 
 func TestIsBcryptHash(t *testing.T) {

@@ -86,10 +86,10 @@ func (h *MCPSessionsHandler) list(ctx *fasthttp.RequestCtx) {
 	// to the caller's identity + owned VKs; team-data widens to members;
 	// all-data / OSS-only sees everything). Matches the canonical pattern
 	// used by getVirtualKeys, getPrompts, getTeams, etc.
-	tokens, err := h.store.ConfigStore.ListAllOauthUserTokens(ctx)
+	tokens, err := h.store.StoreFromRequestCtx(ctx).ListAllOauthUserTokens(ctx)
 	var flows []tables.TableOauthUserSession
 	if err == nil {
-		flows, err = h.store.ConfigStore.ListAllPendingOauthUserSessions(ctx)
+		flows, err = h.store.StoreFromRequestCtx(ctx).ListAllPendingOauthUserSessions(ctx)
 	}
 	if err != nil {
 		logger.Error("[mcp/sessions] list failed: %v", err)
@@ -262,13 +262,13 @@ func (h *MCPSessionsHandler) revoke(ctx *fasthttp.RequestCtx) {
 	// touching the token, so the caller retries cleanly.
 	rowMode, rowIdentity := identityFromTokenRow(tok)
 	if rowIdentity != "" {
-		if delErr := h.store.ConfigStore.DeleteOauthUserSessionsByModeIdentityAndMCPClient(ctx, rowMode, rowIdentity, tok.MCPClientID); delErr != nil {
+		if delErr := h.store.StoreFromRequestCtx(ctx).DeleteOauthUserSessionsByModeIdentityAndMCPClient(ctx, rowMode, rowIdentity, tok.MCPClientID); delErr != nil {
 			logger.Error("[mcp/sessions] clearing flow rows failed: token=%s err=%v", rowID, delErr)
 			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to delete MCP session")
 			return
 		}
 	}
-	if err := h.store.ConfigStore.DeleteOauthUserToken(ctx, tok.ID); err != nil {
+	if err := h.store.StoreFromRequestCtx(ctx).DeleteOauthUserToken(ctx, tok.ID); err != nil {
 		logger.Error("[mcp/sessions] delete row failed: token=%s err=%v", rowID, err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to delete MCP session")
 		return
@@ -373,7 +373,7 @@ func (h *MCPSessionsHandler) flowDetail(ctx *fasthttp.RequestCtx) {
 			identity = flow.SessionID
 		}
 		if identity != "" {
-			if tok, lookupErr := h.store.ConfigStore.GetOauthUserTokenByMode(ctx, flowMode, identity, flow.MCPClientID); lookupErr == nil && tok != nil {
+			if tok, lookupErr := h.store.StoreFromRequestCtx(ctx).GetOauthUserTokenByMode(ctx, flowMode, identity, flow.MCPClientID); lookupErr == nil && tok != nil {
 				resp.HasActiveToken = true
 			}
 		}
@@ -427,7 +427,7 @@ func (h *MCPSessionsHandler) flowStart(ctx *fasthttp.RequestCtx) {
 // the scope builder so they can claim the auth URL. Writes the appropriate
 // HTTP error response and returns a sentinel error on failure.
 func (h *MCPSessionsHandler) loadAuthorizedFlow(ctx *fasthttp.RequestCtx, flowID string) (*tables.TableOauthUserSession, error) {
-	flow, err := h.store.ConfigStore.GetOauthUserSessionByID(ctx, flowID)
+	flow, err := h.store.StoreFromRequestCtx(ctx).GetOauthUserSessionByID(ctx, flowID)
 	if err != nil {
 		logger.Error("[mcp/sessions] load flow failed: flow=%s err=%v", flowID, err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load OAuth flow")
@@ -466,7 +466,7 @@ func identityFromTokenRow(tok *tables.TableOauthUserToken) (schemas.MCPAuthMode,
 // act on it" model used by GetVirtualKey / DeleteVirtualKey. Writes the
 // HTTP error response on failure.
 func (h *MCPSessionsHandler) loadRowAuthorizedForCaller(ctx *fasthttp.RequestCtx, rowID string) (*tables.TableOauthUserToken, error) {
-	tok, err := h.store.ConfigStore.GetOauthUserTokenByID(ctx, rowID)
+	tok, err := h.store.StoreFromRequestCtx(ctx).GetOauthUserTokenByID(ctx, rowID)
 	if err != nil {
 		logger.Error("[mcp/sessions] load row failed: token=%s err=%v", rowID, err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to load MCP session")

@@ -1011,7 +1011,7 @@ func TestProviderConfigBudgetUpdateAfterExhaustion(t *testing.T) {
 	vkData := virtualKeysMap[vkValue].(map[string]interface{})
 	providerConfigs := vkData["provider_configs"].([]interface{})
 	providerConfig := providerConfigs[0].(map[string]interface{})
-	providerConfigID := uint(providerConfig["id"].(float64))
+	providerConfigID := providerConfig["id"].(string)
 
 	// Exhaust provider config budget
 	consumedBudget := 0.0

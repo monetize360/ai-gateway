@@ -138,7 +138,7 @@ func (s *BifrostHTTPServer) updateKeyStatus(
 	ctx context.Context,
 	keyStatuses []schemas.KeyStatus,
 ) {
-	if s.Config == nil || s.Config.ConfigStore == nil || len(keyStatuses) == 0 {
+	if s.Config == nil || s.Config.StoreFromContext(ctx) == nil || len(keyStatuses) == 0 {
 		return
 	}
 
@@ -149,7 +149,7 @@ func (s *BifrostHTTPServer) updateKeyStatus(
 			errorMsg = ks.Error.Error.Message
 		}
 
-		if err := s.Config.ConfigStore.UpdateStatus(ctx, ks.Provider, ks.KeyID, string(ks.Status), errorMsg); err != nil {
+		if err := s.Config.StoreFromContext(ctx).UpdateStatus(ctx, ks.Provider, ks.KeyID, string(ks.Status), errorMsg); err != nil {
 			target := ks.KeyID
 			if target == "" {
 				target = string(ks.Provider)

@@ -539,7 +539,7 @@ func resolveRealtimeTarget(ctx *fasthttp.RequestCtx, config *lib.Config, path, m
 	// path doesn't imply a default provider, look up the model catalog — same
 	// logic as resolveModelAndProvider in inference.go.
 	if provider == "" {
-		providers := config.GetProvidersForModel(model)
+		providers := config.GetProvidersForModelForRequest(ctx, model)
 		if len(providers) == 0 {
 			return "", "", errRealtimeModelFormat
 		}

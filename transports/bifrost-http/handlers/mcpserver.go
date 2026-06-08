@@ -277,8 +277,8 @@ func (h *MCPServerHandler) SyncAllMCPServers(ctx context.Context) error {
 	logger.Debug("Synced global MCP server with %d tools", len(availableTools))
 
 	// initialize vkMCPServers map
-	if h.config.ConfigStore != nil {
-		virtualKeys, err := h.config.ConfigStore.GetVirtualKeys(ctx)
+	if h.config.StoreFromContext(ctx) != nil {
+		virtualKeys, err := h.config.StoreFromContext(ctx).GetVirtualKeys(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get virtual keys: %w", err)
 		}

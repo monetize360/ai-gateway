@@ -18,6 +18,7 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/temptoken"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 	"github.com/maximhq/bifrost/framework/tracing"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -695,7 +696,7 @@ func isRealtimeTransportEndpoint(path string) bool {
 
 // AuthMiddleware is a middleware that handles authentication for the API.
 type AuthMiddleware struct {
-	store             configstore.ConfigStore
+	cfg               *lib.Config
 	whitelistedRoutes atomic.Pointer[[]string]
 	authConfig        atomic.Pointer[configstore.AuthConfig]
 	wsTicketStore     *WSTicketStore
@@ -706,35 +707,39 @@ type AuthMiddleware struct {
 // InitAuthMiddleware initializes the auth middleware. The tempTokens service
 // is optional and still gated by client config — when nil or disabled, the
 // temp-token fallback path is skipped.
-func InitAuthMiddleware(store configstore.ConfigStore, wsTicketStore *WSTicketStore, tempTokensService *temptoken.Service) (*AuthMiddleware, error) {
-	if store == nil {
-		return nil, fmt.Errorf("store is not present")
-	}
-	authConfig, err := store.GetAuthConfig(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get auth config from store: %v", err)
+func InitAuthMiddleware(cfg *lib.Config, wsTicketStore *WSTicketStore, tempTokensService *temptoken.Service) (*AuthMiddleware, error) {
+	if cfg == nil || cfg.Registry() == nil {
+		return nil, fmt.Errorf("tenant registry is required")
 	}
 	am := &AuthMiddleware{
-		store:             store,
+		cfg:               cfg,
 		authConfig:        atomic.Pointer[configstore.AuthConfig]{},
 		wsTicketStore:     wsTicketStore,
 		tempTokensService: tempTokensService,
 	}
 
-	am.authConfig.Store(authConfig)
-
-	// Load whitelisted routes from client config
-	clientConfig, err := store.GetClientConfig(context.Background())
-	if err == nil && clientConfig != nil {
-		am.whitelistedRoutes.Store(&clientConfig.WhitelistedRoutes)
-		am.tempTokensEnabled.Store(clientConfig.MCPEnableTempTokenAuth)
+	if cfg.GovernanceConfig != nil && cfg.GovernanceConfig.AuthConfig != nil {
+		am.authConfig.Store(cfg.GovernanceConfig.AuthConfig)
 	} else {
-		emptyRoutes := []string{}
-		am.whitelistedRoutes.Store(&emptyRoutes)
-		am.tempTokensEnabled.Store(false)
+		am.authConfig.Store(&configstore.AuthConfig{})
+	}
+
+	emptyRoutes := []string{}
+	am.whitelistedRoutes.Store(&emptyRoutes)
+	am.tempTokensEnabled.Store(false)
+	if cfg.ClientConfig != nil {
+		am.whitelistedRoutes.Store(&cfg.ClientConfig.WhitelistedRoutes)
+		am.tempTokensEnabled.Store(cfg.ClientConfig.MCPEnableTempTokenAuth)
 	}
 
 	return am, nil
+}
+
+func (m *AuthMiddleware) resolveStore(ctx *fasthttp.RequestCtx) configstore.ConfigStore {
+	if m.cfg == nil {
+		return nil
+	}
+	return m.cfg.StoreFromRequestCtx(ctx)
 }
 
 func (m *AuthMiddleware) UpdateAuthConfig(authConfig *configstore.AuthConfig) {
@@ -890,7 +895,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						ticket := string(ctx.Request.URI().QueryArgs().Peek("ticket"))
 						if ticket != "" && m.wsTicketStore != nil {
 							sessionToken := m.wsTicketStore.Consume(ticket)
-							if sessionToken != "" && validateSession(ctx, m.store, sessionToken) {
+							if sessionToken != "" && validateSession(ctx, m.resolveStore(ctx), sessionToken) {
 								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, sessionToken)
 								next(ctx)
 								return
@@ -901,7 +906,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						// Fallback: legacy ?token= param (for backward compatibility)
 						token := string(ctx.Request.URI().QueryArgs().Peek("token"))
 						if token != "" {
-							if validateSession(ctx, m.store, token) {
+							if validateSession(ctx, m.resolveStore(ctx), token) {
 								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
 								next(ctx)
 								return
@@ -911,7 +916,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						}
 						// Fallback: cookie-based WS auth
 						cookieToken := string(ctx.Request.Header.Cookie("token"))
-						if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
+						if cookieToken != "" && validateSession(ctx, m.resolveStore(ctx), cookieToken) {
 							ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
 							next(ctx)
 							return
@@ -923,7 +928,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// Cookie-based auth fallback: if no Authorization header, check for the HTTPOnly session cookie.
 				// This supports the dashboard which relies on cookies instead of localStorage tokens.
 				cookieToken := string(ctx.Request.Header.Cookie("token"))
-				if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
+				if cookieToken != "" && validateSession(ctx, m.resolveStore(ctx), cookieToken) {
 					ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
 					ctx.SetUserValue(schemas.IsLocalAdminContextKey, true)
 					next(ctx)
@@ -982,7 +987,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// We are checking for API keys first; it it seems like a valid Bifrost API key
 
 				// Verify the session
-				if !validateSession(ctx, m.store, token) {
+				if !validateSession(ctx, m.resolveStore(ctx), token) {
 					// Here we will check if its the base64 of username:password
 					// This is for backward compatibility with the old auth system
 					decodedBytes, err := base64.StdEncoding.DecodeString(token)
@@ -1204,4 +1209,70 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 	}
 
 	return obsPlugins
+}
+
+// TenantMiddleware validates the Bearer JWT issued by the mpilotv2 backend and
+// injects tenant-scoped identity values into the fasthttp user-value map.
+// ConvertToBifrostContext then copies all user values into BifrostContext
+// automatically via VisitUserValuesAll.
+//
+// Values written to context on success:
+//   - BifrostContextKeyTenantID  — tenantId claim (UUID)
+//   - BifrostContextKeyAccessKey — accessKey claim (UUID, primary key of access_key_token)
+//
+// The JWT key is shared across all tenants and loaded from config.json at
+// startup. Both RS256 (PEM RSA public key) and HS256 (HMAC secret) are
+// supported; the algorithm is auto-detected from the token header.
+//
+// Returns 401 when:
+//   - the Authorization header is missing or does not start with "Bearer "
+//   - the JWT signature is invalid or the token has expired
+//   - the tenantId or accessKey claims are absent or empty
+type TenantMiddleware struct {
+	jwtKey []byte
+}
+
+// NewTenantMiddleware creates a TenantMiddleware using the supplied key bytes.
+// For RS256 tokens pass a PEM-encoded RSA public key; for HS256 pass the raw secret.
+func NewTenantMiddleware(jwtKey []byte) *TenantMiddleware {
+	return &TenantMiddleware{jwtKey: jwtKey}
+}
+
+// Middleware returns a schemas.BifrostHTTPMiddleware that validates the JWT and
+// injects tenantId + accessKey into the request context.
+// OptionalMiddleware returns tenant JWT middleware that skips whitelisted paths
+// (health, metrics, UI static, session login, etc.).
+func (m *TenantMiddleware) OptionalMiddleware() schemas.BifrostHTTPMiddleware {
+	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+		return func(ctx *fasthttp.RequestCtx) {
+			if lib.TenantPathSkipsJWT(string(ctx.Path())) {
+				next(ctx)
+				return
+			}
+			m.Middleware()(next)(ctx)
+		}
+	}
+}
+
+func (m *TenantMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
+	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+		return func(ctx *fasthttp.RequestCtx) {
+			authHeader := string(ctx.Request.Header.Peek("Authorization"))
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				SendError(ctx, fasthttp.StatusUnauthorized, "missing or invalid Authorization header")
+				return
+			}
+			rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+
+			claims, err := tenantstore.ExtractClaimsFromJWT(rawToken, m.jwtKey)
+			if err != nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, "invalid tenant token: "+err.Error())
+				return
+			}
+
+			ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
+			ctx.SetUserValue(schemas.BifrostContextKeyAccessKey, claims.AccessKey)
+			next(ctx)
+		}
+	}
 }

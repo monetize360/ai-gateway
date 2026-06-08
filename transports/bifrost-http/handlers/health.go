@@ -42,11 +42,11 @@ func (h *HealthHandler) getHealth(ctx *fasthttp.RequestCtx) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	if h.config.ConfigStore != nil {
+	if h.config.StoreFromRequestCtx(ctx) != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := h.config.ConfigStore.Ping(reqCtx); err != nil {
+			if err := h.config.StoreFromRequestCtx(ctx).Ping(reqCtx); err != nil {
 				mu.Lock()
 				errors = append(errors, "config store not available")
 				mu.Unlock()

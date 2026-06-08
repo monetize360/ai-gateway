@@ -783,7 +783,7 @@ type VirtualKeyProviderConfigHashInput struct {
 
 // VirtualKeyMCPConfigHashInput represents MCP config fields for hashing
 type VirtualKeyMCPConfigHashInput struct {
-	MCPClientID    uint
+	MCPClientID    string
 	ToolsToExecute []string
 }
 
@@ -804,13 +804,9 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 	} else {
 		hash.Write([]byte("isActive:false"))
 	}
-	// Hash TeamID
-	if vk.TeamID != nil {
-		hash.Write([]byte("teamID:" + *vk.TeamID))
-	}
-	// Hash CustomerID
-	if vk.CustomerID != nil {
-		hash.Write([]byte("customerID:" + *vk.CustomerID))
+	// Hash OrgID
+	if vk.OrgID != nil {
+		hash.Write([]byte("orgID:" + *vk.OrgID))
 	}
 	// Hash RateLimitID
 	if vk.RateLimitID != nil {
@@ -1193,15 +1189,9 @@ func GenerateRoutingRuleHash(r tables.TableRoutingRule) (string, error) {
 		hash.Write([]byte("chain_rule:false"))
 	}
 
-	// Hash Scope
-	hash.Write([]byte(r.Scope))
-
-	// Hash ScopeID (nil = global)
-	scopeID := ""
-	if r.ScopeID != nil {
-		scopeID = *r.ScopeID
-	}
-	hash.Write([]byte(scopeID))
+	// Hash OrgID / VirtualKeyID (nil = global)
+	hash.Write([]byte(derefStr(r.OrgID)))
+	hash.Write([]byte(derefStr(r.VirtualKeyID)))
 
 	// Hash Priority
 	hash.Write([]byte(strconv.Itoa(r.Priority)))
@@ -1375,8 +1365,10 @@ type ConfigMap map[schemas.ModelProvider]ProviderConfig
 // reconciled from config.json.
 type GovernanceConfig struct {
 	VirtualKeys      []tables.TableVirtualKey      `json:"virtual_keys"`
-	Teams            []tables.TableTeam            `json:"teams"`
-	Customers        []tables.TableCustomer        `json:"customers"`
+	Organizations []tables.TableOrganization `json:"organizations,omitempty"`
+	OrgLimits     []tables.TableOrgLimit     `json:"org_limits,omitempty"`
+	Teams            []tables.TableTeam            `json:"teams,omitempty"`     // deprecated: use org_limits
+	Customers        []tables.TableCustomer        `json:"customers,omitempty"` // deprecated: use org_limits
 	Budgets          []tables.TableBudget          `json:"budgets"`
 	RateLimits       []tables.TableRateLimit       `json:"rate_limits"`
 	ModelConfigs     []tables.TableModelConfig     `json:"model_configs"`

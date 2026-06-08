@@ -17,7 +17,7 @@ const DefaultRoutingChainMaxDepth = 10
 
 // ScopeLevel represents a level in the scope precedence hierarchy
 type ScopeLevel struct {
-	ScopeName string // "virtual_key", "team", "customer", or "global"
+	ScopeName string // "virtual_key", "org", or "global"
 	ScopeID   string // empty string for global scope
 }
 
@@ -98,7 +98,11 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	visitedRuleIDs := map[string]struct{}{}
 
 	// Build scope chain once — it's based on the immutable VirtualKey and won't change across chain steps.
-	scopeChain := buildScopeChain(routingCtx.VirtualKey)
+	var orgAncestors []string
+	if routingCtx.VirtualKey != nil && routingCtx.VirtualKey.OrgID != nil {
+		orgAncestors = re.store.CollectOrgAncestorIDs(*routingCtx.VirtualKey.OrgID)
+	}
+	scopeChain := buildScopeChain(routingCtx.VirtualKey, orgAncestors)
 
 	// Cache rules per scope upfront to avoid redundant store lookups when rules chain
 	// and we re-evaluate the scope hierarchy on subsequent steps.
@@ -325,41 +329,24 @@ func selectWeightedTarget(targets []configstoreTables.TableRoutingTarget) (confi
 
 // buildScopeChain builds the scope evaluation chain based on organizational hierarchy
 // Returns scope levels in precedence order (highest to lowest)
-// VirtualKey > Team > Customer > Global
-func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey) []ScopeLevel {
+// VirtualKey > Org (each ancestor) > Global
+func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgAncestors []string) []ScopeLevel {
 	var chain []ScopeLevel
 
-	// VirtualKey level (highest precedence)
 	if virtualKey != nil {
 		chain = append(chain, ScopeLevel{
 			ScopeName: "virtual_key",
 			ScopeID:   virtualKey.ID,
 		})
 
-		// Team level
-		if virtualKey.Team != nil {
+		for _, orgID := range orgAncestors {
 			chain = append(chain, ScopeLevel{
-				ScopeName: "team",
-				ScopeID:   virtualKey.Team.ID,
-			})
-
-			// Customer level (from Team)
-			if virtualKey.Team.Customer != nil {
-				chain = append(chain, ScopeLevel{
-					ScopeName: "customer",
-					ScopeID:   virtualKey.Team.Customer.ID,
-				})
-			}
-		} else if virtualKey.Customer != nil {
-			// Customer level (VK attached directly to customer, no Team)
-			chain = append(chain, ScopeLevel{
-				ScopeName: "customer",
-				ScopeID:   virtualKey.Customer.ID,
+				ScopeName: "org",
+				ScopeID:   orgID,
 			})
 		}
 	}
 
-	// Global level (lowest precedence)
 	chain = append(chain, ScopeLevel{
 		ScopeName: "global",
 		ScopeID:   "",
@@ -436,31 +423,16 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 		variables["virtual_key_name"] = ""
 	}
 
-	// Extract Team context if available (from VirtualKey)
-	if ctx.VirtualKey != nil && ctx.VirtualKey.Team != nil {
-		variables["team_id"] = ctx.VirtualKey.Team.ID
-		variables["team_name"] = ctx.VirtualKey.Team.Name
+	if ctx.VirtualKey != nil && ctx.VirtualKey.OrgID != nil {
+		variables["org_id"] = *ctx.VirtualKey.OrgID
 	} else {
-		variables["team_id"] = ""
-		variables["team_name"] = ""
+		variables["org_id"] = ""
 	}
-
-	// Extract Customer context if available (from Team or directly from VirtualKey)
-	if ctx.VirtualKey != nil {
-		if ctx.VirtualKey.Team != nil && ctx.VirtualKey.Team.Customer != nil {
-			variables["customer_id"] = ctx.VirtualKey.Team.Customer.ID
-			variables["customer_name"] = ctx.VirtualKey.Team.Customer.Name
-		} else if ctx.VirtualKey.Customer != nil {
-			variables["customer_id"] = ctx.VirtualKey.Customer.ID
-			variables["customer_name"] = ctx.VirtualKey.Customer.Name
-		} else {
-			variables["customer_id"] = ""
-			variables["customer_name"] = ""
-		}
-	} else {
-		variables["customer_id"] = ""
-		variables["customer_name"] = ""
-	}
+	// Deprecated CEL variables kept for backward compatibility with existing rules.
+	variables["team_id"] = ""
+	variables["team_name"] = ""
+	variables["customer_id"] = ""
+	variables["customer_name"] = ""
 
 	// Populate budget and rate limit variables for current provider/model combination
 	if ctx.BudgetAndRateLimitStatus != nil {
@@ -567,6 +539,7 @@ func createCELEnvironment() (*cel.Env, error) {
 		// VirtualKey/Team/Customer context
 		cel.Variable("virtual_key_id", cel.StringType),
 		cel.Variable("virtual_key_name", cel.StringType),
+		cel.Variable("org_id", cel.StringType),
 		cel.Variable("team_id", cel.StringType),
 		cel.Variable("team_name", cel.StringType),
 		cel.Variable("customer_id", cel.StringType),

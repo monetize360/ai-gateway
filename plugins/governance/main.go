@@ -3,7 +3,6 @@ package governance
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/url"
@@ -22,6 +21,7 @@ import (
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 )
 
 // PluginName is the name of the governance plugin
@@ -31,6 +31,9 @@ const (
 	governanceRejectedContextKey schemas.BifrostContextKey = "bf-governance-rejected"
 
 	VirtualKeyPrefix = "sk-bf-"
+
+	// testTenantID is used by InitFromStore for unit tests without a live registry.
+	testTenantID = "__bifrost_test_tenant__"
 )
 
 // Config is the configuration for the governance plugin
@@ -47,6 +50,14 @@ type InMemoryStore interface {
 	GetMCPClientsAllowingAllVirtualKeys() map[string]string // clientID → clientName
 }
 
+// tenantGovernanceComponents holds per-tenant governance runtime state.
+type tenantGovernanceComponents struct {
+	store    GovernanceStore
+	resolver *BudgetResolver
+	tracker  *UsageTracker
+	engine   *RoutingEngine
+}
+
 type BaseGovernancePlugin interface {
 	GetName() string
 	EvaluateGovernanceRequest(ctx *schemas.BifrostContext, evaluationRequest *EvaluationRequest, requestType schemas.RequestType) (*EvaluationResult, *schemas.BifrostError)
@@ -57,7 +68,7 @@ type BaseGovernancePlugin interface {
 	PreMCPHook(ctx *schemas.BifrostContext, req *schemas.BifrostMCPRequest) (*schemas.BifrostMCPRequest, *schemas.MCPPluginShortCircuit, error)
 	PostMCPHook(ctx *schemas.BifrostContext, resp *schemas.BifrostMCPResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostMCPResponse, *schemas.BifrostError, error)
 	Cleanup() error
-	GetGovernanceStore() GovernanceStore
+	GetGovernanceStore(ctx context.Context) GovernanceStore
 }
 
 // GovernancePlugin implements the main governance plugin with hierarchical budget system
@@ -67,27 +78,24 @@ type GovernancePlugin struct {
 	wg          sync.WaitGroup // Track active goroutines
 	cleanupOnce sync.Once      // Ensure cleanup happens only once
 
-	// Core components with clear separation of concerns
-	store    GovernanceStore // Pure data access layer
-	resolver *BudgetResolver // Pure decision engine for hierarchical governance
-	tracker  *UsageTracker   // Business logic owner (updates, resets, persistence)
-	engine   *RoutingEngine  // Routing engine for dynamic routing
-
-	// Dependencies
-	configStore  configstore.ConfigStore
+	registry     tenantstore.Resolver
 	modelCatalog *modelcatalog.ModelCatalog
 	mcpCatalog   *mcpcatalog.MCPCatalog
 	logger       schemas.Logger
 
-	// Transport dependencies
 	inMemoryStore InMemoryStore
+
+	tenantComponents sync.Map // string (tenantID) → *tenantGovernanceComponents
+	tenantSyncOnce   sync.Once
+	tenantSyncCancel context.CancelFunc
 
 	cfgMutex sync.RWMutex
 
 	isVkMandatory         *bool
-	requiredHeaders       *[]string // pointer to live config slice; lowercased at check time
+	requiredHeaders       *[]string
 	isEnterprise          bool
 	disableAutoToolInject *bool
+	routingChainMaxDepth  *int
 }
 
 // Init initializes and returns a governance plugin instance.
@@ -133,14 +141,13 @@ func Init(
 	ctx context.Context,
 	config *Config,
 	logger schemas.Logger,
-	configStore configstore.ConfigStore,
-	governanceConfig *configstore.GovernanceConfig,
+	registry tenantstore.Resolver,
 	modelCatalog *modelcatalog.ModelCatalog,
 	mcpCatalog *mcpcatalog.MCPCatalog,
 	inMemoryStore InMemoryStore,
 ) (*GovernancePlugin, error) {
-	if configStore == nil {
-		logger.Warn("governance plugin requires config store to persist data, running in memory only mode")
+	if registry == nil {
+		return nil, fmt.Errorf("tenant config registry is required")
 	}
 	if modelCatalog == nil {
 		logger.Warn("governance plugin requires model catalog to calculate cost, all LLM cost calculations will be skipped.")
@@ -149,7 +156,6 @@ func Init(
 		logger.Warn("governance plugin requires MCP catalog to calculate cost, all MCP cost calculations will be skipped.")
 	}
 
-	// Handle nil config - use safe defaults
 	var isVkMandatory *bool
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
@@ -165,61 +171,11 @@ func Init(
 		routingChainMaxDepth = &defaultDepth
 	}
 
-	governanceStore, err := NewLocalGovernanceStore(ctx, logger, configStore, governanceConfig, modelCatalog)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize governance store: %w", err)
-	}
-	// Initialize components in dependency order with fixed, optimal settings
-	// Resolver (pure decision engine for hierarchical governance, depends only on store)
-	resolver := NewBudgetResolver(governanceStore, modelCatalog, logger, inMemoryStore)
-
-	// 3. Tracker (business logic owner, depends on store and resolver)
-	tracker := NewUsageTracker(ctx, governanceStore, resolver, configStore, logger)
-
-	// 4. Perform startup reset check for any expired limits from downtime
-	// Use distributed lock to prevent race condition when multiple instances boot simultaneously
-	if configStore != nil {
-		lockManager := configstore.NewDistributedLockManager(configStore, logger, configstore.WithDefaultTTL(30*time.Second))
-		lock, err := lockManager.NewLock("governance_startup_reset")
-		if err != nil {
-			logger.Warn("failed to create governance startup reset lock: %v", err)
-		} else {
-			// Acquire the lock
-			lockAcquired := true
-			if err := lock.LockWithRetry(ctx, 10); err != nil {
-				logger.Warn("failed to acquire governance startup reset lock, skipping startup reset: %v", err)
-				lockAcquired = false
-			}
-			// Only run startup resets if we successfully acquired the lock
-			if lockAcquired {
-				defer func() {
-					if err := lock.Unlock(ctx); err != nil && !errors.Is(err, configstore.ErrLockNotHeld) {
-						logger.Warn("failed to release governance startup reset lock: %v", err)
-					}
-				}()
-				if err := tracker.PerformStartupResets(ctx); err != nil {
-					logger.Warn("startup reset failed: %v", err)
-					// Continue initialization even if startup reset fails (non-critical)
-				}
-			}
-		}
-	}
-
-	// 5. Routing engine (dynamically routing requests based on routing rules)
-	engine, err := NewRoutingEngine(governanceStore, logger, routingChainMaxDepth)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize routing engine: %w", err)
-	}
-
 	ctx, cancelFunc := context.WithCancel(ctx)
 	plugin := &GovernancePlugin{
 		ctx:                   ctx,
 		cancelFunc:            cancelFunc,
-		store:                 governanceStore,
-		resolver:              resolver,
-		tracker:               tracker,
-		engine:                engine,
-		configStore:           configStore,
+		registry:              registry,
 		modelCatalog:          modelCatalog,
 		mcpCatalog:            mcpCatalog,
 		logger:                logger,
@@ -228,6 +184,7 @@ func Init(
 		requiredHeaders:       requiredHeaders,
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
+		routingChainMaxDepth:  routingChainMaxDepth,
 		inMemoryStore:         inMemoryStore,
 	}
 	return plugin, nil
@@ -309,11 +266,6 @@ func InitFromStore(
 	plugin := &GovernancePlugin{
 		ctx:                   ctx,
 		cancelFunc:            cancelFunc,
-		store:                 governanceStore,
-		resolver:              resolver,
-		tracker:               tracker,
-		engine:                engine,
-		configStore:           configStore,
 		modelCatalog:          modelCatalog,
 		mcpCatalog:            mcpCatalog,
 		logger:                logger,
@@ -323,13 +275,53 @@ func InitFromStore(
 		requiredHeaders:       requiredHeaders,
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
+		routingChainMaxDepth:  routingChainMaxDepth,
 	}
+	plugin.tenantComponents.Store(testTenantID, &tenantGovernanceComponents{
+		store:    governanceStore,
+		resolver: resolver,
+		tracker:  tracker,
+		engine:   engine,
+	})
 	return plugin, nil
 }
 
 // GetName returns the name of the plugin
 func (p *GovernancePlugin) GetName() string {
 	return PluginName
+}
+
+func (p *GovernancePlugin) getComponentsForContext(ctx context.Context) *tenantGovernanceComponents {
+	if p == nil {
+		return nil
+	}
+	tenantID, _ := ctx.Value(schemas.BifrostContextKeyTenantID).(string)
+	if tenantID == "" {
+		if p.registry == nil {
+			tenantID = testTenantID
+		} else {
+			return nil
+		}
+	}
+	if raw, ok := p.tenantComponents.Load(tenantID); ok {
+		if comp, ok := raw.(*tenantGovernanceComponents); ok && comp != nil {
+			return comp
+		}
+	}
+	configStore := p.registry.GetStoreFromContext(ctx)
+	if configStore == nil {
+		p.logger.Warn("no config store for tenant %s", tenantID)
+		return nil
+	}
+	return p.initTenantGovernanceComponents(ctx, tenantID, configStore)
+}
+
+func (p *GovernancePlugin) getStoreAndResolverForContext(ctx context.Context) (GovernanceStore, *BudgetResolver) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return nil, nil
+	}
+	return comp.store, comp.resolver
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -344,7 +336,11 @@ func (p *GovernancePlugin) UpdateEnforceAuthOnInference(enforceAuthOnInference b
 // Optimized to skip unnecessary operations: only unmarshals/marshals when needed
 func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
 	virtualKeyValue := parseVirtualKeyFromHTTPRequest(req)
-	hasRoutingRules := p.store.HasRoutingRules(ctx)
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return nil, nil
+	}
+	hasRoutingRules := comp.store.HasRoutingRules(ctx)
 
 	if strings.Contains(req.Path, "passthrough") {
 		return nil, nil
@@ -409,26 +405,15 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 
 	// Process virtual key if provided
 	if virtualKeyValue != nil {
-		virtualKey, ok = p.store.GetVirtualKey(ctx, *virtualKeyValue)
+		virtualKey, ok = comp.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || virtualKey == nil || !virtualKey.IsActiveValue() {
 			return nil, nil
 		}
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	//1. Apply routing rules only if we have rules or matched decision
@@ -493,6 +478,10 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 // from pre-extracted metadata and run VK validation, routing rules, and load balancing.
 // Any model changes are propagated via the metadata in context (not body rewriting).
 func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, virtualKeyValue *string, hasRoutingRules bool) (*schemas.HTTPResponse, error) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return nil, nil
+	}
 	metadata, _ := ctx.Value(schemas.BifrostContextKeyLargePayloadMetadata).(*schemas.LargePayloadMetadata)
 	if metadata == nil || metadata.Model == "" {
 		return nil, nil
@@ -507,27 +496,16 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	// Process virtual key if provided
 	var virtualKey *configstoreTables.TableVirtualKey
 	if virtualKeyValue != nil {
-		vk, ok := p.store.GetVirtualKey(ctx, *virtualKeyValue)
+		vk, ok := comp.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || vk == nil || !vk.IsActiveValue() {
 			return nil, nil
 		}
 		virtualKey = vk
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
@@ -598,6 +576,10 @@ func realtimeModelQueryParam(req *schemas.HTTPRequest) string {
 // load-balancing can evaluate normally, then propagate any model rewrite back
 // to the original query param for the downstream handler to pick up.
 func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, virtualKeyValue *string, hasRoutingRules bool) (*schemas.HTTPResponse, error) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return nil, nil
+	}
 	modelQueryKey := "model"
 	modelParam := req.Query[modelQueryKey]
 	if modelParam == "" {
@@ -616,27 +598,16 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	// Process virtual key if provided
 	var virtualKey *configstoreTables.TableVirtualKey
 	if virtualKeyValue != nil {
-		vk, ok := p.store.GetVirtualKey(ctx, *virtualKeyValue)
+		vk, ok := comp.store.GetVirtualKey(ctx, *virtualKeyValue)
 		if !ok || vk == nil || !vk.IsActiveValue() {
 			return nil, nil
 		}
 		virtualKey = vk
 	}
 
-	// Attaching team and customer based on the virtual key
-	if virtualKey != nil {
-		if virtualKey.TeamID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamID, *virtualKey.TeamID)
-		}
-		if virtualKey.Team != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceTeamName, virtualKey.Team.Name)
-		}
-		if virtualKey.CustomerID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerID, *virtualKey.CustomerID)
-		}
-		if virtualKey.Customer != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceCustomerName, virtualKey.Customer.Name)
-		}
+	// Attach org context from the virtual key
+	if virtualKey != nil && virtualKey.OrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
 	}
 
 	// Apply routing rules
@@ -687,6 +658,10 @@ func (p *GovernancePlugin) HTTPTransportStreamChunkHook(ctx *schemas.BifrostCont
 //   - map[string]any: The updated request body
 //   - error: Any error that occurred during processing
 func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, body map[string]any, virtualKey *configstoreTables.TableVirtualKey) (map[string]any, error) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return body, nil
+	}
 	// Check if the request has a model field
 	modelValue, hasModel := body["model"]
 	isGeminiPath := strings.Contains(req.Path, "/genai")
@@ -803,11 +778,11 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 
 		if isProviderAllowed {
 			// Check if the provider's budget or rate limits are violated using resolver helper methods
-			if p.resolver.isProviderBudgetViolated(ctx, virtualKey, config) {
+			if comp.resolver.isProviderBudgetViolated(ctx, virtualKey, config) {
 				ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Provider %s excluded: budget limit violated", config.Provider))
 				continue
 			}
-			if p.resolver.isProviderRateLimitViolated(ctx, virtualKey, config) {
+			if comp.resolver.isProviderRateLimitViolated(ctx, virtualKey, config) {
 				ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Provider %s excluded: rate limit violated", config.Provider))
 				continue
 			}
@@ -941,6 +916,10 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 //   - *RoutingDecision: The matched routing decision (nil if no rule matched)
 //   - error: Any error that occurred during evaluation
 func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, body map[string]any, virtualKey *configstoreTables.TableVirtualKey) (map[string]any, *RoutingDecision, error) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return body, nil, nil
+	}
 	// Check if the request has a model field
 	modelValue, hasModel := body["model"]
 	isGeminiPath := strings.Contains(req.Path, "/genai")
@@ -1003,14 +982,14 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 		RequestType:              requestType,
 		Headers:                  req.Headers,
 		QueryParams:              req.Query,
-		BudgetAndRateLimitStatus: p.store.GetBudgetAndRateLimitStatus(ctx, model, provider, virtualKey, nil, nil, nil),
+		BudgetAndRateLimitStatus: comp.store.GetBudgetAndRateLimitStatus(ctx, model, provider, virtualKey, nil, nil, nil),
 	}
 
 	p.logger.Debug("[HTTPTransport] Built routing context: provider=%s, model=%s, requestType=%s, vk=%v, headerCount=%d, paramCount=%d",
 		provider, model, requestType, virtualKey != nil, len(req.Headers), len(req.Query))
 
 	// Evaluate routing rules
-	decision, err := p.engine.EvaluateRoutingRules(ctx, routingCtx)
+	decision, err := comp.engine.EvaluateRoutingRules(ctx, routingCtx)
 	if err != nil {
 		p.logger.Error("failed to evaluate routing rules: %v", err)
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelError, fmt.Sprintf("Routing rule evaluation error: %v", err))
@@ -1182,11 +1161,18 @@ func (p *GovernancePlugin) validateRequiredHeaders(ctx *schemas.BifrostContext) 
 //   - *EvaluationResult: The governance evaluation result
 //   - *schemas.BifrostError: The error to return if request is not allowed, nil if allowed
 func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext, evaluationRequest *EvaluationRequest, requestType schemas.RequestType) (*EvaluationResult, *schemas.BifrostError) {
+	// Select the right store + resolver for this request (tenant-aware in multi-tenant mode).
+	store, resolver := p.getStoreAndResolverForContext(ctx)
+	if store == nil || resolver == nil {
+		// Unknown or unregistered tenant — skip governance rather than panic.
+		return nil, nil
+	}
+
 	// Check if authentication is mandatory (either VK or user auth)
 	// Checking if the virtual key is valid or not
 	isVirtualKeyValid := false
 	if evaluationRequest.VirtualKey != "" {
-		_, exists := p.store.GetVirtualKey(ctx, evaluationRequest.VirtualKey)
+		_, exists := store.GetVirtualKey(ctx, evaluationRequest.VirtualKey)
 		if exists {
 			isVirtualKeyValid = true
 		} else {
@@ -1218,7 +1204,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	p.cfgMutex.RUnlock()
 
 	// First evaluate model and provider checks (applies even when virtual keys are disabled or not present)
-	result := p.resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
+	result := resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
 
 	// The flow for governance checks is:
 	//   VK (identity + VK-level budget/rate-limit) -> Customer -> Team -> User
@@ -1231,7 +1217,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// Resolve the VK once; it feeds both the VK evaluation and hierarchy-ID extraction.
 	var hierarchyVK *configstoreTables.TableVirtualKey
 	if evaluationRequest.VirtualKey != "" {
-		if vk, ok := p.store.GetVirtualKey(ctx, evaluationRequest.VirtualKey); ok && vk != nil {
+		if vk, ok := store.GetVirtualKey(ctx, evaluationRequest.VirtualKey); ok && vk != nil {
 			hierarchyVK = vk
 		}
 	}
@@ -1245,47 +1231,17 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// we touch Customer / Team / User.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
 		skipVKBudgetLimit := evaluationRequest.UserID != "" || skipBudgetsAndRateLimits
-		result = p.resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
+		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
 	}
 
-	// Step 2: Customer-level budget (customer attached directly to VK, or via the VK's team).
-	// Fall back to the loaded relation IDs so VKs populated via joins without FK
-	// pointer columns still participate in customer-level enforcement.
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
-		var customerID string
-		switch {
-		case hierarchyVK.CustomerID != nil:
-			customerID = *hierarchyVK.CustomerID
-		case hierarchyVK.Customer != nil:
-			customerID = hierarchyVK.Customer.ID
-		case hierarchyVK.Team != nil && hierarchyVK.Team.CustomerID != nil:
-			customerID = *hierarchyVK.Team.CustomerID
-		case hierarchyVK.Team != nil && hierarchyVK.Team.Customer != nil:
-			customerID = hierarchyVK.Team.Customer.ID
-		}
-		if customerID != "" {
-			result = p.resolver.EvaluateCustomerRequest(ctx, customerID, evaluationRequest)
-		}
+	// Step 2: Org hierarchy budget/rate-limit when VK-level checks were skipped (user auth path).
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil && hierarchyVK.OrgID != nil {
+		result = resolver.EvaluateOrgHierarchyRequest(ctx, *hierarchyVK.OrgID, evaluationRequest)
 	}
 
-	// Step 3: Team-level budget. Fall back to vk.Team.ID when the FK pointer is nil
-	// but the relation is populated.
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
-		var teamID string
-		switch {
-		case hierarchyVK.TeamID != nil:
-			teamID = *hierarchyVK.TeamID
-		case hierarchyVK.Team != nil:
-			teamID = hierarchyVK.Team.ID
-		}
-		if teamID != "" {
-			result = p.resolver.EvaluateTeamRequest(ctx, teamID, evaluationRequest)
-		}
-	}
-
-	// Step 4: User-level governance (enterprise-only).
+	// Step 3: User-level governance (enterprise-only).
 	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
-		result = p.resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
+		result = resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
 	}
 
 	// Check the actual MCP tools injected into the request against the VK MCPConfigs.
@@ -1484,6 +1440,10 @@ func (p *GovernancePlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.
 //   - *schemas.BifrostError: The processed error
 //   - error: Any error that occurred during processing
 func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, err *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return result, err, nil
+	}
 	if _, ok := ctx.Value(governanceRejectedContextKey).(bool); ok {
 		return result, err, nil
 	}
@@ -1520,7 +1480,7 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		// lookups) and attach them to the context. The logging plugin reads these keys
 		// when building the log entry, enabling ghost-node usage reconciliation to
 		// attribute cost/tokens to the correct governance entities.
-		budgetIDs, rateLimitIDs := p.store.CollectApplicableGovernanceIDs(ctx, effectiveVK, provider, requestedModel)
+		budgetIDs, rateLimitIDs := comp.store.CollectApplicableGovernanceIDs(ctx, effectiveVK, provider, requestedModel)
 		if len(budgetIDs) > 0 {
 			ctx.SetValue(schemas.BifrostContextKeyGovernanceBudgetIDs, budgetIDs)
 		}
@@ -1532,7 +1492,7 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		go func() {
 			defer p.wg.Done()
 			// Use the requested model for usage tracking
-			p.postHookWorker(result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, pricingScopes)
+			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, pricingScopes)
 		}()
 	}
 
@@ -1589,8 +1549,18 @@ func (p *GovernancePlugin) PreMCPHook(ctx *schemas.BifrostContext, req *schemas.
 
 	// Blind single-tool check: validate the specific tool being executed against VK MCPConfigs.
 	// This runs independently of EvaluateGovernanceRequest to enforce execution-time allow-list.
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return req, &schemas.MCPPluginShortCircuit{Error: &schemas.BifrostError{
+			Type:       bifrost.Ptr(string(DecisionVirtualKeyNotFound)),
+			StatusCode: bifrost.Ptr(403),
+			Error: &schemas.ErrorField{
+				Message: "Tenant context required",
+			},
+		}}, nil
+	}
 	if virtualKeyValue != "" {
-		vk, ok := p.store.GetVirtualKey(ctx, virtualKeyValue)
+		vk, ok := comp.store.GetVirtualKey(ctx, virtualKeyValue)
 		if !ok || vk == nil || !vk.IsActiveValue() {
 			// VK became invalid after initial check - fail closed for security
 			ctx.SetValue(governanceRejectedContextKey, true)
@@ -1694,7 +1664,10 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		p.tracker.UpdateUsage(p.ctx, usageUpdate)
+		comp := p.getComponentsForContext(ctx)
+		if comp != nil && comp.tracker != nil {
+			comp.tracker.UpdateUsage(ctx, usageUpdate)
+		}
 	}()
 
 	return resp, bifrostErr, nil
@@ -1704,13 +1677,23 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 func (p *GovernancePlugin) Cleanup() error {
 	var cleanupErr error
 	p.cleanupOnce.Do(func() {
+		if p.tenantSyncCancel != nil {
+			p.tenantSyncCancel()
+		}
 		if p.cancelFunc != nil {
 			p.cancelFunc()
 		}
-		p.wg.Wait() // Wait for all background workers to complete
-		if err := p.tracker.Cleanup(); err != nil {
-			cleanupErr = err
-		}
+		p.wg.Wait()
+		p.tenantComponents.Range(func(_, value any) bool {
+			comp, ok := value.(*tenantGovernanceComponents)
+			if !ok || comp == nil || comp.tracker == nil {
+				return true
+			}
+			if err := comp.tracker.Cleanup(); err != nil {
+				cleanupErr = err
+			}
+			return true
+		})
 	})
 	return cleanupErr
 }
@@ -1732,7 +1715,10 @@ func (p *GovernancePlugin) Cleanup() error {
 //   - isBatch: Whether the request is a batch request
 //   - isFinalChunk: Whether the request is the final chunk
 //   - pricingScopes: Prebuilt pricing lookup scopes using governance VK ID (nil if not applicable)
-func (p *GovernancePlugin) postHookWorker(result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool, pricingScopes *modelcatalog.PricingLookupScopes) {
+func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool, pricingScopes *modelcatalog.PricingLookupScopes) {
+	if comp == nil || comp.tracker == nil {
+		return
+	}
 	// Determine if request was successful
 	success := (result != nil)
 
@@ -1782,15 +1768,17 @@ func (p *GovernancePlugin) postHookWorker(result *schemas.BifrostResponse, provi
 			HasUsageData: tokensUsed > 0,
 		}
 
-		// Queue usage update asynchronously using tracker
-		// UpdateUsage handles empty virtual keys gracefully by only updating provider-level and model-level usage
-		p.tracker.UpdateUsage(p.ctx, usageUpdate)
+		comp.tracker.UpdateUsage(ctx, usageUpdate)
 	}
 }
 
-// GetGovernanceStore returns the governance store
-func (p *GovernancePlugin) GetGovernanceStore() GovernanceStore {
-	return p.store
+// GetGovernanceStore returns the governance store for the tenant in ctx.
+func (p *GovernancePlugin) GetGovernanceStore(ctx context.Context) GovernanceStore {
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil {
+		return nil
+	}
+	return comp.store
 }
 
 // GenerateVirtualKey is a helper function

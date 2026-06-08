@@ -1,10 +1,6 @@
 package governance
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -172,7 +168,6 @@ func buildTeam(id, name string, budget *configstoreTables.TableBudget) *configst
 		Name: name,
 	}
 	if budget != nil {
-		budget.TeamID = &team.ID
 		team.Budgets = []configstoreTables.TableBudget{*budget}
 	}
 	return team
@@ -188,6 +183,28 @@ func buildCustomer(id, name string, budget *configstoreTables.TableBudget) *conf
 		customer.BudgetID = &budget.ID
 	}
 	return customer
+}
+
+func buildOrganization(id, name string, parentOrgID *string) *configstoreTables.TableOrganization {
+	org := &configstoreTables.TableOrganization{
+		ID:          id,
+		Name:        name,
+		ParentOrgID: parentOrgID,
+		IsRoot:      parentOrgID == nil,
+	}
+	return org
+}
+
+func buildOrgLimit(id, orgID string, budget *configstoreTables.TableBudget) *configstoreTables.TableOrgLimit {
+	limit := &configstoreTables.TableOrgLimit{
+		ID:    id,
+		OrgID: orgID,
+	}
+	if budget != nil {
+		limit.BudgetID = &budget.ID
+		limit.Budget = budget
+	}
+	return limit
 }
 
 func buildProviderConfig(provider string, allowedModels []string) configstoreTables.TableVirtualKeyProviderConfig {
@@ -249,8 +266,10 @@ func buildModelConfig(id, modelName string, provider *string, budget *configstor
 		ID:        id,
 		ModelName: modelName,
 		Provider:  provider,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
 	}
 	if budget != nil {
 		mc.Budget = budget
@@ -264,10 +283,13 @@ func buildModelConfig(id, modelName string, provider *string, budget *configstor
 }
 
 func buildProviderWithGovernance(name string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit) *configstoreTables.TableProvider {
+	now := time.Now().UTC()
 	provider := &configstoreTables.TableProvider{
-		Name:      name,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Name: name,
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
 	}
 	if budget != nil {
 		provider.Budget = budget
@@ -291,30 +313,11 @@ var (
 	datasheetErr       error
 )
 
-// fetchDatasheetBaseIndex downloads the default datasheet and builds a
+// fetchDatasheetBaseIndex loads the embedded datasheet and builds a
 // model → base_model index, mirroring ModelCatalog.populateModelPoolFromPricingData.
 func fetchDatasheetBaseIndex() {
-	client := &http.Client{Timeout: modelcatalog.DefaultPricingTimeout}
-	resp, err := client.Get(modelcatalog.DefaultPricingURL)
+	entries, err := modelcatalog.EmbeddedPricingEntries()
 	if err != nil {
-		datasheetErr = err
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		datasheetErr = fmt.Errorf("datasheet HTTP %d", resp.StatusCode)
-		return
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		datasheetErr = err
-		return
-	}
-
-	var entries map[string]modelcatalog.PricingEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
 		datasheetErr = err
 		return
 	}
@@ -324,7 +327,6 @@ func fetchDatasheetBaseIndex() {
 		if entry.BaseModel == "" {
 			continue
 		}
-		// Strip provider prefix (same as convertPricingDataToTableModelPricing)
 		modelName := modelKey
 		if strings.Contains(modelKey, "/") {
 			parts := strings.Split(modelKey, "/")

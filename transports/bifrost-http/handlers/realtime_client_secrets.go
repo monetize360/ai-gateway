@@ -231,7 +231,7 @@ func resolveRealtimeClientSecretTarget(ctx *fasthttp.RequestCtx, config *lib.Con
 	providerKey, model := schemas.ParseModelString(rawModel, defaultProvider)
 	// Model catalog auto-resolution for bare model names on /v1 client secret routes
 	if defaultProvider == "" && providerKey == "" && model != "" {
-		providers := config.GetProvidersForModel(model)
+		providers := config.GetProvidersForModelForRequest(ctx, model)
 		if len(providers) > 0 {
 			ctx.SetUserValue(lib.FastHTTPUserValueModelCatalogResolution, &lib.ModelCatalogResolution{
 				Model:            model,

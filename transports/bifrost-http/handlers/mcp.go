@@ -94,7 +94,7 @@ func (h *MCPHandler) getMCPClients(ctx *fasthttp.RequestCtx) {
 		"limit":       0,
 		"offset":      0,
 	}
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendJSON(ctx, emptyResponse)
 		return
 	}
@@ -137,7 +137,7 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 		params.Offset = n
 	}
 
-	dbClients, totalCount, err := h.store.ConfigStore.GetMCPClientsPaginated(ctx, params)
+	dbClients, totalCount, err := h.store.StoreFromRequestCtx(ctx).GetMCPClientsPaginated(ctx, params)
 	if err != nil {
 		logger.Error("failed to retrieve MCP clients: %v", err)
 		SendError(ctx, 500, "Failed to retrieve MCP clients")
@@ -166,13 +166,13 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 	}
 
 	// Batch-fetch all VK assignments for this page in a single query, then group by client ID.
-	assignmentsByClientID := make(map[uint][]configstoreTables.TableVirtualKeyMCPConfig)
-	if h.store.ConfigStore != nil {
-		dbClientIDs := make([]uint, 0, len(dbClients))
+	assignmentsByClientID := make(map[string][]configstoreTables.TableVirtualKeyMCPConfig)
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		dbClientIDs := make([]string, 0, len(dbClients))
 		for _, c := range dbClients {
 			dbClientIDs = append(dbClientIDs, c.ID)
 		}
-		if allAssignments, err := h.store.ConfigStore.GetVirtualKeyMCPConfigsByMCPClientIDs(ctx, dbClientIDs); err == nil {
+		if allAssignments, err := h.store.StoreFromRequestCtx(ctx).GetVirtualKeyMCPConfigsByMCPClientIDs(ctx, dbClientIDs); err == nil {
 			for _, a := range allAssignments {
 				assignmentsByClientID[a.MCPClientID] = append(assignmentsByClientID[a.MCPClientID], a)
 			}
@@ -181,7 +181,7 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 
 	// Batch-fetch OAuth configs for clients that have one (avoids N+1 queries)
 	oauthConfigsByID := make(map[string]*configstoreTables.TableOauthConfig)
-	if h.store.ConfigStore != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
 		oauthIDs := make([]string, 0)
 		for _, c := range dbClients {
 			if c.OauthConfigID != nil && *c.OauthConfigID != "" {
@@ -189,7 +189,7 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 			}
 		}
 		if len(oauthIDs) > 0 {
-			fetched, err := h.store.ConfigStore.GetOauthConfigsByIDs(ctx, oauthIDs)
+			fetched, err := h.store.StoreFromRequestCtx(ctx).GetOauthConfigsByIDs(ctx, oauthIDs)
 			if err != nil {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to fetch OAuth configs: %v", err))
 				return
@@ -274,7 +274,7 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 
 // reconnectMCPClient handles POST /api/mcp/client/{id}/reconnect - Reconnect an MCP client
 func (h *MCPHandler) reconnectMCPClient(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
 		return
 	}
@@ -345,7 +345,7 @@ type MCPClientUpdateRequest struct {
 
 // addMCPClient handles POST /api/mcp/client - Add a new MCP client
 func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
 		return
 	}
@@ -417,7 +417,7 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 		if req.ToolSyncInterval != 0 {
 			toolSyncInterval = time.Duration(req.ToolSyncInterval) * time.Minute
 		} else {
-			config, err := h.store.ConfigStore.GetClientConfig(ctx)
+			config, err := h.store.StoreFromRequestCtx(ctx).GetClientConfig(ctx)
 			if err == nil && config != nil {
 				toolSyncInterval = time.Duration(config.MCPToolSyncInterval) * time.Minute
 			}
@@ -508,7 +508,7 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 		if req.ToolSyncInterval != 0 {
 			toolSyncInterval = time.Duration(req.ToolSyncInterval) * time.Minute
 		} else {
-			config, err := h.store.ConfigStore.GetClientConfig(ctx)
+			config, err := h.store.StoreFromRequestCtx(ctx).GetClientConfig(ctx)
 			if err != nil {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get client config: %v", err))
 				return
@@ -572,7 +572,7 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 	if req.ToolSyncInterval != 0 {
 		toolSyncInterval = time.Duration(req.ToolSyncInterval) * time.Minute
 	} else {
-		config, err := h.store.ConfigStore.GetClientConfig(ctx)
+		config, err := h.store.StoreFromRequestCtx(ctx).GetClientConfig(ctx)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get client config: %v", err))
 			return
@@ -603,16 +603,16 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Creating MCP client config in config store
-	if h.store.ConfigStore != nil {
-		if err := h.store.ConfigStore.CreateMCPClientConfig(ctx, schemasConfig); err != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		if err := h.store.StoreFromRequestCtx(ctx).CreateMCPClientConfig(ctx, schemasConfig); err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create MCP config: %v", err))
 			return
 		}
 	}
 	if err := h.mcpManager.AddMCPClient(ctx, schemasConfig); err != nil {
 		// Delete the created config from config store
-		if h.store.ConfigStore != nil {
-			if err := h.store.ConfigStore.DeleteMCPClientConfig(ctx, schemasConfig.ID); err != nil {
+		if h.store.StoreFromRequestCtx(ctx) != nil {
+			if err := h.store.StoreFromRequestCtx(ctx).DeleteMCPClientConfig(ctx, schemasConfig.ID); err != nil {
 				logger.Error(fmt.Sprintf("Failed to delete MCP client config from database: %v. please restart bifrost to keep core and database in sync", err))
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to delete MCP client config from database: %v. please restart bifrost to keep core and database in sync", err))
 				return
@@ -630,7 +630,7 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 
 // updateMCPClient handles PUT /api/mcp/client/{id} - Edit MCP client
 func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
 		return
 	}
@@ -749,7 +749,7 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	// 	}
 	// 	var existingOauthConfig *configstoreTables.TableOauthConfig
 	// 	if existingConfig.OauthConfigID != nil && *existingConfig.OauthConfigID != "" {
-	// 		existingOauthConfig, err = h.store.ConfigStore.GetOauthConfigByID(ctx, *existingConfig.OauthConfigID)
+	// 		existingOauthConfig, err = h.store.StoreFromRequestCtx(ctx).GetOauthConfigByID(ctx, *existingConfig.OauthConfigID)
 	// 		if err != nil {
 	// 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get existing OAuth config: %v", err))
 	// 			return
@@ -797,9 +797,9 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	req.TableMCPClient = *merged
 
 	var oldDBConfig *configstoreTables.TableMCPClient
-	if h.store.ConfigStore != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
 		var err error
-		oldDBConfig, err = h.store.ConfigStore.GetMCPClientByID(ctx, id)
+		oldDBConfig, err = h.store.StoreFromRequestCtx(ctx).GetMCPClientByID(ctx, id)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get existing mcp client config: %v", err))
 			return
@@ -829,8 +829,8 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 		dbUpdateRecord.DiscoveredTools = migrated
 		dbUpdateRecord.DiscoveredToolNameMapping = oldDBConfig.DiscoveredToolNameMapping
 	}
-	if h.store.ConfigStore != nil {
-		if err := h.store.ConfigStore.UpdateMCPClientConfig(ctx, id, &dbUpdateRecord); err != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		if err := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, id, &dbUpdateRecord); err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to update mcp client config in store: %v", err))
 			return
 		}
@@ -840,7 +840,7 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	if req.ToolSyncInterval != 0 {
 		toolSyncInterval = time.Duration(req.ToolSyncInterval) * time.Minute
 	} else {
-		config, err := h.store.ConfigStore.GetClientConfig(ctx)
+		config, err := h.store.StoreFromRequestCtx(ctx).GetClientConfig(ctx)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get client config: %v", err))
 			return
@@ -873,8 +873,8 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	// Update MCP client config in memory (always — applies name/tools/header changes,
 	if err := h.mcpManager.UpdateMCPClient(ctx, id, schemasConfig); err != nil {
 		// Rollback DB update to keep DB and memory in sync
-		if h.store.ConfigStore != nil && oldDBConfig != nil {
-			if rollbackErr := h.store.ConfigStore.UpdateMCPClientConfig(ctx, id, oldDBConfig); rollbackErr != nil {
+		if h.store.StoreFromRequestCtx(ctx) != nil && oldDBConfig != nil {
+			if rollbackErr := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, id, oldDBConfig); rollbackErr != nil {
 				logger.Error(fmt.Sprintf("Failed to rollback MCP client DB update: %v. please restart bifrost to keep core and database in sync", rollbackErr))
 			}
 		}
@@ -889,8 +889,8 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	// reload, but only fires when req.VKConfigs != nil — a name-only update
 	// otherwise leaves every cached VK pointing at the old MCPClient.Name and
 	// the per-VK allowlist check rejects tool calls under the new prefix.
-	if h.store.ConfigStore != nil && h.governanceManager != nil {
-		assignedVKs, listErr := h.store.ConfigStore.GetVirtualKeyMCPConfigsByMCPClientID(ctx, oldDBConfig.ID)
+	if h.store.StoreFromRequestCtx(ctx) != nil && h.governanceManager != nil {
+		assignedVKs, listErr := h.store.StoreFromRequestCtx(ctx).GetVirtualKeyMCPConfigsByMCPClientID(ctx, oldDBConfig.ID)
 		if listErr != nil {
 			logger.Error(fmt.Sprintf("failed to fetch VK assignments for MCP client %s after update: %v", id, listErr))
 		} else {
@@ -903,8 +903,8 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Manage VK assignments if vk_configs was provided
-	if req.VKConfigs != nil && h.store.ConfigStore != nil {
-		current, err := h.store.ConfigStore.GetVirtualKeyMCPConfigsByMCPClientID(ctx, oldDBConfig.ID)
+	if req.VKConfigs != nil && h.store.StoreFromRequestCtx(ctx) != nil {
+		current, err := h.store.StoreFromRequestCtx(ctx).GetVirtualKeyMCPConfigsByMCPClientID(ctx, oldDBConfig.ID)
 		if err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get current VK MCP configs: %v", err))
 			return
@@ -939,16 +939,16 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 		for _, vc := range *req.VKConfigs {
 			requestedByVKID[vc.VirtualKeyID] = vc
 		}
-		if err := h.store.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+		if err := h.store.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 			// Create or update
 			for _, vc := range *req.VKConfigs {
 				if existing, ok := currentByVKID[vc.VirtualKeyID]; ok {
 					existing.ToolsToExecute = vc.ToolsToExecute
-					if err := h.store.ConfigStore.UpdateVirtualKeyMCPConfig(ctx, existing, tx); err != nil {
+					if err := h.store.StoreFromRequestCtx(ctx).UpdateVirtualKeyMCPConfig(ctx, existing, tx); err != nil {
 						return fmt.Errorf("failed to update VK MCP config for %s: %w", vc.VirtualKeyID, err)
 					}
 				} else {
-					if err := h.store.ConfigStore.CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
+					if err := h.store.StoreFromRequestCtx(ctx).CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
 						VirtualKeyID:   vc.VirtualKeyID,
 						MCPClientID:    oldDBConfig.ID,
 						ToolsToExecute: vc.ToolsToExecute,
@@ -960,7 +960,7 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 			// Delete removed assignments
 			for vkID, existing := range currentByVKID {
 				if _, ok := requestedByVKID[vkID]; !ok {
-					if err := h.store.ConfigStore.DeleteVirtualKeyMCPConfig(ctx, existing.ID, tx); err != nil {
+					if err := h.store.StoreFromRequestCtx(ctx).DeleteVirtualKeyMCPConfig(ctx, existing.ID, tx); err != nil {
 						return fmt.Errorf("failed to remove VK MCP config for %s: %w", vkID, err)
 					}
 				}
@@ -1042,7 +1042,7 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 
 // deleteMCPClient handles DELETE /api/mcp/client/{id} - Remove an MCP client
 func (h *MCPHandler) deleteMCPClient(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
 		return
 	}
@@ -1052,8 +1052,8 @@ func (h *MCPHandler) deleteMCPClient(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Delete from DB first to avoid memory/DB inconsistency if DB delete fails
-	if h.store.ConfigStore != nil {
-		if err := h.store.ConfigStore.DeleteMCPClientConfig(ctx, id); err != nil {
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		if err := h.store.StoreFromRequestCtx(ctx).DeleteMCPClientConfig(ctx, id); err != nil {
 			logger.Error(fmt.Sprintf("Failed to delete MCP client config from database: %v", err))
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to delete MCP config: %v", err))
 			return
@@ -1238,7 +1238,7 @@ func (h *MCPHandler) updateMCPClientConnectionWithRetry(ctx context.Context, id 
 // completeMCPClientOAuth handles POST /api/mcp/client/{id}/complete-oauth - Complete MCP client creation after OAuth authorization
 // The {id} parameter is the oauth_config_id returned from the initial addMCPClient call
 func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
-	if h.store.ConfigStore == nil {
+	if h.store.StoreFromRequestCtx(ctx) == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP operations unavailable: config store is disabled")
 		return
 	}
@@ -1252,7 +1252,7 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 	logger.Debug(fmt.Sprintf("[OAuth Complete] Completing OAuth for oauth_config_id: %s", oauthConfigID))
 
 	// Check if OAuth flow is authorized
-	oauthConfig, err := h.store.ConfigStore.GetOauthConfigByID(ctx, oauthConfigID)
+	oauthConfig, err := h.store.StoreFromRequestCtx(ctx).GetOauthConfigByID(ctx, oauthConfigID)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get OAuth config: %v", err))
 		return
@@ -1282,8 +1282,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 
 	// If pending config points to an existing client, this is an OAuth credential update.
 	var existingDBConfig *configstoreTables.TableMCPClient
-	if h.store.ConfigStore != nil {
-		existingDBConfig, err = h.store.ConfigStore.GetMCPClientByID(ctx, mcpClientConfig.ID)
+	if h.store.StoreFromRequestCtx(ctx) != nil {
+		existingDBConfig, err = h.store.StoreFromRequestCtx(ctx).GetMCPClientByID(ctx, mcpClientConfig.ID)
 		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get existing mcp client config: %v", err))
 			return
@@ -1338,12 +1338,12 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 				DiscoveredToolNameMapping: mcpClientConfig.DiscoveredToolNameMapping,
 				Disabled:                  mcpClientConfig.Disabled,
 			}
-			if err := h.store.ConfigStore.UpdateMCPClientConfig(ctx, mcpClientConfig.ID, updateReq); err != nil {
+			if err := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, mcpClientConfig.ID, updateReq); err != nil {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to update MCP config: %v", err))
 				return
 			}
 			if err := h.updateMCPClientWithRetry(ctx, mcpClientConfig.ID, mcpClientConfig); err != nil {
-				if rollbackErr := h.store.ConfigStore.UpdateMCPClientConfig(ctx, mcpClientConfig.ID, &oldDBConfig); rollbackErr != nil {
+				if rollbackErr := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, mcpClientConfig.ID, &oldDBConfig); rollbackErr != nil {
 					logger.Error(fmt.Sprintf("Failed to rollback MCP client DB update: %v. please restart bifrost to keep core and database in sync", rollbackErr))
 				}
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to update MCP client: %v", err))
@@ -1351,8 +1351,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 			}
 		} else {
 			// Persist MCP client config in config store (BeforeSave hook serializes DiscoveredTools)
-			if h.store.ConfigStore != nil {
-				if err := h.store.ConfigStore.CreateMCPClientConfig(ctx, mcpClientConfig); err != nil {
+			if h.store.StoreFromRequestCtx(ctx) != nil {
+				if err := h.store.StoreFromRequestCtx(ctx).CreateMCPClientConfig(ctx, mcpClientConfig); err != nil {
 					SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create MCP config: %v", err))
 					return
 				}
@@ -1361,8 +1361,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 			// Add MCP client to manager (skips connection for per_user_oauth)
 			if err := h.mcpManager.AddMCPClient(ctx, mcpClientConfig); err != nil {
 				// Clean up DB entry on failure
-				if h.store.ConfigStore != nil {
-					if delErr := h.store.ConfigStore.DeleteMCPClientConfig(ctx, mcpClientConfig.ID); delErr != nil {
+				if h.store.StoreFromRequestCtx(ctx) != nil {
+					if delErr := h.store.StoreFromRequestCtx(ctx).DeleteMCPClientConfig(ctx, mcpClientConfig.ID); delErr != nil {
 						logger.Error(fmt.Sprintf("Failed to delete MCP client config from database: %v. please restart bifrost to keep core and database in sync", delErr))
 						SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to delete MCP client config from database: %v. please restart bifrost to keep core and database in sync", delErr))
 						return
@@ -1409,12 +1409,12 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 			DiscoveredToolNameMapping: mcpClientConfig.DiscoveredToolNameMapping,
 			Disabled:                  mcpClientConfig.Disabled,
 		}
-		if err := h.store.ConfigStore.UpdateMCPClientConfig(ctx, mcpClientConfig.ID, updateReq); err != nil {
+		if err := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, mcpClientConfig.ID, updateReq); err != nil {
 			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to update MCP config: %v", err))
 			return
 		}
 		if err := h.updateMCPClientConnectionWithRetry(ctx, mcpClientConfig.ID, mcpClientConfig); err != nil {
-			if rollbackErr := h.store.ConfigStore.UpdateMCPClientConfig(ctx, mcpClientConfig.ID, &oldDBConfig); rollbackErr != nil {
+			if rollbackErr := h.store.StoreFromRequestCtx(ctx).UpdateMCPClientConfig(ctx, mcpClientConfig.ID, &oldDBConfig); rollbackErr != nil {
 				logger.Error(fmt.Sprintf("Failed to rollback MCP client DB update: %v. please restart bifrost to keep core and database in sync", rollbackErr))
 			}
 			logger.Error(fmt.Sprintf("Failed to reconnect MCP client after OAuth DB update for client %s: %v", mcpClientConfig.ID, err))
@@ -1422,8 +1422,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	} else {
-		if h.store.ConfigStore != nil {
-			if err := h.store.ConfigStore.CreateMCPClientConfig(ctx, mcpClientConfig); err != nil {
+		if h.store.StoreFromRequestCtx(ctx) != nil {
+			if err := h.store.StoreFromRequestCtx(ctx).CreateMCPClientConfig(ctx, mcpClientConfig); err != nil {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create MCP config: %v", err))
 				return
 			}
@@ -1431,8 +1431,8 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 
 		// Add MCP client to Bifrost and connect
 		if err := h.mcpManager.AddMCPClient(ctx, mcpClientConfig); err != nil {
-			if h.store.ConfigStore != nil {
-				if delErr := h.store.ConfigStore.DeleteMCPClientConfig(ctx, mcpClientConfig.ID); delErr != nil {
+			if h.store.StoreFromRequestCtx(ctx) != nil {
+				if delErr := h.store.StoreFromRequestCtx(ctx).DeleteMCPClientConfig(ctx, mcpClientConfig.ID); delErr != nil {
 					logger.Warn(fmt.Sprintf("Failed to rollback MCP client config after add failure: %v", delErr))
 				}
 			}

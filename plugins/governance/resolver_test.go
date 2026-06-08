@@ -260,23 +260,24 @@ func TestBudgetResolver_EvaluateRequest_MultiLevelBudgetHierarchy(t *testing.T) 
 	logger := NewMockLogger()
 
 	vkBudget := buildBudgetWithUsage("vk-budget", 100.0, 50.0, "1d")
-	teamBudget := buildBudgetWithUsage("team-budget", 500.0, 200.0, "1d")
-	customerBudget := buildBudgetWithUsage("customer-budget", 1000.0, 400.0, "1d")
+	childOrgBudget := buildBudgetWithUsage("org-child-budget", 500.0, 200.0, "1d")
+	parentOrgBudget := buildBudgetWithUsage("org-parent-budget", 1000.0, 400.0, "1d")
 
-	team := buildTeam("team1", "Team 1", teamBudget)
-	customer := buildCustomer("customer1", "Customer 1", customerBudget)
-	team.CustomerID = &customer.ID
-	team.Customer = customer
+	parentOrgID := "org-parent"
+	childOrgID := "org-child"
+	parentOrg := buildOrganization(parentOrgID, "Parent Org", nil)
+	childOrg := buildOrganization(childOrgID, "Child Org", &parentOrgID)
+	childLimit := buildOrgLimit("limit-child", childOrgID, childOrgBudget)
+	parentLimit := buildOrgLimit("limit-parent", parentOrgID, parentOrgBudget)
 
 	vk := buildVirtualKeyWithBudget("vk1", "sk-bf-test", "Test VK", vkBudget)
-	vk.TeamID = &team.ID
-	vk.Team = team
+	vk.OrgID = &childOrgID
 
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
-		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
-		Budgets:     []configstoreTables.TableBudget{*vkBudget, *teamBudget, *customerBudget},
-		Teams:       []configstoreTables.TableTeam{*team},
-		Customers:   []configstoreTables.TableCustomer{*customer},
+		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
+		Budgets:       []configstoreTables.TableBudget{*vkBudget, *childOrgBudget, *parentOrgBudget},
+		Organizations: []configstoreTables.TableOrganization{*parentOrg, *childOrg},
+		OrgLimits:     []configstoreTables.TableOrgLimit{*childLimit, *parentLimit},
 	}, nil)
 	require.NoError(t, err)
 
@@ -469,22 +470,19 @@ func TestBudgetResolver_IsModelAllowed(t *testing.T) {
 // TestBudgetResolver_ContextPopulation tests context values are set correctly
 func TestBudgetResolver_ContextPopulation(t *testing.T) {
 	logger := NewMockLogger()
+	orgID := "org1"
+	org := buildOrganization(orgID, "Org 1", nil)
+	limit := buildOrgLimit("limit1", orgID, nil)
 	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
+	vk.OrgID = &orgID
 	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
-	customer := buildCustomer("cust1", "Customer 1", nil)
-	team := buildTeam("team1", "Team 1", nil)
-	team.CustomerID = &customer.ID
-	team.Customer = customer
-	vk.TeamID = &team.ID
-	vk.Team = team
-	vk.CustomerID = &customer.ID
 
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
-		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
-		Teams:       []configstoreTables.TableTeam{*team},
-		Customers:   []configstoreTables.TableCustomer{*customer},
+		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
+		Organizations: []configstoreTables.TableOrganization{*org},
+		OrgLimits:     []configstoreTables.TableOrgLimit{*limit},
 	}, nil)
 	require.NoError(t, err)
 
@@ -497,10 +495,8 @@ func TestBudgetResolver_ContextPopulation(t *testing.T) {
 
 	// Check context was populated
 	vkID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
-	teamID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceTeamID).(string)
-	customerID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceCustomerID).(string)
+	resolvedOrgID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceOrgID).(string)
 
 	assert.Equal(t, "vk1", vkID)
-	assert.Equal(t, "team1", teamID)
-	assert.Equal(t, "cust1", customerID)
+	assert.Equal(t, "org1", resolvedOrgID)
 }

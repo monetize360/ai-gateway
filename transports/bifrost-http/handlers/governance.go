@@ -57,21 +57,21 @@ type GovernanceManager interface {
 
 // GovernanceHandler manages HTTP requests for governance operations
 type GovernanceHandler struct {
-	configStore       configstore.ConfigStore
+	cfg               *lib.Config
 	governanceManager GovernanceManager
 }
 
 // NewGovernanceHandler creates a new governance handler instance
-func NewGovernanceHandler(manager GovernanceManager, configStore configstore.ConfigStore) (*GovernanceHandler, error) {
+func NewGovernanceHandler(manager GovernanceManager, cfg *lib.Config) (*GovernanceHandler, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("governance manager is required")
 	}
-	if configStore == nil {
-		return nil, fmt.Errorf("config store is required")
+	if cfg == nil || cfg.TenantStore == nil {
+		return nil, fmt.Errorf("tenant store is required")
 	}
 	return &GovernanceHandler{
 		governanceManager: manager,
-		configStore:       configStore,
+		cfg:               cfg,
 	}, nil
 }
 
@@ -92,8 +92,7 @@ type CreateVirtualKeyRequest struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"` // Empty means no MCP clients allowed (deny-by-default)
-	TeamID          *string                 `json:"team_id,omitempty"`     // Mutually exclusive with CustomerID
-	CustomerID      *string                 `json:"customer_id,omitempty"` // Mutually exclusive with TeamID
+	OrgID           *string                 `json:"org_id,omitempty"`
 	Budgets         []CreateBudgetRequest   `json:"budgets,omitempty"`     // Multi-budget: each must have a unique reset_duration
 	RateLimit       *CreateRateLimitRequest `json:"rate_limit,omitempty"`
 	IsActive        *bool                   `json:"is_active,omitempty"`
@@ -105,7 +104,7 @@ type UpdateVirtualKeyRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
 	ProviderConfigs []struct {
-		ID                *uint                   `json:"id,omitempty"` // null for new entries
+		ID                *string                 `json:"id,omitempty"` // null for new entries
 		Provider          string                  `json:"provider" validate:"required"`
 		Weight            *float64                `json:"weight,omitempty"`
 		AllowedModels     schemas.WhiteList       `json:"allowed_models,omitempty"`     // ["*"] allows all models; empty denies all
@@ -115,12 +114,11 @@ type UpdateVirtualKeyRequest struct {
 		KeyIDs            schemas.WhiteList       `json:"key_ids,omitempty"`            // List of DBKey UUIDs to associate with this provider config
 	} `json:"provider_configs,omitempty"`
 	MCPConfigs []struct {
-		ID             *uint             `json:"id,omitempty"` // null for new entries
+		ID             *string           `json:"id,omitempty"` // null for new entries
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"`
-	TeamID           *string                 `json:"team_id,omitempty"`
-	CustomerID       *string                 `json:"customer_id,omitempty"`
+	OrgID            *string                 `json:"org_id,omitempty"`
 	Budgets          []CreateBudgetRequest   `json:"budgets,omitempty"` // Multi-budget: replaces all VK-level budgets
 	RateLimit        *UpdateRateLimitRequest `json:"rate_limit,omitempty"`
 	IsActive         *bool                   `json:"is_active,omitempty"`
@@ -164,8 +162,8 @@ type CreateRoutingRuleRequest struct {
 	CelExpression string          `json:"cel_expression"`
 	Targets       []RoutingTarget `json:"targets"` // Required; weights must sum to 1
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
-	Scope         string          `json:"scope,omitempty"` // Defaults to "global" if not provided
-	ScopeID       *string         `json:"scope_id,omitempty"`
+	OrgID         *string         `json:"org_id,omitempty"`
+	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      int             `json:"priority,omitempty"` // Defaults to 0 if not provided
 }
@@ -181,8 +179,8 @@ type UpdateRoutingRuleRequest struct {
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      *int            `json:"priority,omitempty"`
-	Scope         *string         `json:"scope,omitempty"`
-	ScopeID       *string         `json:"scope_id,omitempty"`
+	OrgID         *string         `json:"org_id,omitempty"`
+	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 }
 
 // CreateRateLimitRequest represents the request body for creating a rate limit using flexible approach
@@ -473,19 +471,17 @@ func (h *GovernanceHandler) getVirtualKeys(ctx *fasthttp.RequestCtx) {
 	limitStr := string(ctx.QueryArgs().Peek("limit"))
 	offsetStr := string(ctx.QueryArgs().Peek("offset"))
 	search := string(ctx.QueryArgs().Peek("search"))
-	customerID := string(ctx.QueryArgs().Peek("customer_id"))
-	teamID := string(ctx.QueryArgs().Peek("team_id"))
+	orgID := string(ctx.QueryArgs().Peek("org_id"))
 	sortBy := string(ctx.QueryArgs().Peek("sort_by"))
 	order := string(ctx.QueryArgs().Peek("order"))
 	isExport := string(ctx.QueryArgs().Peek("export")) == "true"
 	excludeAccessProfileManagedVirtual := string(ctx.QueryArgs().Peek("exclude_access_profile_managed_virtual")) == "true"
 
-	if limitStr != "" || offsetStr != "" || search != "" || customerID != "" || teamID != "" || sortBy != "" || isExport || excludeAccessProfileManagedVirtual {
+	if limitStr != "" || offsetStr != "" || search != "" || orgID != "" || sortBy != "" || isExport || excludeAccessProfileManagedVirtual {
 		// Paginated/filtered path
 		params := configstore.VirtualKeyQueryParams{
 			Search:                             search,
-			CustomerID:                         customerID,
-			TeamID:                             teamID,
+			OrgID:                              orgID,
 			SortBy:                             sortBy,
 			Order:                              order,
 			Export:                             isExport,
@@ -521,7 +517,7 @@ func (h *GovernanceHandler) getVirtualKeys(ctx *fasthttp.RequestCtx) {
 		} else if params.Offset < 0 {
 			params.Offset = 0
 		}
-		virtualKeys, totalCount, err := h.configStore.GetVirtualKeysPaginated(ctx, params)
+		virtualKeys, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKeysPaginated(ctx, params)
 		if err != nil {
 			logger.Error("failed to retrieve virtual keys: %v", err)
 			SendError(ctx, 500, "Failed to retrieve virtual keys")
@@ -538,7 +534,7 @@ func (h *GovernanceHandler) getVirtualKeys(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Non-paginated path: return all virtual keys
-	virtualKeys, err := h.configStore.GetVirtualKeys(ctx)
+	virtualKeys, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKeys(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve virtual keys: %v", err)
 		SendError(ctx, 500, "Failed to retrieve virtual keys")
@@ -563,11 +559,6 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 	// Validate required fields
 	if req.Name == "" {
 		SendError(ctx, 400, "Virtual key name is required")
-		return
-	}
-	// Validate mutually exclusive TeamID and CustomerID
-	if req.TeamID != nil && req.CustomerID != nil {
-		SendError(ctx, 400, "VirtualKey cannot be attached to both Team and Customer")
 		return
 	}
 	// Validate budgets if provided
@@ -605,14 +596,13 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	var vk configstoreTables.TableVirtualKey
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		vk = configstoreTables.TableVirtualKey{
 			ID:              uuid.NewString(),
 			Name:            req.Name,
 			Value:           governance.GenerateVirtualKey(),
 			Description:     req.Description,
-			TeamID:          req.TeamID,
-			CustomerID:      req.CustomerID,
+			OrgID:           req.OrgID,
 			IsActive:        isActive,
 			CalendarAligned: req.CalendarAligned,
 		}
@@ -629,12 +619,12 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			if err := validateRateLimit(&rateLimit); err != nil {
 				return err
 			}
-			if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
 			}
 			vk.RateLimitID = &rateLimit.ID
 		}
-		if err := h.configStore.CreateVirtualKey(ctx, &vk, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKey(ctx, &vk, tx); err != nil {
 			return err
 		}
 		// Create multi-budgets for VK
@@ -651,7 +641,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 			}
@@ -682,7 +672,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 					allowAllKeys = true
 				} else if !pc.KeyIDs.IsEmpty() {
 					var err error
-					keys, err = h.configStore.GetKeysByIDs(ctx, pc.KeyIDs)
+					keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 					if err != nil {
 						return fmt.Errorf("failed to get keys by IDs for provider %s: %w", pc.Provider, err)
 					}
@@ -715,13 +705,13 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 					if err := validateRateLimit(&rateLimit); err != nil {
 						return err
 					}
-					if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 						return err
 					}
 					providerConfig.RateLimitID = &rateLimit.ID
 				}
 
-				if err := h.configStore.CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
 					return err
 				}
 				// Create multi-budgets for provider config
@@ -743,7 +733,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 						if err := validateBudget(&budget); err != nil {
 							return err
 						}
-						if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+						if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 							return err
 						}
 					}
@@ -764,11 +754,11 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 				if err := mc.ToolsToExecute.Validate(); err != nil {
 					return &badRequestError{err: fmt.Errorf("invalid tools_to_execute for mcp client %s: %w", mc.MCPClientName, err)}
 				}
-				mcpClient, err := h.configStore.GetMCPClientByName(ctx, mc.MCPClientName)
+				mcpClient, err := h.cfg.StoreFromRequestCtx(ctx).GetMCPClientByName(ctx, mc.MCPClientName)
 				if err != nil {
 					return fmt.Errorf("failed to get MCP client: %w", err)
 				}
-				if err := h.configStore.CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
 					VirtualKeyID:   vk.ID,
 					MCPClientID:    mcpClient.ID,
 					ToolsToExecute: mc.ToolsToExecute,
@@ -821,7 +811,7 @@ func (h *GovernanceHandler) getVirtualKey(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 404, "Virtual key not found")
 		return
 	}
-	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
+	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Virtual key not found")
@@ -844,12 +834,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Invalid JSON")
 		return
 	}
-	// Validate mutually exclusive TeamID and CustomerID
-	if req.TeamID != nil && req.CustomerID != nil {
-		SendError(ctx, 400, "VirtualKey cannot be attached to both Team and Customer")
-		return
-	}
-	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
+	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Virtual key not found")
@@ -866,7 +851,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		var rateLimitIDToDelete string
 		var providerBudgetIDsToDelete []string
 		var providerRateLimitIDsToDelete []string
@@ -896,18 +881,12 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		if req.Description != nil {
 			vk.Description = *req.Description
 		}
-		if req.TeamID != nil {
-			vk.TeamID = req.TeamID
-			vk.CustomerID = nil // Clear CustomerID if setting TeamID
-		}
-		if req.CustomerID != nil {
-			vk.CustomerID = req.CustomerID
-			vk.TeamID = nil // Clear TeamID if setting CustomerID
-		}
-		// When both TeamID and CustomerID are nil
-		if req.TeamID == nil && req.CustomerID == nil {
-			vk.TeamID = nil
-			vk.CustomerID = nil
+		if req.OrgID != nil {
+			if strings.TrimSpace(*req.OrgID) == "" {
+				vk.OrgID = nil
+			} else {
+				vk.OrgID = req.OrgID
+			}
 		}
 		if req.IsActive != nil {
 			vk.IsActive = req.IsActive
@@ -952,7 +931,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					if err := validateBudget(&existing); err != nil {
 						return err
 					}
-					if err := h.configStore.UpdateBudget(ctx, &existing, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
 						return err
 					}
 					reconciledBudgets = append(reconciledBudgets, existing)
@@ -971,7 +950,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					if err := validateBudget(&budget); err != nil {
 						return err
 					}
-					if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 						return err
 					}
 					reconciledBudgets = append(reconciledBudgets, budget)
@@ -980,7 +959,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 			// Delete budgets that are no longer present
 			for _, existing := range vk.Budgets {
 				if !matchedIDs[existing.ID] {
-					if err := h.configStore.DeleteBudget(ctx, existing.ID, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteBudget(ctx, existing.ID, tx); err != nil {
 						return fmt.Errorf("failed to delete removed VK budget: %w", err)
 					}
 				}
@@ -1016,7 +995,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					rateLimit.RequestResetDuration = req.RateLimit.RequestResetDuration
 				}
 
-				if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 			} else {
@@ -1033,14 +1012,14 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				vk.RateLimitID = &rateLimit.ID
 			}
 		}
 
-		if err := h.configStore.UpdateVirtualKey(ctx, vk, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateVirtualKey(ctx, vk, tx); err != nil {
 			return err
 		}
 		if req.ProviderConfigs != nil {
@@ -1065,11 +1044,11 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				return req.ProviderConfigs[i].Provider < req.ProviderConfigs[j].Provider
 			})
 			// Create maps for easier lookup
-			existingConfigsMap := make(map[uint]configstoreTables.TableVirtualKeyProviderConfig)
+			existingConfigsMap := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
 			for _, config := range existingConfigs {
 				existingConfigsMap[config.ID] = config
 			}
-			requestConfigsMap := make(map[uint]bool)
+			requestConfigsMap := make(map[string]bool)
 			// Process new configs: create new ones and update existing ones
 			for _, pc := range req.ProviderConfigs {
 				providerName := schemas.ModelProvider(strings.TrimSpace(pc.Provider))
@@ -1097,7 +1076,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						allowAllKeys = true
 					} else if !pc.KeyIDs.IsEmpty() {
 						var err error
-						keys, err = h.configStore.GetKeysByIDs(ctx, pc.KeyIDs)
+						keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 						if err != nil {
 							return fmt.Errorf("failed to get keys by IDs for provider %s: %w", pc.Provider, err)
 						}
@@ -1130,12 +1109,12 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						if err := validateRateLimit(&rateLimit); err != nil {
 							return err
 						}
-						if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+						if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 							return err
 						}
 						providerConfig.RateLimitID = &rateLimit.ID
 					}
-					if err := h.configStore.CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
 						return err
 					}
 					// Create multi-budgets for new provider config in update
@@ -1161,7 +1140,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 							if err := validateBudget(&budget); err != nil {
 								return err
 							}
-							if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+							if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 								return err
 							}
 						}
@@ -1170,7 +1149,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					// Update existing provider config
 					existing, ok := existingConfigsMap[*pc.ID]
 					if !ok {
-						return fmt.Errorf("provider config %d does not belong to this virtual key", *pc.ID)
+						return fmt.Errorf("provider config %s does not belong to this virtual key", *pc.ID)
 					}
 					requestConfigsMap[*pc.ID] = true
 					if err := pc.AllowedModels.Validate(); err != nil {
@@ -1194,7 +1173,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						allowAllKeys = true
 					} else if !pc.KeyIDs.IsEmpty() {
 						var err error
-						keys, err = h.configStore.GetKeysByIDs(ctx, pc.KeyIDs)
+						keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 						if err != nil {
 							return fmt.Errorf("failed to get keys by IDs for provider %s: %w", pc.Provider, err)
 						}
@@ -1249,7 +1228,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 								if err := validateBudget(&eb); err != nil {
 									return err
 								}
-								if err := h.configStore.UpdateBudget(ctx, &eb, tx); err != nil {
+								if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &eb, tx); err != nil {
 									return err
 								}
 								pcReconciledBudgets = append(pcReconciledBudgets, eb)
@@ -1268,7 +1247,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 								if err := validateBudget(&budget); err != nil {
 									return err
 								}
-								if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+								if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 									return err
 								}
 								pcReconciledBudgets = append(pcReconciledBudgets, budget)
@@ -1277,7 +1256,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						// Delete budgets that are no longer present
 						for _, eb := range existing.Budgets {
 							if !pcMatchedIDs[eb.ID] {
-								if err := h.configStore.DeleteBudget(ctx, eb.ID, tx); err != nil {
+								if err := h.cfg.StoreFromRequestCtx(ctx).DeleteBudget(ctx, eb.ID, tx); err != nil {
 									return fmt.Errorf("failed to delete removed provider config budget: %w", err)
 								}
 							}
@@ -1310,7 +1289,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 							if pc.RateLimit.RequestResetDuration != nil {
 								rateLimit.RequestResetDuration = pc.RateLimit.RequestResetDuration
 							}
-							if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+							if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 								return err
 							}
 						} else {
@@ -1327,19 +1306,19 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 							if err := validateRateLimit(&rateLimit); err != nil {
 								return err
 							}
-							if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+							if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 								return err
 							}
 							existing.RateLimitID = &rateLimit.ID
 						}
 					}
-					if err := h.configStore.UpdateVirtualKeyProviderConfig(ctx, &existing, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateVirtualKeyProviderConfig(ctx, &existing, tx); err != nil {
 						return err
 					}
 				}
 			}
 			// Delete provider configs that are not in the request
-			configIDs := make([]uint, 0, len(existingConfigsMap))
+			configIDs := make([]string, 0, len(existingConfigsMap))
 			for id := range existingConfigsMap {
 				configIDs = append(configIDs, id)
 			}
@@ -1351,7 +1330,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						providerBudgetIDsToDelete,
 						providerRateLimitIDsToDelete,
 					)
-					if err := h.configStore.DeleteVirtualKeyProviderConfig(ctx, id, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteVirtualKeyProviderConfig(ctx, id, tx); err != nil {
 						return err
 					}
 				}
@@ -1385,23 +1364,23 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				return req.MCPConfigs[i].MCPClientName < req.MCPConfigs[j].MCPClientName
 			})
 			// Create maps for easier lookup
-			existingMCPConfigsMap := make(map[uint]configstoreTables.TableVirtualKeyMCPConfig)
+			existingMCPConfigsMap := make(map[string]configstoreTables.TableVirtualKeyMCPConfig)
 			for _, config := range existingMCPConfigs {
 				existingMCPConfigsMap[config.ID] = config
 			}
-			requestMCPConfigsMap := make(map[uint]bool)
+			requestMCPConfigsMap := make(map[string]bool)
 			// Process new configs: create new ones and update existing ones
 			for _, mc := range req.MCPConfigs {
 				if err := mc.ToolsToExecute.Validate(); err != nil {
 					return &badRequestError{err: fmt.Errorf("invalid tools_to_execute for mcp client %s: %w", mc.MCPClientName, err)}
 				}
 				if mc.ID == nil {
-					mcpClient, err := h.configStore.GetMCPClientByName(ctx, mc.MCPClientName)
+					mcpClient, err := h.cfg.StoreFromRequestCtx(ctx).GetMCPClientByName(ctx, mc.MCPClientName)
 					if err != nil {
 						return fmt.Errorf("failed to get MCP client: %w", err)
 					}
 					// Create new MCP config
-					if err := h.configStore.CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
+					if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyMCPConfig(ctx, &configstoreTables.TableVirtualKeyMCPConfig{
 						VirtualKeyID:   vk.ID,
 						MCPClientID:    mcpClient.ID,
 						ToolsToExecute: mc.ToolsToExecute,
@@ -1412,24 +1391,24 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					// Update existing MCP config
 					existing, ok := existingMCPConfigsMap[*mc.ID]
 					if !ok {
-						return fmt.Errorf("MCP config %d does not belong to this virtual key", *mc.ID)
+						return fmt.Errorf("MCP config %s does not belong to this virtual key", *mc.ID)
 					}
 					requestMCPConfigsMap[*mc.ID] = true
 					existing.ToolsToExecute = mc.ToolsToExecute
-					if err := h.configStore.UpdateVirtualKeyMCPConfig(ctx, &existing, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateVirtualKeyMCPConfig(ctx, &existing, tx); err != nil {
 						return err
 					}
 				}
 			}
 			// Delete MCP configs that are not in the request
-			mcpConfigIDs := make([]uint, 0, len(existingMCPConfigsMap))
+			mcpConfigIDs := make([]string, 0, len(existingMCPConfigsMap))
 			for id := range existingMCPConfigsMap {
 				mcpConfigIDs = append(mcpConfigIDs, id)
 			}
 			sort.Slice(mcpConfigIDs, func(i, j int) bool { return mcpConfigIDs[i] < mcpConfigIDs[j] })
 			for _, id := range mcpConfigIDs {
 				if !requestMCPConfigsMap[id] {
-					if err := h.configStore.DeleteVirtualKeyMCPConfig(ctx, id, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteVirtualKeyMCPConfig(ctx, id, tx); err != nil {
 						return err
 					}
 				}
@@ -1437,19 +1416,19 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		}
 
 		if rateLimitIDToDelete != "" {
-			if err := h.configStore.DeleteRateLimit(ctx, rateLimitIDToDelete, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).DeleteRateLimit(ctx, rateLimitIDToDelete, tx); err != nil {
 				return err
 			}
 		}
 		sort.Strings(providerBudgetIDsToDelete)
 		for _, id := range providerBudgetIDsToDelete {
-			if err := h.configStore.DeleteBudget(ctx, id, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			if err := h.cfg.StoreFromRequestCtx(ctx).DeleteBudget(ctx, id, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
 				return err
 			}
 		}
 		sort.Strings(providerRateLimitIDsToDelete)
 		for _, id := range providerRateLimitIDsToDelete {
-			if err := h.configStore.DeleteRateLimit(ctx, id, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			if err := h.cfg.StoreFromRequestCtx(ctx).DeleteRateLimit(ctx, id, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
 				return err
 			}
 		}
@@ -1467,7 +1446,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Load relationships for response
-	preloadedVk, err := h.configStore.GetVirtualKey(ctx, vk.ID)
+	preloadedVk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vk.ID)
 	if err != nil {
 		logger.Error("failed to load relationships for updated VK: %v", err)
 		preloadedVk = vk
@@ -1485,7 +1464,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *GovernanceHandler) rotateVirtualKeyByID(ctx context.Context, vkID string) (*configstoreTables.TableVirtualKey, error) {
-	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
+	vk, err := h.cfg.StoreFromContext(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		return nil, err
 	}
@@ -1494,7 +1473,7 @@ func (h *GovernanceHandler) rotateVirtualKeyByID(ctx context.Context, vkID strin
 	if vk.Value == oldValue {
 		return nil, fmt.Errorf("generated virtual key matched existing value")
 	}
-	if err := h.configStore.UpdateVirtualKey(ctx, vk); err != nil {
+	if err := h.cfg.StoreFromContext(ctx).UpdateVirtualKey(ctx, vk); err != nil {
 		return nil, err
 	}
 	preloadedVk, err := h.governanceManager.ReloadVirtualKey(ctx, vk.ID)
@@ -1585,7 +1564,7 @@ func (h *GovernanceHandler) rotateVirtualKeys(ctx *fasthttp.RequestCtx) {
 func (h *GovernanceHandler) deleteVirtualKey(ctx *fasthttp.RequestCtx) {
 	vkID := ctx.UserValue("vk_id").(string)
 	// Fetch the virtual key from the database to get the budget and rate limit
-	vk, err := h.configStore.GetVirtualKey(ctx, vkID)
+	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Virtual key not found")
@@ -1595,7 +1574,7 @@ func (h *GovernanceHandler) deleteVirtualKey(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Deleting key from database
-	if err := h.configStore.DeleteVirtualKey(ctx, vkID); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteVirtualKey(ctx, vkID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Virtual key not found")
 			return
@@ -1623,34 +1602,7 @@ func (h *GovernanceHandler) getTeams(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		if customerID != "" {
-			teams := make(map[string]*configstoreTables.TableTeam)
-			for _, team := range data.Teams {
-				if team.CustomerID != nil && *team.CustomerID == customerID {
-					teams[team.ID] = team
-				}
-			}
-			SendJSON(ctx, map[string]interface{}{
-				"teams":       teams,
-				"count":       len(teams),
-				"total_count": len(teams),
-				"limit":       len(teams),
-				"offset":      0,
-			})
-		} else {
-			SendJSON(ctx, map[string]interface{}{
-				"teams":       data.Teams,
-				"count":       len(data.Teams),
-				"total_count": len(data.Teams),
-				"limit":       len(data.Teams),
-				"offset":      0,
-			})
-		}
+		SendError(ctx, 410, "teams are deprecated; use organizations and org_limits")
 		return
 	}
 
@@ -1663,7 +1615,7 @@ func (h *GovernanceHandler) getTeams(ctx *fasthttp.RequestCtx) {
 		limit, _ := strconv.Atoi(limitStr)
 		offset, _ := strconv.Atoi(offsetStr)
 		limit, offset = ClampPaginationParams(limit, offset)
-		teams, totalCount, err := h.configStore.GetTeamsPaginated(ctx, configstore.TeamsQueryParams{
+		teams, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetTeamsPaginated(ctx, configstore.TeamsQueryParams{
 			Limit:      limit,
 			Offset:     offset,
 			Search:     search,
@@ -1685,7 +1637,7 @@ func (h *GovernanceHandler) getTeams(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Non-paginated path: return all teams
-	teams, err := h.configStore.GetTeams(ctx, customerID)
+	teams, err := h.cfg.StoreFromRequestCtx(ctx).GetTeams(ctx, customerID)
 	if err != nil {
 		logger.Error("failed to retrieve teams: %v", err)
 		SendError(ctx, 500, fmt.Sprintf("Failed to retrieve teams: %v", err))
@@ -1712,6 +1664,10 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Team name is required")
 		return
 	}
+	if len(req.Budgets) > 0 {
+		SendError(ctx, 400, "team budgets are deprecated; attach budgets via org_limits")
+		return
+	}
 	// Validate rate limit if provided
 	if req.RateLimit != nil {
 		rateLimit := configstoreTables.TableRateLimit{
@@ -1727,7 +1683,7 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 	}
 	// Creating team in database
 	var team configstoreTables.TableTeam
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		team = configstoreTables.TableTeam{
 			ID:              uuid.NewString(),
 			Name:            req.Name,
@@ -1744,43 +1700,14 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
 			}
-			if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
 			}
 			team.RateLimitID = &rateLimit.ID
 		}
 		// Team row must exist before child budgets (FK on governance_budgets.team_id)
-		if err := h.configStore.CreateTeam(ctx, &team, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).CreateTeam(ctx, &team, tx); err != nil {
 			return err
-		}
-		// Create owned multi-budgets; enforce unique reset_duration per team
-		seenDurations := make(map[string]bool)
-		for _, b := range req.Budgets {
-			if b.MaxLimit < 0 {
-				return &badRequestError{err: fmt.Errorf("budget max_limit cannot be negative: %.2f", b.MaxLimit)}
-			}
-			if _, err := configstoreTables.ParseDuration(b.ResetDuration); err != nil {
-				return &badRequestError{err: fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)}
-			}
-			if seenDurations[b.ResetDuration] {
-				return &badRequestError{err: fmt.Errorf("duplicate reset_duration in budgets: %s", b.ResetDuration)}
-			}
-			seenDurations[b.ResetDuration] = true
-			budget := configstoreTables.TableBudget{
-				ID:            uuid.NewString(),
-				MaxLimit:      b.MaxLimit,
-				ResetDuration: b.ResetDuration,
-				LastReset:     budgetLastReset(team.CalendarAligned, b.ResetDuration),
-				CurrentUsage:  0,
-				TeamID:        &team.ID,
-			}
-			if err := validateBudget(&budget); err != nil {
-				return err
-			}
-			if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
-				return err
-			}
-			team.Budgets = append(team.Budgets, budget)
 		}
 		return nil
 	}); err != nil {
@@ -1811,22 +1738,10 @@ func (h *GovernanceHandler) getTeam(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		team, ok := data.Teams[teamID]
-		if !ok {
-			SendError(ctx, 404, "Team not found")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"team": team,
-		})
+		SendError(ctx, 410, "teams are deprecated; use organizations and org_limits")
 		return
 	}
-	team, err := h.configStore.GetTeam(ctx, teamID)
+	team, err := h.cfg.StoreFromRequestCtx(ctx).GetTeam(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Team not found")
@@ -1850,7 +1765,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Fetching team from database
-	team, err := h.configStore.GetTeam(ctx, teamID)
+	team, err := h.cfg.StoreFromRequestCtx(ctx).GetTeam(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Team not found")
@@ -1860,7 +1775,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Updating team in database
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Track rate-limit ID to delete after updating the team (to avoid FK constraint)
 		var rateLimitIDToDelete string
 
@@ -1887,73 +1802,9 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 		// below, so combined `calendar_aligned + budgets/rate_limit` updates see
 		// the final persisted state.
 
-		// Multi-budget reconciliation: match by reset_duration, preserve usage on update,
-		// create new budgets for new durations, delete unmatched existing budgets.
-		// Mirrors VK multi-budget handling above.
+		// Multi-budget reconciliation is deprecated — use org_limits.
 		if req.Budgets != nil {
-			// Validate incoming budgets
-			seenDurations := make(map[string]bool)
-			for _, b := range req.Budgets {
-				if b.MaxLimit < 0 {
-					return &badRequestError{err: fmt.Errorf("budget max_limit cannot be negative: %.2f", b.MaxLimit)}
-				}
-				if _, err := configstoreTables.ParseDuration(b.ResetDuration); err != nil {
-					return &badRequestError{err: fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)}
-				}
-				if seenDurations[b.ResetDuration] {
-					return &badRequestError{err: fmt.Errorf("duplicate reset_duration in budgets: %s", b.ResetDuration)}
-				}
-				seenDurations[b.ResetDuration] = true
-			}
-
-			existingByDuration := make(map[string]configstoreTables.TableBudget)
-			for _, existing := range team.Budgets {
-				existingByDuration[existing.ResetDuration] = existing
-			}
-
-			var reconciledBudgets []configstoreTables.TableBudget
-			matchedIDs := make(map[string]bool)
-			for _, b := range req.Budgets {
-				if existing, found := existingByDuration[b.ResetDuration]; found {
-					existing.MaxLimit = b.MaxLimit
-					// LastReset / CurrentUsage are preserved on update; if calendar
-					// alignment was just enabled in this request, the post-reconciliation
-					// snap block below resets them.
-					if err := validateBudget(&existing); err != nil {
-						return err
-					}
-					if err := h.configStore.UpdateBudget(ctx, &existing, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, existing)
-					matchedIDs[existing.ID] = true
-				} else {
-					budget := configstoreTables.TableBudget{
-						ID:            uuid.NewString(),
-						MaxLimit:      b.MaxLimit,
-						ResetDuration: b.ResetDuration,
-						LastReset:     budgetLastReset(team.CalendarAligned, b.ResetDuration),
-						CurrentUsage:  0,
-						TeamID:        &team.ID,
-					}
-					if err := validateBudget(&budget); err != nil {
-						return err
-					}
-					if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, budget)
-				}
-			}
-			// Delete budgets that are no longer present
-			for _, existing := range team.Budgets {
-				if !matchedIDs[existing.ID] {
-					if err := h.configStore.DeleteBudget(ctx, existing.ID, tx); err != nil {
-						return fmt.Errorf("failed to delete removed team budget: %w", err)
-					}
-				}
-			}
-			team.Budgets = reconciledBudgets
+			return &badRequestError{err: fmt.Errorf("team budgets are deprecated; attach budgets via org_limits")}
 		}
 		// Handle rate limit updates
 		if req.RateLimit != nil {
@@ -1979,7 +1830,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				team.RateLimit = &rateLimit
@@ -1997,7 +1848,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				team.RateLimitID = &rateLimit.ID
@@ -2018,7 +1869,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 				}
 				b.LastReset = configstoreTables.GetCalendarPeriodStart(b.ResetDuration, now)
 				b.CurrentUsage = 0
-				if err := h.configStore.UpdateBudget(ctx, b, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, b, tx); err != nil {
 					return fmt.Errorf("failed to snap team budget %s on calendar-align enable: %w", b.ID, err)
 				}
 			}
@@ -2036,13 +1887,13 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 					snapped = true
 				}
 				if snapped {
-					if err := h.configStore.UpdateRateLimit(ctx, rl, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, rl, tx); err != nil {
 						return fmt.Errorf("failed to snap team rate limit on calendar-align enable: %w", err)
 					}
 				}
 			}
 		}
-		if err := h.configStore.UpdateTeam(ctx, team, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateTeam(ctx, team, tx); err != nil {
 			return err
 		}
 
@@ -2081,7 +1932,7 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 // deleteTeam handles DELETE /api/governance/teams/{team_id} - Delete a team
 func (h *GovernanceHandler) deleteTeam(ctx *fasthttp.RequestCtx) {
 	teamID := ctx.UserValue("team_id").(string)
-	team, err := h.configStore.GetTeam(ctx, teamID)
+	team, err := h.cfg.StoreFromRequestCtx(ctx).GetTeam(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Team not found")
@@ -2096,7 +1947,7 @@ func (h *GovernanceHandler) deleteTeam(ctx *fasthttp.RequestCtx) {
 		// But we ignore this error because its not
 		logger.Error("failed to remove team: %v", err)
 	}
-	if err := h.configStore.DeleteTeam(ctx, teamID); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteTeam(ctx, teamID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Team not found")
 			return
@@ -2116,18 +1967,7 @@ func (h *GovernanceHandler) getCustomers(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"customers":   data.Customers,
-			"count":       len(data.Customers),
-			"total_count": len(data.Customers),
-			"limit":       len(data.Customers),
-			"offset":      0,
-		})
+		SendError(ctx, 410, "customers are deprecated; use organizations and org_limits")
 		return
 	}
 	limitStr := string(ctx.QueryArgs().Peek("limit"))
@@ -2138,7 +1978,7 @@ func (h *GovernanceHandler) getCustomers(ctx *fasthttp.RequestCtx) {
 		limit, _ := strconv.Atoi(limitStr)
 		offset, _ := strconv.Atoi(offsetStr)
 		limit, offset = ClampPaginationParams(limit, offset)
-		customers, totalCount, err := h.configStore.GetCustomersPaginated(ctx, configstore.CustomersQueryParams{
+		customers, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomersPaginated(ctx, configstore.CustomersQueryParams{
 			Limit:  limit,
 			Offset: offset,
 			Search: search,
@@ -2158,7 +1998,7 @@ func (h *GovernanceHandler) getCustomers(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	customers, err := h.configStore.GetCustomers(ctx)
+	customers, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomers(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve customers: %v", err)
 		SendError(ctx, 500, "failed to retrieve customers")
@@ -2199,7 +2039,7 @@ func (h *GovernanceHandler) createCustomer(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	var customer configstoreTables.TableCustomer
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		customer = configstoreTables.TableCustomer{
 			ID:   uuid.NewString(),
 			Name: req.Name,
@@ -2216,7 +2056,7 @@ func (h *GovernanceHandler) createCustomer(ctx *fasthttp.RequestCtx) {
 			if err := validateBudget(&budget); err != nil {
 				return err
 			}
-			if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 				return err
 			}
 			customer.BudgetID = &budget.ID
@@ -2231,12 +2071,12 @@ func (h *GovernanceHandler) createCustomer(ctx *fasthttp.RequestCtx) {
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
 			}
-			if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
 			}
 			customer.RateLimitID = &rateLimit.ID
 		}
-		if err := h.configStore.CreateCustomer(ctx, &customer, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).CreateCustomer(ctx, &customer, tx); err != nil {
 			return err
 		}
 		return nil
@@ -2261,22 +2101,10 @@ func (h *GovernanceHandler) getCustomer(ctx *fasthttp.RequestCtx) {
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
 	if fromMemory {
-		data := h.governanceManager.GetGovernanceData(ctx)
-		if data == nil {
-			SendError(ctx, 500, "Governance data is not available")
-			return
-		}
-		customer, ok := data.Customers[customerID]
-		if !ok {
-			SendError(ctx, 404, "Customer not found")
-			return
-		}
-		SendJSON(ctx, map[string]interface{}{
-			"customer": customer,
-		})
+		SendError(ctx, 410, "customers are deprecated; use organizations and org_limits")
 		return
 	}
-	customer, err := h.configStore.GetCustomer(ctx, customerID)
+	customer, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomer(ctx, customerID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Customer not found")
@@ -2299,7 +2127,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Fetching customer from database
-	customer, err := h.configStore.GetCustomer(ctx, customerID)
+	customer, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomer(ctx, customerID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Customer not found")
@@ -2309,7 +2137,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Updating customer in database
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Track IDs to delete after updating the customer (to avoid FK constraint)
 		var budgetIDToDelete, rateLimitIDToDelete string
 
@@ -2343,7 +2171,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				customer.Budget = &budget
@@ -2368,7 +2196,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				customer.BudgetID = &budget.ID
@@ -2399,7 +2227,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				customer.RateLimit = &rateLimit
@@ -2417,14 +2245,14 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				customer.RateLimitID = &rateLimit.ID
 				customer.RateLimit = &rateLimit
 			}
 		}
-		if err := h.configStore.UpdateCustomer(ctx, customer, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateCustomer(ctx, customer, tx); err != nil {
 			return err
 		}
 
@@ -2462,7 +2290,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 func (h *GovernanceHandler) deleteCustomer(ctx *fasthttp.RequestCtx) {
 	customerID := ctx.UserValue("customer_id").(string)
 
-	customer, err := h.configStore.GetCustomer(ctx, customerID)
+	customer, err := h.cfg.StoreFromRequestCtx(ctx).GetCustomer(ctx, customerID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Customer not found")
@@ -2476,7 +2304,7 @@ func (h *GovernanceHandler) deleteCustomer(ctx *fasthttp.RequestCtx) {
 		// But we ignore this error because its not
 		logger.Error("failed to remove customer: %v", err)
 	}
-	if err := h.configStore.DeleteCustomer(ctx, customerID); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteCustomer(ctx, customerID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Customer not found")
 			return
@@ -2507,7 +2335,7 @@ func (h *GovernanceHandler) getBudgets(ctx *fasthttp.RequestCtx) {
 		})
 		return
 	}
-	budgets, err := h.configStore.GetBudgets(ctx)
+	budgets, err := h.cfg.StoreFromRequestCtx(ctx).GetBudgets(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve budgets: %v", err)
 		SendError(ctx, 500, "failed to retrieve budgets")
@@ -2535,7 +2363,7 @@ func (h *GovernanceHandler) getRateLimits(ctx *fasthttp.RequestCtx) {
 		})
 		return
 	}
-	rateLimits, err := h.configStore.GetRateLimits(ctx)
+	rateLimits, err := h.cfg.StoreFromRequestCtx(ctx).GetRateLimits(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve rate limits: %v", err)
 		SendError(ctx, 500, "failed to retrieve rate limits")
@@ -2577,7 +2405,7 @@ func validateRateLimit(rateLimit *configstoreTables.TableRateLimit) error {
 }
 
 func (h *GovernanceHandler) getConfiguredProviderSet(ctx context.Context) (map[schemas.ModelProvider]struct{}, error) {
-	providers, err := h.configStore.GetProviders(ctx)
+	providers, err := h.cfg.StoreFromContext(ctx).GetProviders(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2663,7 +2491,7 @@ func (h *GovernanceHandler) getModelConfigs(ctx *fasthttp.RequestCtx) {
 		}
 
 		params.Limit, params.Offset = ClampPaginationParams(params.Limit, params.Offset)
-		modelConfigs, totalCount, err := h.configStore.GetModelConfigsPaginated(ctx, params)
+		modelConfigs, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfigsPaginated(ctx, params)
 		if err != nil {
 			logger.Error("failed to retrieve model configs: %v", err)
 			SendError(ctx, 500, "Failed to retrieve model configs")
@@ -2680,7 +2508,7 @@ func (h *GovernanceHandler) getModelConfigs(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Non-paginated path: return all model configs
-	modelConfigs, err := h.configStore.GetModelConfigs(ctx)
+	modelConfigs, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfigs(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve model configs: %v", err)
 		SendError(ctx, 500, "Failed to retrieve model configs")
@@ -2698,7 +2526,7 @@ func (h *GovernanceHandler) getModelConfigs(ctx *fasthttp.RequestCtx) {
 // getModelConfig handles GET /api/governance/model-configs/{mc_id} - Get a specific model config
 func (h *GovernanceHandler) getModelConfig(ctx *fasthttp.RequestCtx) {
 	mcID := ctx.UserValue("mc_id").(string)
-	mc, err := h.configStore.GetModelConfigByID(ctx, mcID)
+	mc, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfigByID(ctx, mcID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Model config not found")
@@ -2725,7 +2553,7 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Check if model config with same (model_name, provider) already exists
-	existing, err := h.configStore.GetModelConfig(ctx, req.ModelName, req.Provider)
+	existing, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfig(ctx, req.ModelName, req.Provider)
 	if err != nil && err != configstore.ErrNotFound {
 		logger.Error("failed to check existing model config: %v", err)
 		SendError(ctx, 500, fmt.Sprintf("Failed to check existing model config: %v", err))
@@ -2751,13 +2579,15 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	var mc configstoreTables.TableModelConfig
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		mc = configstoreTables.TableModelConfig{
 			ID:        uuid.NewString(),
 			ModelName: req.ModelName,
 			Provider:  req.Provider,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
+			SystemColumns: configstoreTables.SystemColumns{
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			},
 		}
 		// Create budget if provided
 		if req.Budget != nil {
@@ -2771,7 +2601,7 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 			if err := validateBudget(&budget); err != nil {
 				return err
 			}
-			if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 				return err
 			}
 			mc.BudgetID = &budget.ID
@@ -2791,13 +2621,13 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 			if err := validateRateLimit(&rateLimit); err != nil {
 				return err
 			}
-			if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
 			}
 			mc.RateLimitID = &rateLimit.ID
 			mc.RateLimit = &rateLimit
 		}
-		if err := h.configStore.CreateModelConfig(ctx, &mc, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).CreateModelConfig(ctx, &mc, tx); err != nil {
 			return err
 		}
 		return nil
@@ -2826,7 +2656,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Invalid JSON")
 		return
 	}
-	mc, err := h.configStore.GetModelConfigByID(ctx, mcID)
+	mc, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfigByID(ctx, mcID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Model config not found")
@@ -2835,7 +2665,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 500, "Failed to retrieve model config")
 		return
 	}
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Track IDs to delete after updating the model config (to avoid FK constraint)
 		var budgetIDToDelete, rateLimitIDToDelete string
 
@@ -2873,7 +2703,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				mc.Budget = &budget
@@ -2898,7 +2728,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				mc.BudgetID = &budget.ID
@@ -2930,7 +2760,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				mc.RateLimit = &rateLimit
@@ -2948,7 +2778,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				mc.RateLimitID = &rateLimit.ID
@@ -2956,7 +2786,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 			}
 		}
 		mc.UpdatedAt = time.Now()
-		if err := h.configStore.UpdateModelConfig(ctx, mc, tx); err != nil {
+		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateModelConfig(ctx, mc, tx); err != nil {
 			return err
 		}
 
@@ -2994,7 +2824,7 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 func (h *GovernanceHandler) deleteModelConfig(ctx *fasthttp.RequestCtx) {
 	mcID := ctx.UserValue("mc_id").(string)
 	// Check if model config exists
-	_, err := h.configStore.GetModelConfigByID(ctx, mcID)
+	_, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfigByID(ctx, mcID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Model config not found")
@@ -3004,7 +2834,7 @@ func (h *GovernanceHandler) deleteModelConfig(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Delete the model config
-	if err := h.configStore.DeleteModelConfig(ctx, mcID); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteModelConfig(ctx, mcID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Model config not found")
 			return
@@ -3057,7 +2887,7 @@ func (h *GovernanceHandler) getProviderGovernance(ctx *fasthttp.RequestCtx) {
 		})
 		return
 	}
-	providers, err := h.configStore.GetProviders(ctx)
+	providers, err := h.cfg.StoreFromRequestCtx(ctx).GetProviders(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve providers: %v", err)
 		SendError(ctx, 500, "Failed to retrieve providers")
@@ -3089,7 +2919,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Get all providers and find the one we need
-	providers, err := h.configStore.GetProviders(ctx)
+	providers, err := h.cfg.StoreFromRequestCtx(ctx).GetProviders(ctx)
 	if err != nil {
 		SendError(ctx, 500, "Failed to retrieve providers")
 		return
@@ -3105,7 +2935,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 404, "Provider not found")
 		return
 	}
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Track IDs to delete after updating the provider (to avoid FK constraint)
 		var budgetIDToDelete, rateLimitIDToDelete string
 
@@ -3135,7 +2965,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				provider.Budget = &budget
@@ -3154,7 +2984,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 				if err := validateBudget(&budget); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateBudget(ctx, &budget, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 					return err
 				}
 				provider.BudgetID = &budget.ID
@@ -3186,7 +3016,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				provider.RateLimit = &rateLimit
@@ -3204,7 +3034,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 				if err := validateRateLimit(&rateLimit); err != nil {
 					return err
 				}
-				if err := h.configStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 					return err
 				}
 				provider.RateLimitID = &rateLimit.ID
@@ -3256,7 +3086,7 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 func (h *GovernanceHandler) deleteProviderGovernance(ctx *fasthttp.RequestCtx) {
 	providerName := ctx.UserValue("provider_name").(string)
 	// Get all providers and find the one we need
-	providers, err := h.configStore.GetProviders(ctx)
+	providers, err := h.cfg.StoreFromRequestCtx(ctx).GetProviders(ctx)
 	if err != nil {
 		SendError(ctx, 500, "Failed to retrieve providers")
 		return
@@ -3272,7 +3102,7 @@ func (h *GovernanceHandler) deleteProviderGovernance(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 404, "Provider not found")
 		return
 	}
-	if err := h.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := h.cfg.StoreFromRequestCtx(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Store IDs to delete after removing FK references
 		var budgetIDToDelete, rateLimitIDToDelete string
 
@@ -3327,6 +3157,8 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 	// Get query parameters for filtering
 	scope := string(ctx.QueryArgs().Peek("scope"))
 	scopeID := string(ctx.QueryArgs().Peek("scope_id"))
+	orgID := string(ctx.QueryArgs().Peek("org_id"))
+	virtualKeyID := string(ctx.QueryArgs().Peek("virtual_key_id"))
 
 	// Check if "from_memory" query parameter is set to true
 	fromMemory := string(ctx.QueryArgs().Peek("from_memory")) == "true"
@@ -3341,15 +3173,30 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		// Filter rules by scope and scopeID
 		var rules []configstoreTables.TableRoutingRule
 		for _, rule := range inMemoryRules {
-			if scope != "" && rule.Scope != scope {
-				continue
-			}
-			if scopeID != "" {
-				ruleScope := ""
-				if rule.ScopeID != nil {
-					ruleScope = *rule.ScopeID
+			rule.HydrateAssociationFromLegacy()
+			if orgID != "" {
+				if rule.OrgID == nil || *rule.OrgID != orgID {
+					continue
 				}
-				if ruleScope != scopeID {
+			}
+			if virtualKeyID != "" {
+				if rule.VirtualKeyID == nil || *rule.VirtualKeyID != virtualKeyID {
+					continue
+				}
+			}
+			if scope != "" && orgID == "" && virtualKeyID == "" {
+				if rule.RoutingScopeName() != scope {
+					continue
+				}
+			}
+			if scopeID != "" && orgID == "" && virtualKeyID == "" {
+				ruleScopeID := ""
+				if rule.OrgID != nil {
+					ruleScopeID = *rule.OrgID
+				} else if rule.VirtualKeyID != nil {
+					ruleScopeID = *rule.VirtualKeyID
+				}
+				if ruleScopeID != scopeID {
 					continue
 				}
 			}
@@ -3366,9 +3213,16 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// If scope/scopeID filters are specified, use the existing non-paginated path
+	// If org_id/virtual_key_id or legacy scope filters are specified, use scoped lookup.
+	if orgID != "" {
+		scope = "org"
+		scopeID = orgID
+	} else if virtualKeyID != "" {
+		scope = "virtual_key"
+		scopeID = virtualKeyID
+	}
 	if scope != "" || scopeID != "" {
-		rules, err := h.configStore.GetRoutingRulesByScope(ctx, scope, scopeID)
+		rules, err := h.cfg.StoreFromRequestCtx(ctx).GetRoutingRulesByScope(ctx, scope, scopeID)
 		if err != nil {
 			SendError(ctx, 500, "Failed to get routing rules")
 			return
@@ -3423,7 +3277,7 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		}
 
 		params.Limit, params.Offset = ClampPaginationParams(params.Limit, params.Offset)
-		rules, totalCount, err := h.configStore.GetRoutingRulesPaginated(ctx, params)
+		rules, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetRoutingRulesPaginated(ctx, params)
 		if err != nil {
 			logger.Error("failed to retrieve routing rules: %v", err)
 			SendError(ctx, 500, "Failed to retrieve routing rules")
@@ -3440,7 +3294,7 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Non-paginated path: return all routing rules
-	rules, err := h.configStore.GetRoutingRules(ctx)
+	rules, err := h.cfg.StoreFromRequestCtx(ctx).GetRoutingRules(ctx)
 	if err != nil {
 		logger.Error("failed to retrieve routing rules: %v", err)
 		SendError(ctx, 500, "Failed to retrieve routing rules")
@@ -3484,7 +3338,7 @@ func (h *GovernanceHandler) getRoutingRule(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	} else {
-		rule, err = h.configStore.GetRoutingRule(ctx, ruleID)
+		rule, err = h.cfg.StoreFromRequestCtx(ctx).GetRoutingRule(ctx, ruleID)
 		if err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, 404, "Routing rule not found")
@@ -3530,23 +3384,8 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Set defaults and normalize scope/scope_id
-	scope := req.Scope
-	if scope == "" {
-		scope = "global"
-	}
-
-	// Validate scope value before normalization
-	if err := validateRoutingScope(scope); err != nil {
+	if err := validateRoutingAssociation(req.OrgID, req.VirtualKeyID); err != nil {
 		SendError(ctx, 400, err.Error())
-		return
-	}
-
-	// Validate: scope_id required for non-global scopes; must be nil/empty for global
-	if scope == "global" {
-		req.ScopeID = nil // normalize: global rules must not have scope_id
-	} else if req.ScopeID == nil || *req.ScopeID == "" {
-		SendError(ctx, 400, "scope_id field is required when scope is not global")
 		return
 	}
 
@@ -3580,15 +3419,19 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
 		Targets:         targets,
-		Scope:           scope,
-		ScopeID:         req.ScopeID,
+		OrgID:           req.OrgID,
+		VirtualKeyID:    req.VirtualKeyID,
 		Priority:        req.Priority,
 		ParsedFallbacks: req.Fallbacks,
 		ParsedQuery:     req.Query,
 	}
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
 
 	// Create in database
-	if err := h.configStore.CreateRoutingRule(ctx, rule); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreateRoutingRule(ctx, rule); err != nil {
 		SendError(ctx, 500, fmt.Sprintf("Failed to create routing rule: %v", err))
 		return
 	}
@@ -3616,7 +3459,7 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	rule, err := h.configStore.GetRoutingRule(ctx, ruleID)
+	rule, err := h.cfg.StoreFromRequestCtx(ctx).GetRoutingRule(ctx, ruleID)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Routing rule not found")
@@ -3676,28 +3519,19 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		}
 		rule.ParsedFallbacks = req.Fallbacks
 	}
-	if req.Scope != nil && *req.Scope != "" {
-		// Validate scope value before updating
-		if err := validateRoutingScope(*req.Scope); err != nil {
-			SendError(ctx, 400, err.Error())
-			return
-		}
-		rule.Scope = *req.Scope
+	if req.OrgID != nil {
+		rule.OrgID = req.OrgID
 	}
-	if req.ScopeID != nil {
-		rule.ScopeID = req.ScopeID
+	if req.VirtualKeyID != nil {
+		rule.VirtualKeyID = req.VirtualKeyID
 	}
-
-	// If scope is global, ensure scope_id is nil
-	if rule.Scope == "global" {
-		rule.ScopeID = nil
-	} else if rule.ScopeID == nil || *rule.ScopeID == "" {
-		SendError(ctx, 400, "scope_id field is required when scope is not global")
+	if err := rule.NormalizeRoutingAssociation(); err != nil {
+		SendError(ctx, 400, err.Error())
 		return
 	}
 
 	// Update in database
-	if err := h.configStore.UpdateRoutingRule(ctx, rule); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdateRoutingRule(ctx, rule); err != nil {
 		SendError(ctx, 500, fmt.Sprintf("Failed to update routing rule in database: %v", err))
 		return
 	}
@@ -3719,7 +3553,7 @@ func (h *GovernanceHandler) deleteRoutingRule(ctx *fasthttp.RequestCtx) {
 	ruleID := ctx.UserValue("rule_id").(string)
 
 	// Delete from database
-	if err := h.configStore.DeleteRoutingRule(ctx, ruleID); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeleteRoutingRule(ctx, ruleID); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 404, "Routing rule not found")
 			return
@@ -3848,7 +3682,7 @@ func (h *GovernanceHandler) getPricingOverrides(ctx *fasthttp.RequestCtx) {
 		}
 
 		params.Limit, params.Offset = ClampPaginationParams(params.Limit, params.Offset)
-		overrides, totalCount, err := h.configStore.GetPricingOverridesPaginated(ctx, params)
+		overrides, totalCount, err := h.cfg.StoreFromRequestCtx(ctx).GetPricingOverridesPaginated(ctx, params)
 		if err != nil {
 			logger.Error("failed to retrieve pricing overrides: %v", err)
 			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to retrieve pricing overrides")
@@ -3871,7 +3705,7 @@ func (h *GovernanceHandler) getPricingOverrides(ctx *fasthttp.RequestCtx) {
 		ProviderID:    providerID,
 		ProviderKeyID: providerKeyID,
 	}
-	overrides, err := h.configStore.GetPricingOverrides(ctx, filters)
+	overrides, err := h.cfg.StoreFromRequestCtx(ctx).GetPricingOverrides(ctx, filters)
 	if err != nil {
 		logger.Error("failed to retrieve pricing overrides: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to retrieve pricing overrides")
@@ -3933,11 +3767,13 @@ func (h *GovernanceHandler) createPricingOverride(ctx *fasthttp.RequestCtx) {
 		RequestTypes:     req.RequestTypes,
 		PricingPatchJSON: string(patchJSON),
 		ConfigHash:       "",
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
 	}
 
-	if err := h.configStore.CreatePricingOverride(ctx, &override); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).CreatePricingOverride(ctx, &override); err != nil {
 		logger.Error("failed to create pricing override: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to create pricing override")
 		return
@@ -3963,7 +3799,7 @@ func (h *GovernanceHandler) updatePricingOverride(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	existing, err := h.configStore.GetPricingOverrideByID(ctx, id)
+	existing, err := h.cfg.StoreFromRequestCtx(ctx).GetPricingOverrideByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Pricing override not found")
@@ -4048,11 +3884,16 @@ func (h *GovernanceHandler) updatePricingOverride(ctx *fasthttp.RequestCtx) {
 		RequestTypes:     merged.RequestTypes,
 		PricingPatchJSON: pricingPatchJSON,
 		ConfigHash:       existing.ConfigHash,
-		CreatedAt:        existing.CreatedAt,
-		UpdatedAt:        time.Now(),
+		SystemColumns: configstoreTables.SystemColumns{
+			CreatedAt: existing.CreatedAt,
+			CreatedBy: existing.CreatedBy,
+			UpdatedAt: time.Now(),
+			UpdatedBy: existing.UpdatedBy,
+			Deleted:   existing.Deleted,
+		},
 	}
 
-	if err := h.configStore.UpdatePricingOverride(ctx, &override); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).UpdatePricingOverride(ctx, &override); err != nil {
 		logger.Error("failed to update pricing override: %v", err)
 		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to update pricing override")
 		return
@@ -4071,7 +3912,7 @@ func (h *GovernanceHandler) updatePricingOverride(ctx *fasthttp.RequestCtx) {
 
 func (h *GovernanceHandler) deletePricingOverride(ctx *fasthttp.RequestCtx) {
 	id := ctx.UserValue("id").(string)
-	if err := h.configStore.DeletePricingOverride(ctx, id); err != nil {
+	if err := h.cfg.StoreFromRequestCtx(ctx).DeletePricingOverride(ctx, id); err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Pricing override not found")
 			return
@@ -4111,18 +3952,27 @@ func normalizeOptionalString(value *string) *string {
 // validRoutingScopes contains the allowed scope values for routing rules
 var validRoutingScopes = map[string]bool{
 	"global":      true,
-	"team":        true,
-	"customer":    true,
+	"org":         true,
 	"virtual_key": true,
 }
 
-// validateRoutingScope validates that the scope value is one of the allowed values
+// validateRoutingAssociation ensures org_id and virtual_key_id are not both set.
+func validateRoutingAssociation(orgID, virtualKeyID *string) error {
+	hasOrg := orgID != nil && strings.TrimSpace(*orgID) != ""
+	hasVK := virtualKeyID != nil && strings.TrimSpace(*virtualKeyID) != ""
+	if hasOrg && hasVK {
+		return fmt.Errorf("org_id and virtual_key_id are mutually exclusive")
+	}
+	return nil
+}
+
+// validateRoutingScope validates legacy scope query values (org replaces team/customer).
 func validateRoutingScope(scope string) error {
 	if scope == "" {
-		return nil // Empty scope will default to "global" later
+		return nil
 	}
 	if !validRoutingScopes[scope] {
-		return fmt.Errorf("invalid scope %q: must be one of: global, team, customer, virtual_key", scope)
+		return fmt.Errorf("invalid scope %q: must be one of: global, org, virtual_key", scope)
 	}
 	return nil
 }
@@ -4199,7 +4049,7 @@ func (h *GovernanceHandler) getVirtualKeyQuota(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	vk, err := h.configStore.GetVirtualKeyQuotaByValue(ctx, vkValue)
+	vk, err := h.cfg.StoreFromRequestCtx(ctx).GetVirtualKeyQuotaByValue(ctx, vkValue)
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, 401, "Virtual key not found")

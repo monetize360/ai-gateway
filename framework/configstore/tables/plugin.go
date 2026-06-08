@@ -3,7 +3,6 @@ package tables
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -13,14 +12,12 @@ import (
 // TablePlugin represents a plugin configuration in the database
 
 type TablePlugin struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ID         string    `gorm:"primaryKey;type:uuid" json:"id"`
 	Name       string    `gorm:"type:varchar(255);uniqueIndex;not null" json:"name"`
 	Enabled    bool      `json:"enabled"`
 	Path       *string   `json:"path,omitempty"`
 	ConfigJSON string    `gorm:"type:text" json:"-"` // JSON serialized plugin.Config
-	CreatedAt  time.Time `gorm:"index;not null" json:"created_at"`
 	Version    int16     `gorm:"not null;default:1" json:"version"`
-	UpdatedAt  time.Time `gorm:"index;not null" json:"updated_at"`
 	IsCustom   bool      `gorm:"not null;default:false" json:"isCustom"`
 
 	Placement *schemas.PluginPlacement `gorm:"column:placement;type:varchar(20);null" json:"placement,omitempty"`
@@ -34,6 +31,8 @@ type TablePlugin struct {
 
 	// Virtual fields for runtime use (not stored in DB)
 	Config any `gorm:"-" json:"config,omitempty"`
+
+	SystemColumns
 }
 
 // TableName sets the table name for each model

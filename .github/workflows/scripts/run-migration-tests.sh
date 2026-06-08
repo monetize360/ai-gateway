@@ -467,11 +467,6 @@ generate_faker_sql() {
 -- 1. Tables with NO foreign keys (base tables)
 -- ============================================================================
 
--- config_hashes (tracks config file hash)
-INSERT INTO config_hashes (id, hash, created_at, updated_at)
-VALUES (1, 'migration-test-hash-abc123def456', $now, $now)
-ON CONFLICT DO NOTHING;
-
 -- governance_budgets (reset_duration is a string like "1d", "1h", etc.)
 -- NOTE: calendar_aligned excluded - it was added in prerelease1, dropped in prerelease2, re-added in prerelease4
 INSERT INTO governance_budgets (id, max_limit, current_usage, reset_duration, last_reset, config_hash, created_at, updated_at)
@@ -1761,8 +1756,11 @@ append_dynamic_columns_postgres() {
     echo "UPDATE governance_virtual_key_provider_configs SET blacklisted_models = '[]' WHERE virtual_key_id = 'vk-migration-test-2';" >> "$output_file"
   fi
 
-  # governance_virtual_keys.created_by_user_id (added in v1.5.4 via migrationAddCreatedByUserIDColumnForVirtualKeys)
-  if column_exists_postgres "governance_virtual_keys" "created_by_user_id"; then
+  # governance_virtual_keys.created_by (audit column; legacy created_by_user_id renamed in governance_vk_created_by_rename)
+  if column_exists_postgres "governance_virtual_keys" "created_by"; then
+    echo "UPDATE governance_virtual_keys SET created_by = NULL WHERE id = 'vk-migration-test-1';" >> "$output_file"
+    echo "UPDATE governance_virtual_keys SET created_by = NULL WHERE id = 'vk-migration-test-2';" >> "$output_file"
+  elif column_exists_postgres "governance_virtual_keys" "created_by_user_id"; then
     echo "UPDATE governance_virtual_keys SET created_by_user_id = NULL WHERE id = 'vk-migration-test-1';" >> "$output_file"
     echo "UPDATE governance_virtual_keys SET created_by_user_id = NULL WHERE id = 'vk-migration-test-2';" >> "$output_file"
   fi
@@ -1772,6 +1770,35 @@ append_dynamic_columns_postgres() {
     echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-001';" >> "$output_file"
     echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-002';" >> "$output_file"
     echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-003';" >> "$output_file"
+  fi
+
+  # config_* audit columns (config_add_audit_columns migration)
+  if column_exists_postgres "config_providers" "deleted"; then
+    echo "UPDATE config_providers SET deleted = false WHERE name IN ('openai', 'anthropic');" >> "$output_file"
+  fi
+  if column_exists_postgres "config_keys" "deleted"; then
+    echo "UPDATE config_keys SET deleted = false WHERE name IN ('migration-test-key-openai', 'migration-test-key-anthropic');" >> "$output_file"
+  fi
+  if column_exists_postgres "config_models" "deleted"; then
+    echo "UPDATE config_models SET deleted = false WHERE name IN ('gpt-4-turbo', 'claude-3-opus');" >> "$output_file"
+  fi
+  if column_exists_postgres "config_mcp_clients" "deleted"; then
+    echo "UPDATE config_mcp_clients SET deleted = false WHERE client_id = 'mcp-migration-test-001';" >> "$output_file"
+  fi
+  if column_exists_postgres "config_plugins" "deleted"; then
+    echo "UPDATE config_plugins SET deleted = false WHERE name = 'migration-test-plugin';" >> "$output_file"
+  fi
+  if column_exists_postgres "config_client" "deleted"; then
+    echo "UPDATE config_client SET deleted = false;" >> "$output_file"
+  fi
+  if column_exists_postgres "config_env_keys" "deleted"; then
+    echo "UPDATE config_env_keys SET deleted = false WHERE env_var IN ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY');" >> "$output_file"
+  fi
+  if column_exists_postgres "config_log_store" "deleted"; then
+    echo "UPDATE config_log_store SET deleted = false;" >> "$output_file"
+  fi
+  if column_exists_postgres "config_vector_store" "deleted"; then
+    echo "UPDATE config_vector_store SET deleted = false;" >> "$output_file"
   fi
 }
 
@@ -2737,8 +2764,11 @@ append_dynamic_columns_sqlite() {
       echo "UPDATE governance_virtual_key_provider_configs SET blacklisted_models = '[]' WHERE virtual_key_id = 'vk-migration-test-2';" >> "$output_file"
     fi
 
-    # governance_virtual_keys.created_by_user_id (added in v1.5.4 via migrationAddCreatedByUserIDColumnForVirtualKeys)
-    if column_exists_sqlite "$config_db" "governance_virtual_keys" "created_by_user_id"; then
+    # governance_virtual_keys.created_by (audit column; legacy created_by_user_id renamed in governance_vk_created_by_rename)
+    if column_exists_sqlite "$config_db" "governance_virtual_keys" "created_by"; then
+      echo "UPDATE governance_virtual_keys SET created_by = NULL WHERE id = 'vk-migration-test-1';" >> "$output_file"
+      echo "UPDATE governance_virtual_keys SET created_by = NULL WHERE id = 'vk-migration-test-2';" >> "$output_file"
+    elif column_exists_sqlite "$config_db" "governance_virtual_keys" "created_by_user_id"; then
       echo "UPDATE governance_virtual_keys SET created_by_user_id = NULL WHERE id = 'vk-migration-test-1';" >> "$output_file"
       echo "UPDATE governance_virtual_keys SET created_by_user_id = NULL WHERE id = 'vk-migration-test-2';" >> "$output_file"
     fi
@@ -2749,6 +2779,37 @@ append_dynamic_columns_sqlite() {
   echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-001';" >> "$output_file"
   echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-002';" >> "$output_file"
   echo "UPDATE logs SET inc_number = NULL WHERE id = 'log-migration-test-003';" >> "$output_file"
+
+  if [ -f "$config_db" ]; then
+    # config_* audit columns (config_add_audit_columns migration)
+    if column_exists_sqlite "$config_db" "config_providers" "deleted"; then
+      echo "UPDATE config_providers SET deleted = 0 WHERE name IN ('openai', 'anthropic');" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_keys" "deleted"; then
+      echo "UPDATE config_keys SET deleted = 0 WHERE name IN ('migration-test-key-openai', 'migration-test-key-anthropic');" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_models" "deleted"; then
+      echo "UPDATE config_models SET deleted = 0 WHERE name IN ('gpt-4-turbo', 'claude-3-opus');" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_mcp_clients" "deleted"; then
+      echo "UPDATE config_mcp_clients SET deleted = 0 WHERE client_id = 'mcp-migration-test-001';" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_plugins" "deleted"; then
+      echo "UPDATE config_plugins SET deleted = 0 WHERE name = 'migration-test-plugin';" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_client" "deleted"; then
+      echo "UPDATE config_client SET deleted = 0;" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_env_keys" "deleted"; then
+      echo "UPDATE config_env_keys SET deleted = 0 WHERE env_var IN ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY');" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_log_store" "deleted"; then
+      echo "UPDATE config_log_store SET deleted = 0;" >> "$output_file"
+    fi
+    if column_exists_sqlite "$config_db" "config_vector_store" "deleted"; then
+      echo "UPDATE config_vector_store SET deleted = 0;" >> "$output_file"
+    fi
+  fi
 }
 
 # ============================================================================

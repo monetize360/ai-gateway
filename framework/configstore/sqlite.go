@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -30,33 +31,67 @@ func newSqliteConfigStore(ctx context.Context, config *SQLiteConfig, logger sche
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: newGormLogger(logger),
 	})
-
 	if err != nil {
 		return nil, err
 	}
 	logger.Debug("db opened for configstore")
 	s := &RDBConfigStore{logger: logger}
 	s.db.Store(db)
-	// SQLite has no server-side prepared-plan cache, and opening a second
-	// handle on the same file would contend for the single-writer lock —
-	// so both hooks operate on the existing *gorm.DB.
 	s.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
 		return fn(ctx, s.DB())
 	}
 	s.refreshPoolFn = func(ctx context.Context) error { return nil }
 
-	logger.Debug("running migration to remove duplicate keys")
-	// Run migration to remove duplicate keys before AutoMigrate
-	if err := s.removeDuplicateKeysAndNullKeys(ctx); err != nil {
-		return nil, fmt.Errorf("failed to remove duplicate keys: %w", err)
-	}
-	// Run migrations
-	if err := triggerMigrations(ctx, db); err != nil {
-		return nil, err
+	if err := autoMigrateConfigTables(db); err != nil {
+		return nil, fmt.Errorf("failed to auto-migrate configstore tables: %w", err)
 	}
 	// Encrypt any plaintext rows if encryption is enabled
 	if err := s.EncryptPlaintextRows(ctx); err != nil {
 		return nil, fmt.Errorf("failed to encrypt plaintext rows: %w", err)
 	}
 	return s, nil
+}
+
+// autoMigrateConfigTables runs GORM AutoMigrate for all configstore table models.
+// AutoMigrate is idempotent: it creates missing tables/columns but never drops columns.
+func autoMigrateConfigTables(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&tables.TableBudget{},
+		&tables.TableRateLimit{},
+		&tables.TableProvider{},
+		&tables.TableKey{},
+		&tables.TableModel{},
+		&tables.TableOauthConfig{},
+		&tables.TableOauthToken{},
+		&tables.TableOauthUserSession{},
+		&tables.TableOauthUserToken{},
+		&tables.TableMCPClient{},
+		&tables.TableClientConfig{},
+		&tables.TableEnvKey{},
+		&tables.TableVectorStoreConfig{},
+		&tables.TableLogStoreConfig{},
+		&tables.TableOrgLimit{},
+		&tables.TableVirtualKey{},
+		&tables.TableVirtualKeyProviderConfig{},
+		&tables.TableVirtualKeyMCPConfig{},
+		&tables.TableVirtualKeyProviderConfigKey{},
+		&tables.TableGovernanceConfig{},
+		&tables.TableModelConfig{},
+		&tables.TablePricingOverride{},
+		&tables.TablePlugin{},
+		&tables.TableFeatureFlag{},
+		&tables.TableFrameworkConfig{},
+		&tables.TableDistributedLock{},
+		&tables.SessionsTable{},
+		&tables.TempToken{},
+		&tables.TableRoutingRule{},
+		&tables.TableRoutingTarget{},
+		&tables.TableFolder{},
+		&tables.TablePrompt{},
+		&tables.TablePromptVersion{},
+		&tables.TablePromptVersionMessage{},
+		&tables.TablePromptSession{},
+		&tables.TablePromptSessionMessage{},
+		&tables.TableAccessKeyToken{},
+	)
 }

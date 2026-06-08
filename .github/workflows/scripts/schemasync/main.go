@@ -98,9 +98,9 @@ var ignoreGoFields = map[string]string{
 	// integrating system (PR #3395). It is assigned through the API by that
 	// system, never authored in config.json.
 	"/properties/governance/properties/teams/items|source_id": "external identifier set via API by integrating systems; not authored in config.json",
-	// created_by_user_id is DB ownership metadata set by the API/session layer,
+	// created_by is DB ownership metadata set by the API/session layer,
 	// never authored in config.json.
-	"/properties/governance/properties/virtual_keys/items|created_by_user_id": "DB ownership metadata; set by API/session layer, not authored in config.json",
+	"/properties/governance/properties/virtual_keys/items|created_by": "DB ownership metadata; set by API/session layer, not authored in config.json",
 }
 
 // ignoreGoFieldNames are field names (regardless of parent path) that are

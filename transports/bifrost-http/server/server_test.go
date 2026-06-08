@@ -50,17 +50,14 @@ func TestUpdateKeyStatus_KeylessProviderUpdatesProviderStatusInMemory(t *testing
 	defer func() { logger = prevLogger }()
 
 	store := &updateStatusOnlyConfigStore{}
-	server := &BifrostHTTPServer{
-		Config: &lib.Config{
-			ConfigStore: store,
-			Providers: map[schemas.ModelProvider]configstore.ProviderConfig{
-				"mock-openai": {
-					CustomProviderConfig: &schemas.CustomProviderConfig{IsKeyLess: true},
-					Status:               "unknown",
-				},
-			},
+	cfg := lib.NewTestConfig(store)
+	cfg.Providers = map[schemas.ModelProvider]configstore.ProviderConfig{
+		"mock-openai": {
+			CustomProviderConfig: &schemas.CustomProviderConfig{IsKeyLess: true},
+			Status:               "unknown",
 		},
 	}
+	server := &BifrostHTTPServer{Config: cfg}
 
 	server.updateKeyStatus(context.Background(), []schemas.KeyStatus{{
 		Provider: "mock-openai",
@@ -90,17 +87,14 @@ func TestUpdateKeyStatus_EmptyKeyIDDoesNotOverwriteKeyedProviderStatus(t *testin
 	defer func() { logger = prevLogger }()
 
 	store := &updateStatusOnlyConfigStore{}
-	server := &BifrostHTTPServer{
-		Config: &lib.Config{
-			ConfigStore: store,
-			Providers: map[schemas.ModelProvider]configstore.ProviderConfig{
-				"openai": {
-					Keys:   []schemas.Key{{ID: "key-1"}},
-					Status: "healthy",
-				},
-			},
+	cfg := lib.NewTestConfig(store)
+	cfg.Providers = map[schemas.ModelProvider]configstore.ProviderConfig{
+		"openai": {
+			Keys:   []schemas.Key{{ID: "key-1"}},
+			Status: "healthy",
 		},
 	}
+	server := &BifrostHTTPServer{Config: cfg}
 
 	server.updateKeyStatus(context.Background(), []schemas.KeyStatus{{
 		Provider: "openai",

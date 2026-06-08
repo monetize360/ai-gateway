@@ -56,6 +56,19 @@ var enterprisePlugins = []string{
 	"pubsub",
 }
 
+// pluginGovernanceStore resolves per-tenant governance state for async jobs.
+type pluginGovernanceStore struct {
+	plugin governance.BaseGovernancePlugin
+}
+
+func (p pluginGovernanceStore) GetVirtualKey(ctx context.Context, vkValue string) (*tables.TableVirtualKey, bool) {
+	store := p.plugin.GetGovernanceStore(ctx)
+	if store == nil {
+		return nil, false
+	}
+	return store.GetVirtualKey(ctx, vkValue)
+}
+
 // ServerCallbacks is a interface that defines the callbacks for the server.
 type ServerCallbacks interface {
 	// Plugins callbacks
@@ -141,6 +154,7 @@ type BifrostHTTPServer struct {
 
 	AuthMiddleware       *handlers.AuthMiddleware
 	TracingMiddleware    *handlers.TracingMiddleware
+	TenantMiddleware     *handlers.TenantMiddleware
 	WSTicketStore        *handlers.WSTicketStore
 	TempTokens           *temptoken.Service
 	TempTokenSweepWorker *temptoken.SweepWorker
@@ -340,8 +354,8 @@ func (s *BifrostHTTPServer) getGovernancePlugin() (governance.BaseGovernancePlug
 // ReloadVirtualKey reloads a virtual key from the in-memory store
 func (s *BifrostHTTPServer) ReloadVirtualKey(ctx context.Context, id string) (*tables.TableVirtualKey, error) {
 	// Load relationships for response
-	preloadedVk, err := s.Config.ConfigStore.RetryOnNotFound(ctx, func(ctx context.Context) (any, error) {
-		preloadedVk, err := s.Config.ConfigStore.GetVirtualKey(ctx, id)
+	preloadedVk, err := s.Config.StoreFromContext(ctx).RetryOnNotFound(ctx, func(ctx context.Context) (any, error) {
+		preloadedVk, err := s.Config.StoreFromContext(ctx).GetVirtualKey(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -365,7 +379,7 @@ func (s *BifrostHTTPServer) ReloadVirtualKey(ctx context.Context, id string) (*t
 	if err != nil {
 		return nil, err
 	}
-	if governanceData := governancePlugin.GetGovernanceStore().GetGovernanceData(ctx); governanceData != nil {
+	if governanceData := governancePlugin.GetGovernanceStore(ctx).GetGovernanceData(ctx); governanceData != nil {
 		for _, existingVK := range governanceData.VirtualKeys {
 			if existingVK != nil && existingVK.ID == virtualKey.ID && existingVK.Value != "" && existingVK.Value != virtualKey.Value {
 				s.MCPServerHandler.DeleteVKMCPServer(existingVK.Value)
@@ -373,7 +387,7 @@ func (s *BifrostHTTPServer) ReloadVirtualKey(ctx context.Context, id string) (*t
 			}
 		}
 	}
-	governancePlugin.GetGovernanceStore().UpdateVirtualKeyInMemory(ctx, virtualKey, nil, nil, nil)
+	governancePlugin.GetGovernanceStore(ctx).UpdateVirtualKeyInMemory(ctx, virtualKey, nil, nil, nil)
 	s.MCPServerHandler.SyncVKMCPServer(virtualKey)
 	return virtualKey, nil
 }
@@ -384,7 +398,7 @@ func (s *BifrostHTTPServer) RemoveVirtualKey(ctx context.Context, id string) err
 	if err != nil {
 		return err
 	}
-	preloadedVk, err := s.Config.ConfigStore.GetVirtualKey(ctx, id)
+	preloadedVk, err := s.Config.StoreFromContext(ctx).GetVirtualKey(ctx, id)
 	if err != nil {
 		if !errors.Is(err, configstore.ErrNotFound) {
 			return err
@@ -392,92 +406,55 @@ func (s *BifrostHTTPServer) RemoveVirtualKey(ctx context.Context, id string) err
 	}
 	if preloadedVk == nil {
 		// This could be broadcast message from other server, so we will just clean up in-memory store
-		governancePlugin.GetGovernanceStore().DeleteVirtualKeyInMemory(ctx, id)
+		governancePlugin.GetGovernanceStore(ctx).DeleteVirtualKeyInMemory(ctx, id)
 		return nil
 	}
-	governancePlugin.GetGovernanceStore().DeleteVirtualKeyInMemory(ctx, id)
+	governancePlugin.GetGovernanceStore(ctx).DeleteVirtualKeyInMemory(ctx, id)
 	s.MCPServerHandler.DeleteVKMCPServer(preloadedVk.Value)
 	return nil
 }
 
-// ReloadTeam reloads a team from the in-memory store
+// ReloadTeam loads a team from the database (teams are deprecated in the in-memory governance store).
 func (s *BifrostHTTPServer) ReloadTeam(ctx context.Context, id string) (*tables.TableTeam, error) {
-	// Load relationships for response
-	preloadedTeam, err := s.Config.ConfigStore.GetTeam(ctx, id)
+	preloadedTeam, err := s.Config.StoreFromContext(ctx).GetTeam(ctx, id)
 	if err != nil {
-		logger.Error("failed to load relationships for created team: %v", err)
+		logger.Error("failed to load team: %v", err)
 		return nil, err
 	}
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
-		return nil, err
-	}
-	// Add to in-memory store
-	governancePlugin.GetGovernanceStore().UpdateTeamInMemory(ctx, preloadedTeam, nil)
 	return preloadedTeam, nil
 }
 
-// RemoveTeam removes a team from the in-memory store
+// RemoveTeam is a no-op for the deprecated team in-memory cache.
 func (s *BifrostHTTPServer) RemoveTeam(ctx context.Context, id string) error {
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
+	_, err := s.Config.StoreFromContext(ctx).GetTeam(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return err
 	}
-	preloadedTeam, err := s.Config.ConfigStore.GetTeam(ctx, id)
-	if err != nil {
-		if !errors.Is(err, configstore.ErrNotFound) {
-			return err
-		}
-	}
-	if preloadedTeam == nil {
-		// At-least deleting from in-memory store to avoid conflicts
-		governancePlugin.GetGovernanceStore().DeleteTeamInMemory(ctx, id)
-		return nil
-	}
-	governancePlugin.GetGovernanceStore().DeleteTeamInMemory(ctx, id)
 	return nil
 }
 
-// ReloadCustomer reloads a customer from the in-memory store
+// ReloadCustomer loads a customer from the database (customers are deprecated in the in-memory governance store).
 func (s *BifrostHTTPServer) ReloadCustomer(ctx context.Context, id string) (*tables.TableCustomer, error) {
-	preloadedCustomer, err := s.Config.ConfigStore.GetCustomer(ctx, id)
+	preloadedCustomer, err := s.Config.StoreFromContext(ctx).GetCustomer(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
-		return nil, err
-	}
-	// Add to in-memory store
-	governancePlugin.GetGovernanceStore().UpdateCustomerInMemory(ctx, preloadedCustomer, nil)
 	return preloadedCustomer, nil
 }
 
-// RemoveCustomer removes a customer from the in-memory store
+// RemoveCustomer is a no-op for the deprecated customer in-memory cache.
 func (s *BifrostHTTPServer) RemoveCustomer(ctx context.Context, id string) error {
-	governancePlugin, err := s.getGovernancePlugin()
-	if err != nil {
+	_, err := s.Config.StoreFromContext(ctx).GetCustomer(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return err
 	}
-	preloadedCustomer, err := s.Config.ConfigStore.GetCustomer(ctx, id)
-	if err != nil {
-		if !errors.Is(err, configstore.ErrNotFound) {
-			return err
-		}
-	}
-	if preloadedCustomer == nil {
-		// At-least deleting from in-memory store to avoid conflicts
-		governancePlugin.GetGovernanceStore().DeleteCustomerInMemory(ctx, id)
-		return nil
-	}
-	governancePlugin.GetGovernanceStore().DeleteCustomerInMemory(ctx, id)
 	return nil
 }
 
 // ReloadModelConfig reloads a model config from the database into in-memory store
 // If usage was modified (e.g., reset due to config change), syncs it back to DB
 func (s *BifrostHTTPServer) ReloadModelConfig(ctx context.Context, id string) (*tables.TableModelConfig, error) {
-	preloadedMC, err := s.Config.ConfigStore.GetModelConfigByID(ctx, id)
+	preloadedMC, err := s.Config.StoreFromContext(ctx).GetModelConfigByID(ctx, id)
 	if err != nil {
 		logger.Error("failed to load model config: %v", err)
 		return nil, err
@@ -487,7 +464,7 @@ func (s *BifrostHTTPServer) ReloadModelConfig(ctx context.Context, id string) (*
 		return nil, err
 	}
 	// Update in memory and get back the potentially modified model config
-	updatedMC := governancePlugin.GetGovernanceStore().UpdateModelConfigInMemory(ctx, preloadedMC)
+	updatedMC := governancePlugin.GetGovernanceStore(ctx).UpdateModelConfigInMemory(ctx, preloadedMC)
 	if updatedMC == nil {
 		return preloadedMC, nil
 	}
@@ -495,7 +472,7 @@ func (s *BifrostHTTPServer) ReloadModelConfig(ctx context.Context, id string) (*
 	// Sync updated usage values back to database if they changed
 	if updatedMC.Budget != nil && preloadedMC.Budget != nil {
 		if updatedMC.Budget.CurrentUsage != preloadedMC.Budget.CurrentUsage {
-			if err := s.Config.ConfigStore.UpdateBudgetUsage(ctx, updatedMC.Budget.ID, updatedMC.Budget.CurrentUsage); err != nil {
+			if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedMC.Budget.ID, updatedMC.Budget.CurrentUsage); err != nil {
 				logger.Error("failed to sync budget usage to database: %v", err)
 			}
 		}
@@ -504,7 +481,7 @@ func (s *BifrostHTTPServer) ReloadModelConfig(ctx context.Context, id string) (*
 		tokenUsageChanged := updatedMC.RateLimit.TokenCurrentUsage != preloadedMC.RateLimit.TokenCurrentUsage
 		requestUsageChanged := updatedMC.RateLimit.RequestCurrentUsage != preloadedMC.RateLimit.RequestCurrentUsage
 		if tokenUsageChanged || requestUsageChanged {
-			if err := s.Config.ConfigStore.UpdateRateLimitUsage(ctx, updatedMC.RateLimit.ID, updatedMC.RateLimit.TokenCurrentUsage, updatedMC.RateLimit.RequestCurrentUsage); err != nil {
+			if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedMC.RateLimit.ID, updatedMC.RateLimit.TokenCurrentUsage, updatedMC.RateLimit.RequestCurrentUsage); err != nil {
 				logger.Error("failed to sync rate limit usage to database: %v", err)
 			}
 		}
@@ -519,13 +496,13 @@ func (s *BifrostHTTPServer) RemoveModelConfig(ctx context.Context, id string) er
 	if err != nil {
 		return err
 	}
-	governancePlugin.GetGovernanceStore().DeleteModelConfigInMemory(ctx, id)
+	governancePlugin.GetGovernanceStore(ctx).DeleteModelConfigInMemory(ctx, id)
 	return nil
 }
 
 func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error) {
-	if s.Config == nil || s.Config.ConfigStore == nil {
-		return nil, fmt.Errorf("config store not found")
+	if s.Config == nil || s.Config.Registry() == nil {
+		return nil, fmt.Errorf("tenant registry not found")
 	}
 	if s.Config.ModelCatalog == nil {
 		return nil, fmt.Errorf("pricing manager not found")
@@ -535,7 +512,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	}
 
 	// Load provider from DB
-	providerInfo, err := s.Config.ConfigStore.GetProvider(ctx, provider)
+	providerInfo, err := s.Config.StoreFromContext(ctx).GetProvider(ctx, provider)
 	if err != nil {
 		logger.Error("failed to load provider: %v", err)
 		return nil, err
@@ -551,7 +528,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 			logger.Warn("governance plugin found but failed to get: %v", err)
 		} else {
 			// Update in memory and get back the potentially modified provider
-			govUpdated := governancePlugin.GetGovernanceStore().UpdateProviderInMemory(ctx, providerInfo)
+			govUpdated := governancePlugin.GetGovernanceStore(ctx).UpdateProviderInMemory(ctx, providerInfo)
 			if govUpdated != nil {
 				updatedProvider = govUpdated
 			}
@@ -559,7 +536,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 			// Sync updated usage values back to database if they changed
 			if updatedProvider.Budget != nil && providerInfo.Budget != nil {
 				if updatedProvider.Budget.CurrentUsage != providerInfo.Budget.CurrentUsage {
-					if err := s.Config.ConfigStore.UpdateBudgetUsage(ctx, updatedProvider.Budget.ID, updatedProvider.Budget.CurrentUsage); err != nil {
+					if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedProvider.Budget.ID, updatedProvider.Budget.CurrentUsage); err != nil {
 						logger.Error("failed to sync budget usage to database: %v", err)
 					}
 				}
@@ -568,7 +545,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 				tokenUsageChanged := updatedProvider.RateLimit.TokenCurrentUsage != providerInfo.RateLimit.TokenCurrentUsage
 				requestUsageChanged := updatedProvider.RateLimit.RequestCurrentUsage != providerInfo.RateLimit.RequestCurrentUsage
 				if tokenUsageChanged || requestUsageChanged {
-					if err := s.Config.ConfigStore.UpdateRateLimitUsage(ctx, updatedProvider.RateLimit.ID, updatedProvider.RateLimit.TokenCurrentUsage, updatedProvider.RateLimit.RequestCurrentUsage); err != nil {
+					if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedProvider.RateLimit.ID, updatedProvider.RateLimit.TokenCurrentUsage, updatedProvider.RateLimit.RequestCurrentUsage); err != nil {
 						logger.Error("failed to sync rate limit usage to database: %v", err)
 					}
 				}
@@ -582,7 +559,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	hasNoKeys := len(inMemoryKeys) == 0 && !isKeylessProvider
 
 	// Getting allowed models from all provider keys (needed before model listing)
-	providerKeys, err := s.Config.ConfigStore.GetKeysByProvider(ctx, string(provider))
+	providerKeys, err := s.Config.StoreFromContext(ctx).GetKeysByProvider(ctx, string(provider))
 	if err != nil {
 		return nil, fmt.Errorf("failed to update provider model catalog: failed to get keys by provider: %s", err)
 	}
@@ -616,11 +593,11 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	}()
 	listWg.Wait()
 
-	if allModels != nil && len(allModels.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+	if allModels != nil && len(allModels.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
 		s.updateKeyStatus(ctx, allModels.KeyStatuses)
 	}
 	if bifrostErr != nil {
-		if len(bifrostErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+		if len(bifrostErr.ExtraFields.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
 			s.updateKeyStatus(ctx, bifrostErr.ExtraFields.KeyStatuses)
 		}
 
@@ -674,7 +651,7 @@ func (s *BifrostHTTPServer) RemoveProvider(ctx context.Context, provider schemas
 	if err != nil {
 		return err
 	}
-	governancePlugin.GetGovernanceStore().DeleteProviderInMemory(ctx, string(provider))
+	governancePlugin.GetGovernanceStore(ctx).DeleteProviderInMemory(ctx, string(provider))
 	if s.Config == nil || s.Config.ModelCatalog == nil {
 		return fmt.Errorf("pricing manager not found")
 	}
@@ -690,7 +667,7 @@ func (s *BifrostHTTPServer) GetGovernanceData(ctx context.Context) *governance.G
 	if err != nil {
 		return nil
 	}
-	return governancePlugin.GetGovernanceStore().GetGovernanceData(ctx)
+	return governancePlugin.GetGovernanceStore(ctx).GetGovernanceData(ctx)
 }
 
 // ReloadRoutingRule reloads a routing rule from the database into the governance store
@@ -704,8 +681,8 @@ func (s *BifrostHTTPServer) ReloadRoutingRule(ctx context.Context, id string) er
 		return fmt.Errorf("governance plugin not found: %w", err)
 	}
 	// Get the governance store from the plugin
-	store := governancePlugin.GetGovernanceStore()
-	rule, err := s.Config.ConfigStore.GetRoutingRule(ctx, id)
+	store := governancePlugin.GetGovernanceStore(ctx)
+	rule, err := s.Config.StoreFromContext(ctx).GetRoutingRule(ctx, id)
 	if err != nil {
 		return fmt.Errorf("failed to get routing rule from config store: %w", err)
 	}
@@ -727,7 +704,7 @@ func (s *BifrostHTTPServer) RemoveRoutingRule(ctx context.Context, id string) er
 		return fmt.Errorf("governance plugin not found: %w", err)
 	}
 	// Get the governance store from the plugin
-	store := governancePlugin.GetGovernanceStore()
+	store := governancePlugin.GetGovernanceStore(ctx)
 	// Delete the rule from the store (this removes from in-memory cache)
 	if err := store.DeleteRoutingRuleInMemory(ctx, id); err != nil {
 		return fmt.Errorf("failed to delete routing rule from store: %w", err)
@@ -737,10 +714,10 @@ func (s *BifrostHTTPServer) RemoveRoutingRule(ctx context.Context, id string) er
 
 // ReloadClientConfigFromConfigStore reloads the client config from config store
 func (s *BifrostHTTPServer) ReloadClientConfigFromConfigStore(ctx context.Context) error {
-	if s.Config == nil || s.Config.ConfigStore == nil {
-		return fmt.Errorf("config store not found")
+	if s.Config == nil || s.Config.Registry() == nil {
+		return fmt.Errorf("tenant registry not found")
 	}
-	config, err := s.Config.ConfigStore.GetClientConfig(context.Background())
+	config, err := s.Config.StoreFromContext(ctx).GetClientConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get client config: %v", err)
 	}
@@ -786,21 +763,21 @@ func (s *BifrostHTTPServer) UpdateAuthConfig(ctx context.Context, authConfig *co
 	if authConfig == nil {
 		return fmt.Errorf("auth config is nil")
 	}
-	if s.Config == nil || s.Config.ConfigStore == nil {
-		return fmt.Errorf("config store not found")
+	if s.Config == nil || s.Config.Registry() == nil {
+		return fmt.Errorf("tenant registry not found")
 	}
 	// Allow disabling auth without credentials, but require them when enabling
 	if authConfig.IsEnabled && (authConfig.AdminUserName == nil || authConfig.AdminUserName.GetValue() == "" || authConfig.AdminPassword == nil || authConfig.AdminPassword.GetValue() == "") {
 		return fmt.Errorf("username and password are required when auth is enabled")
 	}
 	// Update the config store
-	if err := s.Config.ConfigStore.UpdateAuthConfig(ctx, authConfig); err != nil {
+	if err := s.Config.StoreFromContext(ctx).UpdateAuthConfig(ctx, authConfig); err != nil {
 		return err
 	}
 	// Update the AuthMiddleware's in-memory config
 	if s.AuthMiddleware != nil {
 		// Fetch the updated config from the store to ensure we have the latest
-		updatedAuthConfig, err := s.Config.ConfigStore.GetAuthConfig(ctx)
+		updatedAuthConfig, err := s.Config.StoreFromContext(ctx).GetAuthConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get auth config from store after update: %v", err)
 			// Still update with what we have
@@ -1150,7 +1127,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
 	if governancePlugin != nil {
-		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore)
+		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config)
 		if err != nil {
 			return fmt.Errorf("failed to initialize governance handler: %v", err)
 		}
@@ -1187,10 +1164,10 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	mcpHandler := handlers.NewMCPHandler(callbacks, callbacks, s.Client, s.Config, oauthHandler)
 	mcpSessionsHandler := handlers.NewMCPSessionsHandler(s.Config)
 	configHandler := handlers.NewConfigHandler(callbacks, s.Config)
-	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore)
-	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
-	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, promptsReloader)
-	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
+	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config)
+	sessionHandler := handlers.NewSessionHandler(s.Config, s.WSTicketStore)
+	promptsHandler := handlers.NewPromptsHandler(s.Config, promptsReloader)
+	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config)
 	// Going ahead with API handlers
 	healthHandler.RegisterRoutes(s.Router, middlewares...)
 	providerHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1258,10 +1235,10 @@ func (s *BifrostHTTPServer) RegisterUIRoutes(middlewares ...schemas.BifrostHTTPM
 
 // GetAllRedactedKeys gets all redacted keys from the config store
 func (s *BifrostHTTPServer) GetAllRedactedKeys(ctx context.Context, ids []string) []schemas.Key {
-	if s.Config == nil || s.Config.ConfigStore == nil {
+	if s.Config == nil || s.Config.Registry() == nil {
 		return nil
 	}
-	redactedKeys, err := s.Config.ConfigStore.GetAllRedactedKeys(ctx, ids)
+	redactedKeys, err := s.Config.StoreFromContext(ctx).GetAllRedactedKeys(ctx, ids)
 	if err != nil {
 		logger.Error("failed to get all redacted keys: %v", err)
 		return nil
@@ -1271,10 +1248,10 @@ func (s *BifrostHTTPServer) GetAllRedactedKeys(ctx context.Context, ids []string
 
 // GetAllRedactedVirtualKeys gets all redacted virtual keys from the config store
 func (s *BifrostHTTPServer) GetAllRedactedVirtualKeys(ctx context.Context, ids []string) []tables.TableVirtualKey {
-	if s.Config == nil || s.Config.ConfigStore == nil {
+	if s.Config == nil || s.Config.Registry() == nil {
 		return nil
 	}
-	virtualKeys, err := s.Config.ConfigStore.GetRedactedVirtualKeys(ctx, ids)
+	virtualKeys, err := s.Config.StoreFromContext(ctx).GetRedactedVirtualKeys(ctx, ids)
 	if err != nil {
 		logger.Error("failed to get all redacted virtual keys: %v", err)
 		return nil
@@ -1284,10 +1261,10 @@ func (s *BifrostHTTPServer) GetAllRedactedVirtualKeys(ctx context.Context, ids [
 
 // GetAllRedactedRoutingRules gets all redacted routing rules from the config store
 func (s *BifrostHTTPServer) GetAllRedactedRoutingRules(ctx context.Context, ids []string) []tables.TableRoutingRule {
-	if s.Config == nil || s.Config.ConfigStore == nil {
+	if s.Config == nil || s.Config.Registry() == nil {
 		return nil
 	}
-	routingRules, err := s.Config.ConfigStore.GetRedactedRoutingRules(ctx, ids)
+	routingRules, err := s.Config.StoreFromContext(ctx).GetRedactedRoutingRules(ctx, ids)
 	if err != nil {
 		logger.Error("failed to get all redacted routing rules: %v", err)
 		return nil
@@ -1335,6 +1312,17 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config %v", err)
 	}
+	// Multi-tenant: global DB + JWT middleware (governance wiring happens after plugins load).
+	if s.Config.TenantStoreConfig != nil && s.Config.TenantStoreConfig.Enabled {
+		tenantHolder, tenantErr := lib.InitTenantStore(ctx, s.Config.TenantStoreConfig, logger)
+		if tenantErr != nil {
+			return fmt.Errorf("failed to initialise tenant store: %v", tenantErr)
+		}
+		s.Config.TenantStore = tenantHolder
+		if tenantHolder != nil {
+			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey)
+		}
+	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
 	}
@@ -1348,18 +1336,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if s.Config.LogsStore != nil {
 		// If log retention days remains 0, then we wont be initializing the log retention cleaner
 		logRetentionDays := 0
-		if s.Config.ConfigStore != nil {
-			// Get logs store config from config store
-			clientConfig, err := s.Config.ConfigStore.GetClientConfig(ctx)
-			if err != nil {
-				logger.Warn("failed to get logs store config: %v", err)
-				// So we wont be initializing the log retention cleaner
-			}
-			if clientConfig != nil {
-				logRetentionDays = clientConfig.LogRetentionDays
-			}
-		} else {
-			// We will check if the config file has the log retention days set
+		if s.Config.ClientConfig != nil {
 			logRetentionDays = s.Config.ClientConfig.LogRetentionDays
 		}
 		logger.Info("log retention days: %d", logRetentionDays)
@@ -1385,12 +1362,17 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err := s.LoadPlugins(ctx); err != nil {
 		return fmt.Errorf("failed to instantiate plugins: %v", err)
 	}
+	// Start per-tenant governance sync worker.
+	if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
+		govPlugin.StartTenantGovernanceSync(lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
+		logger.Info("governance plugin configured for per-tenant store routing")
+	}
 
 	// Initialize async job executor (requires LogsStore + governance plugin)
 	if s.Config.LogsStore != nil {
 		governancePlugin, govErr := lib.FindPluginAs[governance.BaseGovernancePlugin](s.Config, s.getGovernancePluginName())
 		if govErr == nil {
-			s.Config.AsyncJobExecutor = logstore.NewAsyncJobExecutor(s.Config.LogsStore, governancePlugin.GetGovernanceStore(), logger)
+			s.Config.AsyncJobExecutor = logstore.NewAsyncJobExecutor(s.Config.LogsStore, pluginGovernanceStore{plugin: governancePlugin}, logger)
 			logger.Info("async job executor initialized")
 		}
 	}
@@ -1424,6 +1406,12 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize bifrost: %v", err)
 	}
 	logger.Info("bifrost client initialized")
+	s.Config.SetBifrostClient(s.Client)
+	// Hydrate provider configs from tenant databases before model discovery.
+	if s.Config.TenantStore != nil {
+		lib.SyncAllTenantProvidersOnce(ctx, s.Config, s.Client)
+		lib.StartTenantProviderSync(ctx, s.Config, s.Client, lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
+	}
 	// Sync plugin execution order from config to core (defensive — Init receives sorted list,
 	// but this ensures order consistency if the loading path changes in the future)
 	s.Client.ReorderPlugins(s.Config.GetPluginOrder())
@@ -1444,11 +1432,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 				modelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
 					Provider: provider,
 				})
-				if modelData != nil && len(modelData.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+				if modelData != nil && len(modelData.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
 					s.updateKeyStatus(ctx, modelData.KeyStatuses)
 				}
 				if listModelsErr != nil {
-					if len(listModelsErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+					if len(listModelsErr.ExtraFields.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
 						s.updateKeyStatus(ctx, listModelsErr.ExtraFields.KeyStatuses)
 					}
 					logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
@@ -1479,14 +1467,13 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		wg.Wait()
 	}
 	logger.Info("models added to catalog")
-	s.Config.SetBifrostClient(s.Client)
 	// Initialize routes
 	s.Router = router.New()
 	commonMiddlewares := s.PrepareCommonMiddlewares()
 	apiMiddlewares := commonMiddlewares
 	inferenceMiddlewares := commonMiddlewares
-	if s.Config.ConfigStore == nil {
-		logger.Error("auth middleware requires config store, skipping auth middleware initialization")
+	if s.Config.Registry() == nil {
+		logger.Error("auth middleware requires tenant registry, skipping auth middleware initialization")
 	} else {
 		// Use a signed (stateless) ticket store when an encryption key is configured
 		// so tickets are verifiable across nodes; otherwise fall back to in-memory.
@@ -1496,7 +1483,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		// handlers package. The service is the seam every "scoped, anonymous,
 		// browser-only" workflow plugs into (currently just the MCP per-user OAuth
 		// auth page
-		s.TempTokens = temptoken.NewService(s.Config.ConfigStore, temptoken.NewRegistry())
+		s.TempTokens = temptoken.NewService(s.Config.Registry(), temptoken.NewRegistry())
 		if regErr := handlers.RegisterTempTokenScopes(s.TempTokens); regErr != nil {
 			s.WSTicketStore.Stop()
 			s.WSTicketStore = nil
@@ -1514,7 +1501,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if s.Config.OAuthProvider != nil {
 			s.Config.OAuthProvider.SetTempTokenService(s.TempTokens)
 		}
-		s.AuthMiddleware, err = handlers.InitAuthMiddleware(s.Config.ConfigStore, s.WSTicketStore, s.TempTokens)
+		s.AuthMiddleware, err = handlers.InitAuthMiddleware(s.Config, s.WSTicketStore, s.TempTokens)
 		if err != nil {
 			s.WSTicketStore.Stop()
 			s.WSTicketStore = nil
@@ -1532,6 +1519,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	semanticCachePlugin, err := lib.FindPluginAs[*semanticcache.Plugin](s.Config, semanticcache.PluginName)
 	if err == nil && semanticCachePlugin != nil {
 		semanticCachePlugin.SetEmbeddingRequestExecutor(s.Client.EmbeddingRequest)
+	}
+	// TenantMiddleware runs outermost so tenant ID is available to auth and handlers.
+	// API routes use OptionalMiddleware to skip JWT on whitelisted paths.
+	if s.TenantMiddleware != nil {
+		apiMiddlewares = append([]schemas.BifrostHTTPMiddleware{s.TenantMiddleware.OptionalMiddleware()}, apiMiddlewares...)
 	}
 	// Register routes
 	err = s.RegisterAPIRoutes(s.Ctx, s, apiMiddlewares...)
@@ -1567,6 +1559,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// Order: Tracing.pre → TransportInterceptor.pre → handler → TransportInterceptor.post → Tracing.defer
 	inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{handlers.TransportInterceptorMiddleware(s.Config)}, inferenceMiddlewares...)
 	inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{s.TracingMiddleware.Middleware()}, inferenceMiddlewares...)
+	if s.TenantMiddleware != nil {
+		inferenceMiddlewares = append([]schemas.BifrostHTTPMiddleware{s.TenantMiddleware.Middleware()}, inferenceMiddlewares...)
+	}
 
 	err = s.RegisterInferenceRoutes(s.Ctx, inferenceMiddlewares...)
 	if err != nil {

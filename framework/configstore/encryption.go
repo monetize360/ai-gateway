@@ -15,6 +15,19 @@ const (
 	encryptionBatchSize       = 100
 )
 
+// saveEncryptedRow persists a row via Save while targeting an existing record when the
+// in-memory primary key is empty (legacy fixtures) by falling back to a business key.
+func saveEncryptedRow(tx *gorm.DB, model any, id, businessKey, businessValue string) error {
+	switch {
+	case id != "":
+		return tx.Where("id = ?", id).Save(model).Error
+	case businessValue != "":
+		return tx.Where(businessKey+" = ?", businessValue).Save(model).Error
+	default:
+		return tx.Save(model).Error
+	}
+}
+
 // EncryptPlaintextRows encrypts all rows with encryption_status='plain_text'
 // across all sensitive tables. Called during startup when encryption is enabled.
 // Each table's GORM BeforeSave hook handles the actual encryption.
@@ -119,7 +132,7 @@ func (s *RDBConfigStore) encryptPlaintextKeys(ctx context.Context) (int, error) 
 		}
 		if err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			for i := range keys {
-				if err := tx.Save(&keys[i]).Error; err != nil {
+				if err := saveEncryptedRow(tx, &keys[i], keys[i].ID, "key_id", keys[i].KeyID); err != nil {
 					return err
 				}
 			}
@@ -299,7 +312,7 @@ func (s *RDBConfigStore) encryptPlaintextMCPClients(ctx context.Context) (int, e
 		}
 		if err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			for i := range clients {
-				if err := tx.Save(&clients[i]).Error; err != nil {
+				if err := saveEncryptedRow(tx, &clients[i], clients[i].ID, "client_id", clients[i].ClientID); err != nil {
 					return err
 				}
 			}
@@ -330,7 +343,7 @@ func (s *RDBConfigStore) encryptPlaintextProviderProxies(ctx context.Context) (i
 		}
 		if err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			for i := range providers {
-				if err := tx.Save(&providers[i]).Error; err != nil {
+				if err := saveEncryptedRow(tx, &providers[i], providers[i].ID, "name", providers[i].Name); err != nil {
 					return err
 				}
 			}
@@ -361,7 +374,7 @@ func (s *RDBConfigStore) encryptPlaintextVectorStoreConfigs(ctx context.Context)
 		}
 		if err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			for i := range configs {
-				if err := tx.Save(&configs[i]).Error; err != nil {
+				if err := saveEncryptedRow(tx, &configs[i], configs[i].ID, "type", configs[i].Type); err != nil {
 					return err
 				}
 			}
@@ -392,7 +405,7 @@ func (s *RDBConfigStore) encryptPlaintextPlugins(ctx context.Context) (int, erro
 		}
 		if err := s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			for i := range plugins {
-				if err := tx.Save(&plugins[i]).Error; err != nil {
+				if err := saveEncryptedRow(tx, &plugins[i], plugins[i].ID, "name", plugins[i].Name); err != nil {
 					return err
 				}
 			}

@@ -46,6 +46,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/prompts"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
+	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
 )
 
@@ -156,8 +157,8 @@ type ConfigData struct {
 	MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
 	Governance        *configstore.GovernanceConfig         `json:"governance,omitempty"`
 	VectorStoreConfig *vectorstore.Config                   `json:"vector_store,omitempty"`
-	ConfigStoreConfig *configstore.Config                   `json:"config_store,omitempty"`
 	LogsStoreConfig   *logstore.Config                      `json:"logs_store,omitempty"`
+	TenantStoreConfig *TenantStoreFileConfig                `json:"tenant_store,omitempty"`
 	Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
 	WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 	FeatureFlags      *FeatureFlagsFileConfig               `json:"feature_flags,omitempty"`
@@ -234,8 +235,8 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 		MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
 		Governance        *configstore.GovernanceConfig         `json:"governance,omitempty"`
 		VectorStoreConfig json.RawMessage                       `json:"vector_store,omitempty"`
-		ConfigStoreConfig json.RawMessage                       `json:"config_store,omitempty"`
 		LogsStoreConfig   json.RawMessage                       `json:"logs_store,omitempty"`
+		TenantStoreConfig *TenantStoreFileConfig                `json:"tenant_store,omitempty"`
 		Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
 		WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 		FeatureFlags      *FeatureFlagsFileConfig               `json:"feature_flags,omitempty"`
@@ -257,6 +258,7 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	cd.Plugins = temp.Plugins
 	cd.WebSocket = temp.WebSocket
 	cd.FeatureFlags = temp.FeatureFlags
+	cd.TenantStoreConfig = temp.TenantStoreConfig
 	// Initialize providers map if nil
 	if cd.Providers == nil {
 		cd.Providers = make(map[string]configstore.ProviderConfig)
@@ -278,15 +280,6 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("failed to unmarshal framework config: %w", err)
 		}
 		cd.FrameworkConfig = &frameworkConfig
-	}
-
-	// Parse ConfigStoreConfig using its internal unmarshaler
-	if len(temp.ConfigStoreConfig) > 0 {
-		var configStoreConfig configstore.Config
-		if err := json.Unmarshal(temp.ConfigStoreConfig, &configStoreConfig); err != nil {
-			return fmt.Errorf("failed to unmarshal config store config: %w", err)
-		}
-		cd.ConfigStoreConfig = &configStoreConfig
 	}
 
 	// Parse LogsStoreConfig using its internal unmarshaler
@@ -318,14 +311,19 @@ type Config struct {
 
 	configPath string
 
-	// Stores
-	ConfigStore configstore.ConfigStore
+	// Stores (config data lives in per-tenant Postgres via TenantStore)
 	VectorStore vectorstore.VectorStore
 	LogsStore   logstore.LogStore
+
+	// Multi-tenant (nil when tenant_store.enabled is false)
+	TenantStoreConfig *TenantStoreFileConfig
+	TenantStore       *TenantStoreHolder
 
 	// In-memory storage
 	ClientConfig     *configstore.ClientConfig
 	Providers        map[schemas.ModelProvider]configstore.ProviderConfig
+	tenantProvidersMu sync.RWMutex
+	tenantProviders   map[string]map[schemas.ModelProvider]configstore.ProviderConfig
 	MCPConfig        *schemas.MCPConfig
 	GovernanceConfig *configstore.GovernanceConfig
 	FrameworkConfig  *framework.FrameworkConfig
@@ -549,7 +547,6 @@ func registerFeatureFlags(_ context.Context) error {
 //   - Graceful handling of missing config files
 func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	configFilePath := filepath.Join(configDirPath, "config.json")
-	configDBPath := filepath.Join(configDirPath, "config.db")
 	logsDBPath := filepath.Join(configDirPath, "logs.db")
 	// Initialize config
 	config := &Config{
@@ -642,8 +639,11 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		return nil, err
 	}
 	// 2. Stores (config, logs, vector) — creates defaults for absent configs
-	if err := initStores(ctx, config, &configData, configDBPath, logsDBPath); err != nil {
+	if err := initStores(ctx, config, &configData, logsDBPath); err != nil {
 		return nil, err
+	}
+	if configData.TenantStoreConfig == nil || !configData.TenantStoreConfig.Enabled {
+		return nil, fmt.Errorf("tenant_store.enabled must be true; filesystem config store is no longer supported")
 	}
 	// 3. KV store
 	if err := initKVStore(config); err != nil {
@@ -681,43 +681,13 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		wsConfig.CheckAndSetDefaults()
 		config.WebSocketConfig = wsConfig
 	}
+	config.TenantStoreConfig = configData.TenantStoreConfig
 	return config, nil
 }
 
-// initStores initializes config, logs, and vector stores.
-// When config data sections are absent (nil), creates default SQLite stores for persistence.
-func initStores(ctx context.Context, config *Config, configData *ConfigData, configDBPath, logsDBPath string) error {
+// initStores initializes logs and vector stores.
+func initStores(ctx context.Context, config *Config, configData *ConfigData, logsDBPath string) error {
 	var err error
-	// Initialize config store
-	if configData.ConfigStoreConfig != nil && configData.ConfigStoreConfig.Enabled {
-		// Explicit config store configuration from config.json
-		config.ConfigStore, err = configstore.NewConfigStore(ctx, configData.ConfigStoreConfig, logger)
-		if err != nil {
-			return err
-		}
-		logger.Info("config store initialized")
-	} else if configData.ConfigStoreConfig == nil {
-		// No config store section — create default SQLite store for persistence
-		config.ConfigStore, err = configstore.NewConfigStore(ctx, &configstore.Config{
-			Enabled: true,
-			Type:    configstore.ConfigStoreTypeSQLite,
-			Config: &configstore.SQLiteConfig{
-				Path: configDBPath,
-			},
-		}, logger)
-		if err != nil {
-			return fmt.Errorf("failed to initialize default config store: %w", err)
-		}
-		logger.Info("config store initialized (default SQLite)")
-	}
-	// else: ConfigStoreConfig is present but Enabled == false — leave ConfigStore nil
-
-	// Clear restart required flag on server startup
-	if config.ConfigStore != nil {
-		if err = config.ConfigStore.ClearRestartRequiredConfig(ctx); err != nil {
-			logger.Warn("failed to clear restart required config: %v", err)
-		}
-	}
 
 	// Initialize log store
 	if configData.LogsStoreConfig != nil && configData.LogsStoreConfig.Enabled {
@@ -728,23 +698,12 @@ func initStores(ctx context.Context, config *Config, configData *ConfigData, con
 		}
 		logger.Info("logs store initialized")
 	} else if configData.LogsStoreConfig == nil {
-		// No logs store section — check DB for stored config (if available), then fall back to default SQLite
-		var logStoreConfig *logstore.Config
-		if config.ConfigStore != nil {
-			var dbErr error
-			logStoreConfig, dbErr = config.ConfigStore.GetLogsStoreConfig(ctx)
-			if dbErr != nil {
-				return fmt.Errorf("failed to get logs store config: %w", dbErr)
-			}
-		}
-		if logStoreConfig == nil {
-			logStoreConfig = &logstore.Config{
+		logStoreConfig := &logstore.Config{
 				Enabled: true,
 				Type:    logstore.LogStoreTypeSQLite,
 				Config: &logstore.SQLiteConfig{
 					Path: logsDBPath,
 				},
-			}
 		}
 		config.LogsStore, err = logstore.NewLogStore(ctx, logStoreConfig, logger)
 		if err != nil {
@@ -775,11 +734,6 @@ func initStores(ctx context.Context, config *Config, configData *ConfigData, con
 			}
 		}
 		logger.Info("logs store initialized")
-		if config.ConfigStore != nil {
-			if err = config.ConfigStore.UpdateLogsStoreConfig(ctx, logStoreConfig); err != nil {
-				return fmt.Errorf("failed to update logs store config: %w", err)
-			}
-		}
 	}
 
 	// Initialize vector store (only if explicitly configured)
@@ -788,11 +742,6 @@ func initStores(ctx context.Context, config *Config, configData *ConfigData, con
 		config.VectorStore, err = vectorstore.NewVectorStore(ctx, configData.VectorStoreConfig, logger)
 		if err != nil {
 			logger.Fatal("failed to connect to vector store: %v", err)
-		}
-		if config.ConfigStore != nil {
-			if err = config.ConfigStore.UpdateVectorStoreConfig(ctx, configData.VectorStoreConfig); err != nil {
-				logger.Warn("failed to update vector store config: %v", err)
-			}
 		}
 	}
 	return nil
@@ -852,8 +801,8 @@ func sanitizeMCPExternalOAuthURLs(client *configstore.ClientConfig) {
 func loadClientConfig(ctx context.Context, config *Config, configData *ConfigData) {
 	var clientConfig *configstore.ClientConfig
 	var err error
-	if config.ConfigStore != nil {
-		clientConfig, err = config.ConfigStore.GetClientConfig(ctx)
+	if config.StoreFromContext(ctx) != nil {
+		clientConfig, err = config.StoreFromContext(ctx).GetClientConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get client config from store: %v", err)
 		}
@@ -889,9 +838,9 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 				config.ClientConfig.ConfigHash = defaultHash
 			}
 		}
-		if config.ConfigStore != nil {
+		if config.StoreFromContext(ctx) != nil {
 			logger.Debug("updating client config in store")
-			if err = config.ConfigStore.UpdateClientConfig(ctx, config.ClientConfig); err != nil {
+			if err = config.StoreFromContext(ctx).UpdateClientConfig(ctx, config.ClientConfig); err != nil {
 				logger.Warn("failed to update client config: %v", err)
 			}
 		}
@@ -924,8 +873,8 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 		logger.Info("upgrading config hash to include mcp.tool_manager_config; applying tool manager settings from file, client config preserved from DB")
 		applyToolManagerToClientConfig(config.ClientConfig, toolManagerFromFile)
 		config.ClientConfig.ConfigHash = fileHash
-		if config.ConfigStore != nil {
-			if err = config.ConfigStore.UpdateClientConfig(ctx, config.ClientConfig); err != nil {
+		if config.StoreFromContext(ctx) != nil {
+			if err = config.StoreFromContext(ctx).UpdateClientConfig(ctx, config.ClientConfig); err != nil {
 				logger.Warn("failed to update client config: %v", err)
 			}
 		}
@@ -937,9 +886,9 @@ func loadClientConfig(ctx context.Context, config *Config, configData *ConfigDat
 		config.ClientConfig.ConfigHash = fileHash
 		applyClientConfigDefaults(config.ClientConfig)
 		applyToolManagerToClientConfig(config.ClientConfig, toolManagerFromFile)
-		if config.ConfigStore != nil {
+		if config.StoreFromContext(ctx) != nil {
 			logger.Debug("updating client config in store from file")
-			if err = config.ConfigStore.UpdateClientConfig(ctx, config.ClientConfig); err != nil {
+			if err = config.StoreFromContext(ctx).UpdateClientConfig(ctx, config.ClientConfig); err != nil {
 				logger.Warn("failed to update client config: %v", err)
 			}
 		}
@@ -976,9 +925,9 @@ func applyToolManagerToClientConfig(cc *configstore.ClientConfig, tm *schemas.MC
 func loadProviders(ctx context.Context, config *Config, configData *ConfigData) error {
 	var providersInConfigStore map[schemas.ModelProvider]configstore.ProviderConfig
 	var err error
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("getting providers config from store")
-		providersInConfigStore, err = config.ConfigStore.GetProvidersConfig(ctx)
+		providersInConfigStore, err = config.StoreFromContext(ctx).GetProvidersConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get providers config from store: %v", err)
 		}
@@ -1000,9 +949,9 @@ func loadProviders(ctx context.Context, config *Config, configData *ConfigData) 
 		maps.Copy(providersInConfigStore, config.Providers)
 	}
 	// Update store and config
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("updating providers config in store")
-		if err = config.ConfigStore.UpdateProvidersConfig(ctx, providersInConfigStore); err != nil {
+		if err = config.StoreFromContext(ctx).UpdateProvidersConfig(ctx, providersInConfigStore); err != nil {
 			logger.Fatal("failed to update providers config: %v", err)
 		}
 	}
@@ -1240,7 +1189,7 @@ func reconcileProviderKeys(provider schemas.ModelProvider, fileKeys, dbKeys []sc
 
 // loadMCPConfig loads and merges MCP config from file
 func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) {
-	if config.ConfigStore == nil {
+	if config.StoreFromContext(ctx) == nil {
 		if configData.MCP != nil && len(configData.MCP.ClientConfigs) > 0 {
 			logger.Warn("config store is disabled - MCP manager will not be initialized. MCP clients require config store for persistence.")
 		}
@@ -1262,9 +1211,9 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 		configData.MCP.ClientConfigs = valid
 	}
 
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("getting MCP config from store")
-		tableMCPConfig, err := config.ConfigStore.GetMCPConfig(ctx)
+		tableMCPConfig, err := config.StoreFromContext(ctx).GetMCPConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get MCP config from store: %v", err)
 		} else if tableMCPConfig != nil {
@@ -1281,14 +1230,14 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 		// MCP config not in store, use config file
 		logger.Debug("no MCP config found in store, processing from config file")
 		config.MCPConfig = configData.MCP
-		if config.ConfigStore != nil && config.MCPConfig != nil {
+		if config.StoreFromContext(ctx) != nil && config.MCPConfig != nil {
 			logger.Debug("updating MCP config in store")
 			for _, clientConfig := range config.MCPConfig.ClientConfigs {
 				if clientConfig != nil {
 					if clientConfig.ID == "" {
 						clientConfig.ID = uuid.NewString()
 					}
-					if err := config.ConfigStore.CreateMCPClientConfig(ctx, clientConfig); err != nil {
+					if err := config.StoreFromContext(ctx).CreateMCPClientConfig(ctx, clientConfig); err != nil {
 						logger.Warn("failed to create MCP client config: %v", err)
 					}
 				}
@@ -1358,18 +1307,18 @@ func mergeMCPConfig(ctx context.Context, config *Config, configData *ConfigData,
 	// Add new client configs to existing ones.
 	config.MCPConfig.ClientConfigs = append(mcpConfig.ClientConfigs, clientConfigsToAdd...)
 	// Persist additions and config-driven updates.
-	if config.ConfigStore != nil && (len(clientConfigsToAdd) > 0 || len(clientConfigsToUpdate) > 0) {
+	if config.StoreFromContext(ctx) != nil && (len(clientConfigsToAdd) > 0 || len(clientConfigsToUpdate) > 0) {
 		logger.Debug("updating MCP config in store with %d new clients and %d updated clients", len(clientConfigsToAdd), len(clientConfigsToUpdate))
 		for _, clientConfig := range clientConfigsToAdd {
 			if clientConfig != nil {
-				if err := config.ConfigStore.CreateMCPClientConfig(ctx, clientConfig); err != nil {
+				if err := config.StoreFromContext(ctx).CreateMCPClientConfig(ctx, clientConfig); err != nil {
 					logger.Warn("failed to create MCP client config: %v", err)
 				}
 			}
 		}
 		for i := range clientConfigsToUpdate {
 			update := clientConfigsToUpdate[i]
-			if err := config.ConfigStore.UpdateMCPClientConfig(ctx, update.ClientID, &update); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateMCPClientConfig(ctx, update.ClientID, &update); err != nil {
 				logger.Warn("failed to update MCP client config %q: %v", update.Name, err)
 			}
 		}
@@ -1419,8 +1368,8 @@ func applyMCPGlobalSettingsToClientConfig(ctx context.Context, config *Config, m
 		}
 	}
 
-	if changed && config.ConfigStore != nil {
-		if err := config.ConfigStore.UpdateClientConfig(ctx, config.ClientConfig); err != nil {
+	if changed && config.StoreFromContext(ctx) != nil {
+		if err := config.StoreFromContext(ctx).UpdateClientConfig(ctx, config.ClientConfig); err != nil {
 			logger.Warn("failed to update client config with MCP global settings: %v", err)
 		}
 	}
@@ -1475,14 +1424,14 @@ func loadGovernanceConfig(ctx context.Context, config *Config, configData *Confi
 	var governanceConfig *configstore.GovernanceConfig
 	var err error
 	// Checking from the store
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("getting governance config from store")
-		governanceConfig, err = config.ConfigStore.GetGovernanceConfig(ctx)
+		governanceConfig, err = config.StoreFromContext(ctx).GetGovernanceConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get governance config from store: %v", err)
 		}
 	} else {
-		logger.Debug("config.ConfigStore is nil, skipping store lookup")
+		logger.Debug("config.StoreFromContext(ctx) is nil, skipping store lookup")
 	}
 	// Merging config
 	if governanceConfig != nil {
@@ -1533,11 +1482,11 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 	if !usesNameRefs {
 		return nil
 	}
-	if config.ConfigStore == nil {
+	if config.StoreFromContext(ctx) == nil {
 		return fmt.Errorf("provider_key_name references require config store for key lookup")
 	}
 
-	return config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	return config.StoreFromContext(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		resolveProviderKeyIDByProviderAndName := func(provider string, keyName string) (string, error) {
 			var key configstoreTables.TableKey
 			err := tx.WithContext(ctx).
@@ -1792,7 +1741,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 					}
 					// Resolve MCP client names to IDs for config file mcp_configs
 					configData.Governance.VirtualKeys[i].MCPConfigs = resolveMCPConfigClientIDs(
-						ctx, config.ConfigStore, configData.Governance.VirtualKeys[i].MCPConfigs, newVirtualKey.ID)
+						ctx, config.StoreFromContext(ctx), configData.Governance.VirtualKeys[i].MCPConfigs, newVirtualKey.ID)
 					virtualKeysToUpdate = append(virtualKeysToUpdate, configData.Governance.VirtualKeys[i])
 					governanceConfig.VirtualKeys[j] = configData.Governance.VirtualKeys[i]
 				} else {
@@ -1822,7 +1771,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			}
 			// Resolve MCP client names to IDs for config file mcp_configs
 			configData.Governance.VirtualKeys[i].MCPConfigs = resolveMCPConfigClientIDs(
-				ctx, config.ConfigStore, configData.Governance.VirtualKeys[i].MCPConfigs, newVirtualKey.ID)
+				ctx, config.StoreFromContext(ctx), configData.Governance.VirtualKeys[i].MCPConfigs, newVirtualKey.ID)
 			virtualKeysToAdd = append(virtualKeysToAdd, configData.Governance.VirtualKeys[i])
 		}
 	}
@@ -1977,7 +1926,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 		len(pricingOverridesToAdd) > 0 || len(pricingOverridesToUpdate) > 0 ||
 		len(modelConfigsToAdd) > 0 || len(modelConfigsToUpdate) > 0 ||
 		len(providersToAdd) > 0 || len(providersToUpdate) > 0
-	if config.ConfigStore != nil && hasChanges {
+	if config.StoreFromContext(ctx) != nil && hasChanges {
 		err := updateGovernanceConfigInStore(ctx, config,
 			budgetsToAdd, budgetsToUpdate,
 			rateLimitsToAdd, rateLimitsToUpdate,
@@ -2034,24 +1983,17 @@ func updateGovernanceConfigInStore(
 	providersToUpdate []configstoreTables.TableProvider,
 ) error {
 	logger.Debug("updating governance config in store with merged items")
-	return config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	return config.StoreFromContext(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		// Owner-scoped budgets require owner rows to exist first:
-		// - team_id -> governance_teams
 		// - virtual_key_id -> governance_virtual_keys
 		// - provider_config_id -> governance_virtual_key_provider_configs
-		pendingTeamBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgetsToAdd := make([]configstoreTables.TableBudget, 0)
-		pendingTeamBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgetsToUpdate := make([]configstoreTables.TableBudget, 0)
 
 		// Create budgets
 		for _, budget := range budgetsToAdd {
-			if budget.TeamID != nil {
-				pendingTeamBudgetsToAdd = append(pendingTeamBudgetsToAdd, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgetsToAdd = append(pendingVirtualKeyBudgetsToAdd, budget)
 				continue
@@ -2060,17 +2002,13 @@ func updateGovernanceConfigInStore(
 				pendingProviderConfigBudgetsToAdd = append(pendingProviderConfigBudgetsToAdd, budget)
 				continue
 			}
-			if err := config.ConfigStore.CreateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Update budgets (config.json changed)
 		for _, budget := range budgetsToUpdate {
-			if budget.TeamID != nil {
-				pendingTeamBudgetsToUpdate = append(pendingTeamBudgetsToUpdate, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgetsToUpdate = append(pendingVirtualKeyBudgetsToUpdate, budget)
 				continue
@@ -2079,64 +2017,50 @@ func updateGovernanceConfigInStore(
 				pendingProviderConfigBudgetsToUpdate = append(pendingProviderConfigBudgetsToUpdate, budget)
 				continue
 			}
-			if err := config.ConfigStore.UpdateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to update budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Create rate limits
 		for _, rateLimit := range rateLimitsToAdd {
-			if err := config.ConfigStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return fmt.Errorf("failed to create rate limit %s: %w", rateLimit.ID, err)
 			}
 		}
 
 		// Update rate limits (config.json changed)
 		for _, rateLimit := range rateLimitsToUpdate {
-			if err := config.ConfigStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return fmt.Errorf("failed to update rate limit %s: %w", rateLimit.ID, err)
 			}
 		}
 
 		// Create customers
 		for _, customer := range customersToAdd {
-			if err := config.ConfigStore.CreateCustomer(ctx, &customer, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateCustomer(ctx, &customer, tx); err != nil {
 				return fmt.Errorf("failed to create customer %s: %w", customer.ID, err)
 			}
 		}
 
 		// Update customers (config.json changed)
 		for _, customer := range customersToUpdate {
-			if err := config.ConfigStore.UpdateCustomer(ctx, &customer, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateCustomer(ctx, &customer, tx); err != nil {
 				return fmt.Errorf("failed to update customer %s: %w", customer.ID, err)
 			}
 		}
 
 		// Create teams
 		for _, team := range teamsToAdd {
-			if err := config.ConfigStore.CreateTeam(ctx, &team, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateTeam(ctx, &team, tx); err != nil {
 				return fmt.Errorf("failed to create team %s: %w", team.ID, err)
 			}
 		}
 
 		// Update teams (config.json changed)
 		for _, team := range teamsToUpdate {
-			if err := config.ConfigStore.UpdateTeam(ctx, &team, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateTeam(ctx, &team, tx); err != nil {
 				return fmt.Errorf("failed to update team %s: %w", team.ID, err)
-			}
-		}
-
-		// Create team-owned budgets after teams exist.
-		for _, budget := range pendingTeamBudgetsToAdd {
-			if err := config.ConfigStore.CreateBudget(ctx, &budget, tx); err != nil {
-				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
-			}
-		}
-
-		// Update team-owned budgets after teams exist.
-		for _, budget := range pendingTeamBudgetsToUpdate {
-			if err := config.ConfigStore.UpdateBudget(ctx, &budget, tx); err != nil {
-				return fmt.Errorf("failed to update budget %s: %w", budget.ID, err)
 			}
 		}
 
@@ -2148,18 +2072,18 @@ func updateGovernanceConfigInStore(
 			virtualKey.ProviderConfigs = nil
 			virtualKey.MCPConfigs = nil
 			// Here we wll filter provider / keys that are not available
-			if err := config.ConfigStore.CreateVirtualKey(ctx, virtualKey, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
 				return fmt.Errorf("failed to create virtual key %s: %w", virtualKey.ID, err)
 			}
 			for j := range providerConfigs {
 				providerConfigs[j].VirtualKeyID = virtualKey.ID
-				if err := config.ConfigStore.CreateVirtualKeyProviderConfig(ctx, &providerConfigs[j], tx); err != nil {
+				if err := config.StoreFromContext(ctx).CreateVirtualKeyProviderConfig(ctx, &providerConfigs[j], tx); err != nil {
 					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 				}
 			}
 			for j := range mcpConfigs {
 				mcpConfigs[j].VirtualKeyID = virtualKey.ID
-				if err := config.ConfigStore.CreateVirtualKeyMCPConfig(ctx, &mcpConfigs[j], tx); err != nil {
+				if err := config.StoreFromContext(ctx).CreateVirtualKeyMCPConfig(ctx, &mcpConfigs[j], tx); err != nil {
 					return fmt.Errorf("failed to create MCP config for virtual key %s: %w", virtualKey.ID, err)
 				}
 			}
@@ -2170,66 +2094,66 @@ func updateGovernanceConfigInStore(
 
 		// Update virtual keys (config.json changed)
 		for _, virtualKey := range virtualKeysToUpdate {
-			if err := reconcileVirtualKeyAssociations(ctx, config.ConfigStore, tx, virtualKey.ID, virtualKey.ProviderConfigs, virtualKey.MCPConfigs); err != nil {
+			if err := reconcileVirtualKeyAssociations(ctx, config.StoreFromContext(ctx), tx, virtualKey.ID, virtualKey.ProviderConfigs, virtualKey.MCPConfigs); err != nil {
 				return fmt.Errorf("failed to reconcile associations for virtual key %s: %w", virtualKey.ID, err)
 			}
-			if err := config.ConfigStore.UpdateVirtualKey(ctx, &virtualKey, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateVirtualKey(ctx, &virtualKey, tx); err != nil {
 				return fmt.Errorf("failed to update virtual key %s: %w", virtualKey.ID, err)
 			}
 		}
 
 		// Create virtual-key-owned budgets after virtual keys exist.
 		for _, budget := range pendingVirtualKeyBudgetsToAdd {
-			if err := config.ConfigStore.CreateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Update virtual-key-owned budgets after virtual keys exist.
 		for _, budget := range pendingVirtualKeyBudgetsToUpdate {
-			if err := config.ConfigStore.UpdateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to update budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Create provider-config-owned budgets after virtual key provider configs exist.
 		for _, budget := range pendingProviderConfigBudgetsToAdd {
-			if err := config.ConfigStore.CreateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Update provider-config-owned budgets after virtual key provider configs exist.
 		for _, budget := range pendingProviderConfigBudgetsToUpdate {
-			if err := config.ConfigStore.UpdateBudget(ctx, &budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
 				return fmt.Errorf("failed to update budget %s: %w", budget.ID, err)
 			}
 		}
 
 		// Create routing rules (new from config.json)
 		for _, rule := range routingRulesToAdd {
-			if err := config.ConfigStore.CreateRoutingRule(ctx, &rule, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateRoutingRule(ctx, &rule, tx); err != nil {
 				return fmt.Errorf("failed to create routing rule %s: %w", rule.ID, err)
 			}
 		}
 
 		// Update routing rules (config.json changed)
 		for _, rule := range routingRulesToUpdate {
-			if err := config.ConfigStore.UpdateRoutingRule(ctx, &rule, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateRoutingRule(ctx, &rule, tx); err != nil {
 				return fmt.Errorf("failed to update routing rule %s: %w", rule.ID, err)
 			}
 		}
 
 		// Create pricing overrides (new from config.json)
 		for _, override := range pricingOverridesToAdd {
-			if err := config.ConfigStore.CreatePricingOverride(ctx, &override, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreatePricingOverride(ctx, &override, tx); err != nil {
 				return fmt.Errorf("failed to create pricing override %s: %w", override.ID, err)
 			}
 		}
 
 		// Update pricing overrides (config.json changed)
 		for _, override := range pricingOverridesToUpdate {
-			if err := config.ConfigStore.UpdatePricingOverride(ctx, &override, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdatePricingOverride(ctx, &override, tx); err != nil {
 				return fmt.Errorf("failed to update pricing override %s: %w", override.ID, err)
 			}
 		}
@@ -2238,7 +2162,7 @@ func updateGovernanceConfigInStore(
 			if err := validateModelConfigGovernanceOwnership(tx, modelConfig); err != nil {
 				return err
 			}
-			if err := config.ConfigStore.CreateModelConfig(ctx, &modelConfig, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateModelConfig(ctx, &modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to create model config %s: %w", modelConfig.ID, err)
 			}
 		}
@@ -2248,7 +2172,7 @@ func updateGovernanceConfigInStore(
 			if err := validateModelConfigGovernanceOwnership(tx, modelConfig); err != nil {
 				return err
 			}
-			if err := config.ConfigStore.UpdateModelConfig(ctx, &modelConfig, tx); err != nil {
+			if err := config.StoreFromContext(ctx).UpdateModelConfig(ctx, &modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to update model config %s: %w", modelConfig.ID, err)
 			}
 		}
@@ -2345,14 +2269,14 @@ func validateBudgetLinkOwnership(tx *gorm.DB, budgetID *string, ownerType, owner
 	}
 
 	var budget configstoreTables.TableBudget
-	if err := tx.Select("id", "team_id", "virtual_key_id", "provider_config_id").Where("id = ?", id).First(&budget).Error; err != nil {
+	if err := tx.Select("id", "virtual_key_id", "provider_config_id").Where("id = ?", id).First(&budget).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("budget_id %q referenced by %s %q does not exist", id, ownerType, ownerID)
 		}
 		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerID, err)
 	}
 
-	if budget.TeamID != nil || budget.VirtualKeyID != nil || budget.ProviderConfigID != nil {
+	if budget.VirtualKeyID != nil || budget.ProviderConfigID != nil {
 		return fmt.Errorf("budget_id %q is already owned by another governance entity and cannot be linked to %s %q", id, ownerType, ownerID)
 	}
 
@@ -2435,7 +2359,7 @@ func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID *string, ownerType,
 		Where("rate_limit_id = ?", id).
 		Select("id").
 		First(&vkOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to virtual-key provider config %d; cannot link to %s %q", id, vkOwner.ID, ownerType, ownerID)
+		return fmt.Errorf("rate_limit_id %q is already linked to virtual-key provider config %s; cannot link to %s %q", id, vkOwner.ID, ownerType, ownerID)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
 	}
@@ -2445,7 +2369,7 @@ func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID *string, ownerType,
 
 // createGovernanceConfigInStore creates governance config in store from config file
 func createGovernanceConfigInStore(ctx context.Context, config *Config) {
-	if config.ConfigStore == nil {
+	if config.StoreFromContext(ctx) == nil {
 		logger.Debug("createGovernanceConfigInStore: ConfigStore is nil, skipping")
 		return
 	}
@@ -2454,7 +2378,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 		len(config.GovernanceConfig.RateLimits),
 		len(config.GovernanceConfig.VirtualKeys),
 		len(config.GovernanceConfig.RoutingRules))
-	if err := config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+	if err := config.StoreFromContext(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		createBudget := func(budget *configstoreTables.TableBudget) error {
 			budgetHash, err := configstore.GenerateBudgetHash(*budget)
 			if err != nil {
@@ -2462,25 +2386,19 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				budget.ConfigHash = budgetHash
 			}
-			if err := config.ConfigStore.CreateBudget(ctx, budget, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateBudget(ctx, budget, tx); err != nil {
 				return fmt.Errorf("failed to create budget %s: %w", budget.ID, err)
 			}
 			return nil
 		}
 
 		// Owner-scoped budgets require owner rows to exist first:
-		// - team_id -> governance_teams
 		// - virtual_key_id -> governance_virtual_keys
 		// - provider_config_id -> governance_virtual_key_provider_configs
-		pendingTeamBudgets := make([]*configstoreTables.TableBudget, 0)
 		pendingVirtualKeyBudgets := make([]*configstoreTables.TableBudget, 0)
 		pendingProviderConfigBudgets := make([]*configstoreTables.TableBudget, 0)
 		for i := range config.GovernanceConfig.Budgets {
 			budget := &config.GovernanceConfig.Budgets[i]
-			if budget.TeamID != nil {
-				pendingTeamBudgets = append(pendingTeamBudgets, budget)
-				continue
-			}
 			if budget.VirtualKeyID != nil {
 				pendingVirtualKeyBudgets = append(pendingVirtualKeyBudgets, budget)
 				continue
@@ -2502,7 +2420,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				rateLimit.ConfigHash = rlHash
 			}
-			if err := config.ConfigStore.CreateRateLimit(ctx, rateLimit, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateRateLimit(ctx, rateLimit, tx); err != nil {
 				return fmt.Errorf("failed to create rate limit %s: %w", rateLimit.ID, err)
 			}
 		}
@@ -2517,7 +2435,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				modelConfig.ConfigHash = modelConfigHash
 			}
-			if err := config.ConfigStore.CreateModelConfig(ctx, modelConfig, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateModelConfig(ctx, modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to create model config %s: %w", modelConfig.ID, err)
 			}
 		}
@@ -2553,7 +2471,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				customer.ConfigHash = customerHash
 			}
-			if err := config.ConfigStore.CreateCustomer(ctx, customer, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateCustomer(ctx, customer, tx); err != nil {
 				return fmt.Errorf("failed to create customer %s: %w", customer.ID, err)
 			}
 		}
@@ -2566,14 +2484,8 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				team.ConfigHash = teamHash
 			}
-			if err := config.ConfigStore.CreateTeam(ctx, team, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateTeam(ctx, team, tx); err != nil {
 				return fmt.Errorf("failed to create team %s: %w", team.ID, err)
-			}
-		}
-
-		for _, budget := range pendingTeamBudgets {
-			if err := createBudget(budget); err != nil {
-				return err
 			}
 		}
 
@@ -2585,7 +2497,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				rule.ConfigHash = ruleHash
 			}
-			if err := config.ConfigStore.CreateRoutingRule(ctx, rule, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateRoutingRule(ctx, rule, tx); err != nil {
 				return fmt.Errorf("failed to create routing rule %s: %w", rule.ID, err)
 			}
 		}
@@ -2604,7 +2516,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			virtualKey.ProviderConfigs = nil
 			virtualKey.MCPConfigs = nil
 
-			if err := config.ConfigStore.CreateVirtualKey(ctx, virtualKey, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
 				logger.Error("failed to create virtual key %s: %v", virtualKey.ID, err)
 				return fmt.Errorf("failed to create virtual key %s: %w", virtualKey.ID, err)
 			}
@@ -2613,18 +2525,18 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			for _, pc := range providerConfigs {
 				pc.VirtualKeyID = virtualKey.ID
 				logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
-				if err := config.ConfigStore.CreateVirtualKeyProviderConfig(ctx, &pc, tx); err != nil {
+				if err := config.StoreFromContext(ctx).CreateVirtualKeyProviderConfig(ctx, &pc, tx); err != nil {
 					logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
 					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 				}
 			}
 
 			// Resolve MCP client names to IDs for config file mcp_configs
-			mcpConfigs = resolveMCPConfigClientIDs(ctx, config.ConfigStore, mcpConfigs, virtualKey.ID)
+			mcpConfigs = resolveMCPConfigClientIDs(ctx, config.StoreFromContext(ctx), mcpConfigs, virtualKey.ID)
 
 			for _, mc := range mcpConfigs {
 				mc.VirtualKeyID = virtualKey.ID
-				if err := config.ConfigStore.CreateVirtualKeyMCPConfig(ctx, &mc, tx); err != nil {
+				if err := config.StoreFromContext(ctx).CreateVirtualKeyMCPConfig(ctx, &mc, tx); err != nil {
 					return fmt.Errorf("failed to create MCP config for virtual key %s: %w", virtualKey.ID, err)
 				}
 			}
@@ -2665,7 +2577,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 				return fmt.Errorf("failed to generate pricing override hash for %s: %w", override.ID, err)
 			}
 			override.ConfigHash = overrideHash
-			if err := config.ConfigStore.CreatePricingOverride(ctx, override, tx); err != nil {
+			if err := config.StoreFromContext(ctx).CreatePricingOverride(ctx, override, tx); err != nil {
 				return fmt.Errorf("failed to create pricing override %s: %w", override.ID, err)
 			}
 		}
@@ -2709,7 +2621,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 	if config.GovernanceConfig == nil {
 		config.GovernanceConfig = &configstore.GovernanceConfig{}
 	}
-	if config.ConfigStore == nil {
+	if config.StoreFromContext(ctx) == nil {
 		logger.Warn("config store is required to load auth config from file")
 		if hasFileConfig {
 			config.GovernanceConfig.AuthConfig = configData.AuthConfig
@@ -2717,7 +2629,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		return
 	}
 	// Load existing auth config from DB
-	dbAuthConfig, err := config.ConfigStore.GetAuthConfig(ctx)
+	dbAuthConfig, err := config.StoreFromContext(ctx).GetAuthConfig(ctx)
 	if err != nil {
 		logger.Warn("failed to get auth config from store: %v", err)
 		return
@@ -2775,7 +2687,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		}
 		if !passwordMatch {
 			// Here we nuke all sessions
-			if err := config.ConfigStore.FlushSessions(ctx); err != nil {
+			if err := config.StoreFromContext(ctx).FlushSessions(ctx); err != nil {
 				logger.Warn("failed to flush sessions: %v", err)
 			}
 		}
@@ -2802,7 +2714,7 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 		DisableAuthOnInference: authConfig.DisableAuthOnInference,
 	}
 	// Persist to config store
-	if err := config.ConfigStore.UpdateAuthConfig(ctx, config.GovernanceConfig.AuthConfig); err != nil {
+	if err := config.StoreFromContext(ctx).UpdateAuthConfig(ctx, config.GovernanceConfig.AuthConfig); err != nil {
 		logger.Warn("failed to update auth config: %v", err)
 	}
 }
@@ -2810,9 +2722,9 @@ func loadAuthConfig(ctx context.Context, config *Config, configData *ConfigData)
 // loadPlugins loads and merges plugins from file
 func loadPlugins(ctx context.Context, config *Config, configData *ConfigData) {
 	// First load plugins from DB
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("getting plugins from store")
-		plugins, err := config.ConfigStore.GetPlugins(ctx)
+		plugins, err := config.StoreFromContext(ctx).GetPlugins(ctx)
 		if err != nil {
 			logger.Warn("failed to get plugins from store: %v", err)
 		}
@@ -2899,7 +2811,7 @@ func mergePlugins(ctx context.Context, config *Config, configData *ConfigData) {
 	}
 
 	// Update store
-	if config.ConfigStore != nil {
+	if config.StoreFromContext(ctx) != nil {
 		logger.Debug("updating plugins in store")
 		for _, plugin := range config.PluginConfigs {
 			pluginConfigCopy, err := DeepCopy(plugin.Config)
@@ -2919,7 +2831,7 @@ func mergePlugins(ctx context.Context, config *Config, configData *ConfigData) {
 				Placement: plugin.Placement,
 				Order:     plugin.Order,
 			}
-			if err := config.ConfigStore.UpsertPlugin(ctx, pluginConfig); err != nil {
+			if err := config.StoreFromContext(ctx).UpsertPlugin(ctx, pluginConfig); err != nil {
 				logger.Warn("failed to update plugin: %v", err)
 			}
 		}
@@ -2978,233 +2890,45 @@ func buildMCPPricingDataFromConfig(ctx context.Context, configData *ConfigData) 
 }
 
 // ResolveFrameworkPricingConfig resolves framework pricing configuration.
-//
-// Precedence order (highest → lowest): DB > config.json > built-in defaults.
-//
-// DB values are authoritative once written — this allows runtime changes via the
-// management API to persist across restarts without requiring a config.json edit.
-// When the DB is absent or contains a corrupted/zero value the file config is used,
-// with the DB backfilled so the next startup finds a valid value.
-//
-// pricing_url supports the "env.VAR_NAME" prefix for full-string env substitution.
-// The check is explicit (strings.HasPrefix "env.") so that non-prefixed URLs are
-// never passed through the env lookup — partial/embedded references such as
-// "https://host/env.PATH" are treated as plain strings without any expansion.
-//
-// NOTE on pricingSyncInterval naming:
-// Despite its name, pricingSyncInterval is NOT a scheduling frequency.
-// It defines the minimum allowed elapsed time between sync executions.
-// The actual check occurs on a fixed ticker (syncWorkerTickerPeriod).
-// Effective sync frequency = max(syncWorkerTickerPeriod, pricingSyncInterval).
+// Model catalog data is embedded in the binary; remote URLs are no longer used.
 func ResolveFrameworkPricingConfig(
 	dbConfig *configstoreTables.TableFrameworkConfig,
-	fileConfig *framework.FrameworkConfig,
+	_ *framework.FrameworkConfig,
 ) (*configstoreTables.TableFrameworkConfig, *modelcatalog.Config, bool) {
-	defaultPricingURL := modelcatalog.DefaultPricingURL
-	defaultModelParametersURL := modelcatalog.DefaultModelParametersURL
-	defaultSyncSeconds := int64(modelcatalog.DefaultSyncInterval.Seconds())
-
-	filePricingURL := (*string)(nil)
-	fileModelParametersURL := (*string)(nil)
-	fileSyncSeconds := (*int64)(nil)
-	skipURLBackfill := false // prevent DB backfill of unresolved env references
-	skipModelParamsURLBackfill := false
-	if fileConfig != nil && fileConfig.Pricing != nil {
-		if fileConfig.Pricing.PricingURL != nil {
-			raw := *fileConfig.Pricing.PricingURL
-			if strings.HasPrefix(raw, "env.") {
-				resolvedURL, err := envutils.ProcessEnvValue(raw)
-				if err != nil {
-					logger.Warn("pricing_url: env variable not found (%v); keeping original value %q", err, raw)
-					filePricingURL = fileConfig.Pricing.PricingURL
-					skipURLBackfill = true
-				} else {
-					filePricingURL = &resolvedURL
-				}
-			} else {
-				filePricingURL = &raw
-			}
-		}
-		if fileConfig.Pricing.ModelParametersURL != nil {
-			raw := strings.TrimSpace(*fileConfig.Pricing.ModelParametersURL)
-			if raw == "" {
-				// Blank is treated as "not set"; fall back to default.
-			} else if strings.HasPrefix(raw, "env.") {
-				resolvedURL, err := envutils.ProcessEnvValue(raw)
-				if err != nil {
-					logger.Warn("model_parameters_url: env variable not found (%v); keeping original value %q", err, raw)
-					fileModelParametersURL = fileConfig.Pricing.ModelParametersURL
-					skipModelParamsURLBackfill = true
-				} else {
-					resolved := strings.TrimSpace(resolvedURL)
-					if resolved != "" {
-						fileModelParametersURL = &resolved
-					}
-				}
-			} else {
-				fileModelParametersURL = &raw
-			}
-		}
-		if fileConfig.Pricing.PricingSyncInterval != nil {
-			val := *fileConfig.Pricing.PricingSyncInterval
-			switch {
-			case val <= 0:
-				logger.Warn("pricing_sync_interval in config.json is invalid (%d seconds), ignoring — using default (%d seconds)", val, defaultSyncSeconds)
-			case val < modelcatalog.MinimumPricingSyncIntervalSec:
-				clamped := modelcatalog.MinimumPricingSyncIntervalSec
-				logger.Warn("pricing_sync_interval in config.json is below minimum (%d seconds), clamping to %d seconds", val, clamped)
-				fileSyncSeconds = &clamped
-			default:
-				fileSyncSeconds = &val
-			}
-		}
-	}
-
-	// --- Phase 2: apply file config over defaults ---
-
-	resolvedPricingURL := &defaultPricingURL
-	resolvedModelParametersURL := &defaultModelParametersURL
-	resolvedSyncSeconds := &defaultSyncSeconds
-
-	if filePricingURL != nil {
-		resolvedPricingURL = filePricingURL
-		logger.Debug("pricing_url resolved from file")
-	}
-	if fileModelParametersURL != nil {
-		resolvedModelParametersURL = fileModelParametersURL
-		logger.Debug("model_parameters_url resolved from file")
-	}
-	if fileSyncSeconds != nil {
-		resolvedSyncSeconds = fileSyncSeconds
-		logger.Debug("pricing_sync_interval resolved from file: %d seconds", *fileSyncSeconds)
-	}
-
-	// --- Phase 3: DB values applied; file wins on hash mismatch (file changed since last write) ---
-
-	needsDBUpdate := false
 	configID := uint(0)
-
-	// Hash the file-resolved values; skip if nothing valid survived Phase 1.
-	fileHash := ""
-	if fileConfig != nil && fileConfig.Pricing != nil && !skipURLBackfill && (filePricingURL != nil || fileSyncSeconds != nil) {
-		h, err := configstore.GenerateFrameworkConfigHash(filePricingURL, fileModelParametersURL, fileSyncSeconds)
-		if err != nil {
-			logger.Warn("failed to compute framework config hash: %v", err)
-		} else {
-			fileHash = h
-		}
-	}
-
-	storedHash := ""
-	if dbConfig != nil {
-		storedHash = dbConfig.ConfigHash
-	}
-	fileChanged := fileHash != "" && fileHash != storedHash
-
 	if dbConfig != nil {
 		configID = dbConfig.ID
-
-		if dbConfig.PricingURL != nil {
-			if fileChanged && filePricingURL != nil {
-				logger.Info("pricing_url from config.json overrides DB (file hash changed) — updating DB")
-				needsDBUpdate = true
-			} else {
-				resolvedPricingURL = dbConfig.PricingURL
-			}
-		} else if !skipURLBackfill {
-			needsDBUpdate = true
-		}
-		if dbConfig.ModelParametersURL != nil && *dbConfig.ModelParametersURL != "" {
-			resolvedModelParametersURL = dbConfig.ModelParametersURL
-		} else if !skipModelParamsURLBackfill {
-			needsDBUpdate = true
-		}
-
-		if dbConfig.PricingSyncInterval != nil {
-			val := *dbConfig.PricingSyncInterval
-			if val <= 0 {
-				logger.Warn("pricing_sync_interval in DB is corrupted (%d seconds), ignoring — backfilling with %d seconds", val, *resolvedSyncSeconds)
-				needsDBUpdate = true
-			} else if val < modelcatalog.MinimumPricingSyncIntervalSec {
-				logger.Warn("pricing_sync_interval in DB is below minimum (%d seconds) — backfilling", val)
-				if !fileChanged || fileSyncSeconds == nil {
-					clamped := modelcatalog.MinimumPricingSyncIntervalSec
-					resolvedSyncSeconds = &clamped
-				}
-				needsDBUpdate = true
-			} else if fileChanged && fileSyncSeconds != nil {
-				logger.Info("pricing_sync_interval from config.json overrides DB (file hash changed): file=%d db=%d seconds — updating DB", *fileSyncSeconds, val)
-				needsDBUpdate = true
-			} else {
-				resolvedSyncSeconds = dbConfig.PricingSyncInterval
-			}
-		} else {
-			needsDBUpdate = true
-		}
 	}
-
-	// --- Phase 4: nil guard ---
-	if resolvedPricingURL == nil {
-		logger.Warn("invariant violation: pricing_url resolved to nil — falling back to default %q", defaultPricingURL)
-		resolvedPricingURL = &defaultPricingURL
-	}
-	if resolvedModelParametersURL == nil {
-		logger.Warn("invariant violation: model_parameters_url resolved to nil — falling back to default %q", defaultModelParametersURL)
-		resolvedModelParametersURL = &defaultModelParametersURL
-	}
-	if resolvedSyncSeconds == nil {
-		logger.Warn("invariant violation: pricing_sync_interval resolved to nil — falling back to default %d seconds", defaultSyncSeconds)
-		resolvedSyncSeconds = &defaultSyncSeconds
-	}
-
-	// Only update the stored hash when the file actually changed; preserve the
-	// existing hash for correction-only DB updates (null backfill, corruption fix).
-	persistedHash := ""
-	if dbConfig != nil {
-		persistedHash = dbConfig.ConfigHash
-	}
-	if fileChanged {
-		persistedHash = fileHash
-	}
-
 	return &configstoreTables.TableFrameworkConfig{
-			ID:                  configID,
-			PricingURL:          resolvedPricingURL,
-			PricingSyncInterval: resolvedSyncSeconds,
-			ModelParametersURL:  resolvedModelParametersURL,
-			ConfigHash:          persistedHash,
-		}, &modelcatalog.Config{
-			PricingURL:          resolvedPricingURL,
-			PricingSyncInterval: resolvedSyncSeconds,
-			ModelParametersURL:  resolvedModelParametersURL,
-		}, needsDBUpdate
+			ID: configID,
+		}, &modelcatalog.Config{}, false
 }
 
 // initFrameworkConfig initializes framework config and pricing manager from file
 func initFrameworkConfig(ctx context.Context, config *Config, configData *ConfigData) {
 	mcpPricingConfig := &mcpcatalog.Config{}
 	var frameworkConfigFromDB *configstoreTables.TableFrameworkConfig
-	if config.ConfigStore != nil {
-		frameworkConfig, err := config.ConfigStore.GetFrameworkConfig(ctx)
+	if config.StoreFromContext(ctx) != nil {
+		frameworkConfig, err := config.StoreFromContext(ctx).GetFrameworkConfig(ctx)
 		if err != nil {
 			logger.Warn("failed to get framework config from store: %v", err)
 		}
 		frameworkConfigFromDB = frameworkConfig
-		mcpPricingConfig.PricingData = buildMCPPricingDataFromStore(ctx, config.ConfigStore)
+		mcpPricingConfig.PricingData = buildMCPPricingDataFromStore(ctx, config.StoreFromContext(ctx))
 	}
 	var fileFrameworkConfig *framework.FrameworkConfig
 	if configData != nil {
 		fileFrameworkConfig = configData.FrameworkConfig
 	}
 	normalizedFrameworkConfig, pricingConfig, needsFrameworkBackfill := ResolveFrameworkPricingConfig(frameworkConfigFromDB, fileFrameworkConfig)
-	if config.ConfigStore != nil && (frameworkConfigFromDB == nil || needsFrameworkBackfill) {
-		if err := config.ConfigStore.UpdateFrameworkConfig(ctx, normalizedFrameworkConfig); err != nil {
+	if config.StoreFromContext(ctx) != nil && (frameworkConfigFromDB == nil || needsFrameworkBackfill) {
+		if err := config.StoreFromContext(ctx).UpdateFrameworkConfig(ctx, normalizedFrameworkConfig); err != nil {
 			logger.Warn("failed to normalize framework config in store: %v", err)
 		}
 	}
 
 	// Initialize OAuth provider
-	config.OAuthProvider = oauth2.NewOAuth2Provider(config.ConfigStore, logger)
+	config.OAuthProvider = oauth2.NewOAuth2Provider(config.Registry(), logger)
 
 	// Start token refresh worker for automatic OAuth token refresh
 	config.TokenRefreshWorker = oauth2.NewTokenRefreshWorker(config.OAuthProvider, logger)
@@ -3224,7 +2948,7 @@ func initFrameworkConfig(ctx context.Context, config *Config, configData *Config
 	}
 
 	// Use default modelcatalog initialization when no enterprise overrides are provided
-	pricingManager, err := modelcatalog.Init(ctx, pricingConfig, config.ConfigStore, logger)
+	pricingManager, err := modelcatalog.Init(ctx, pricingConfig, config.StoreFromContext(ctx), logger)
 	if err != nil {
 		logger.Fatal("failed to initialize pricing manager: %v", err)
 	}
@@ -3276,10 +3000,10 @@ func initEncryption(configData *ConfigData) error {
 // syncEncryption encrypts all plaintext rows in the config store if encryption is enabled.
 // Called during bootup after encryption key is initialized and all config data has been loaded.
 func syncEncryption(ctx context.Context, config *Config) {
-	if !encrypt.IsEnabled() || config.ConfigStore == nil {
+	if !encrypt.IsEnabled() || config.StoreFromContext(ctx) == nil {
 		return
 	}
-	if err := config.ConfigStore.EncryptPlaintextRows(ctx); err != nil {
+	if err := config.StoreFromContext(ctx).EncryptPlaintextRows(ctx); err != nil {
 		logger.Error("failed to sync encryption for plaintext rows: %v", err)
 	}
 }
@@ -3305,7 +3029,7 @@ func resolveMCPConfigClientIDs(
 		mc := &mcpConfigs[i]
 
 		// If MCPClientID is already set (e.g., from database or direct construction), keep it
-		if mc.MCPClientID != 0 {
+		if mc.MCPClientID != "" {
 			resolvedConfigs = append(resolvedConfigs, *mc)
 			continue
 		}
@@ -3405,13 +3129,13 @@ func reconcileVirtualKeyAssociations(
 	}
 
 	// Build lookup map for existing MCP configs by MCPClientID
-	existingByMCPClientID := make(map[uint]configstoreTables.TableVirtualKeyMCPConfig)
+	existingByMCPClientID := make(map[string]configstoreTables.TableVirtualKeyMCPConfig)
 	for _, mc := range existingMCPConfigs {
 		existingByMCPClientID[mc.MCPClientID] = mc
 	}
 
 	// Process MCP configs from config.json
-	newMCPSet := make(map[uint]bool)
+	newMCPSet := make(map[string]bool)
 	for _, newMC := range newMCPConfigs {
 		newMCPSet[newMC.MCPClientID] = true
 		newMC.VirtualKeyID = vkID
@@ -3419,12 +3143,12 @@ func reconcileVirtualKeyAssociations(
 			// Update existing MCP config from file
 			existing.ToolsToExecute = newMC.ToolsToExecute
 			if err := store.UpdateVirtualKeyMCPConfig(ctx, &existing, tx); err != nil {
-				return fmt.Errorf("failed to update MCP config for client %d: %w", newMC.MCPClientID, err)
+				return fmt.Errorf("failed to update MCP config for client %s: %w", newMC.MCPClientID, err)
 			}
 		} else {
 			// Create new MCP config from file
 			if err := store.CreateVirtualKeyMCPConfig(ctx, &newMC, tx); err != nil {
-				return fmt.Errorf("failed to create MCP config for client %d: %w", newMC.MCPClientID, err)
+				return fmt.Errorf("failed to create MCP config for client %s: %w", newMC.MCPClientID, err)
 			}
 		}
 	}
@@ -3433,7 +3157,7 @@ func reconcileVirtualKeyAssociations(
 	for mcpClientID, existing := range existingByMCPClientID {
 		if !newMCPSet[mcpClientID] {
 			if err := store.DeleteVirtualKeyMCPConfig(ctx, existing.ID, tx); err != nil {
-				return fmt.Errorf("failed to delete MCP config for client %d: %w", mcpClientID, err)
+				return fmt.Errorf("failed to delete MCP config for client %s: %w", mcpClientID, err)
 			}
 		}
 	}
@@ -3569,15 +3293,25 @@ func (c *Config) GetAllowOnAllVirtualKeysClients() map[string]string {
 // GetProvidersForModel returns the list of providers for a given model, sorted
 // deterministically so callers picking providers[0] always get the same result.
 func (c *Config) GetProvidersForModel(model string) []schemas.ModelProvider {
+	return c.GetProvidersForModelForTenant("", model)
+}
+
+// GetProvidersForModelForRequest resolves configured providers for a model using
+// the tenant ID injected by TenantMiddleware when present.
+func (c *Config) GetProvidersForModelForRequest(ctx *fasthttp.RequestCtx, model string) []schemas.ModelProvider {
+	return c.GetProvidersForModelForTenant(TenantIDFromRequest(ctx), model)
+}
+
+// GetProvidersForModelForTenant returns providers that can serve model for the
+// given tenant. When tenantID is empty, the global in-memory provider map is used.
+func (c *Config) GetProvidersForModelForTenant(tenantID string, model string) []schemas.ModelProvider {
 	if c.ModelCatalog == nil {
 		return []schemas.ModelProvider{}
 	}
 	providersInCatalog := c.ModelCatalog.GetProvidersForModel(model)
-	// Filter out the providers which are not present in the configured provider list for the client
-	c.Mu.RLock()
-	defer c.Mu.RUnlock()
+	configuredProviders := c.configuredProviderNamesForTenant(tenantID)
 	allowedProviders := make([]schemas.ModelProvider, 0, len(providersInCatalog))
-	for configuredProvider := range c.Providers {
+	for _, configuredProvider := range configuredProviders {
 		if slices.Contains(providersInCatalog, configuredProvider) {
 			allowedProviders = append(allowedProviders, configuredProvider)
 		}
@@ -3586,6 +3320,84 @@ func (c *Config) GetProvidersForModel(model string) []schemas.ModelProvider {
 		return strings.Compare(string(a), string(b))
 	})
 	return allowedProviders
+}
+
+func (c *Config) configuredProviderNamesForTenant(tenantID string) []schemas.ModelProvider {
+	if tenantID != "" {
+		c.tenantProvidersMu.RLock()
+		tenantProviders := c.tenantProviders[tenantID]
+		c.tenantProvidersMu.RUnlock()
+		if len(tenantProviders) > 0 {
+			providers := make([]schemas.ModelProvider, 0, len(tenantProviders))
+			for provider := range tenantProviders {
+				providers = append(providers, provider)
+			}
+			return providers
+		}
+	}
+
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+	providers := make([]schemas.ModelProvider, 0, len(c.Providers))
+	for provider := range c.Providers {
+		providers = append(providers, provider)
+	}
+	return providers
+}
+
+func (c *Config) setTenantProvidersSnapshot(tenantID string, providers map[schemas.ModelProvider]configstore.ProviderConfig) {
+	c.tenantProvidersMu.Lock()
+	defer c.tenantProvidersMu.Unlock()
+	if c.tenantProviders == nil {
+		c.tenantProviders = make(map[string]map[schemas.ModelProvider]configstore.ProviderConfig)
+	}
+	if len(providers) == 0 {
+		delete(c.tenantProviders, tenantID)
+		return
+	}
+	snapshot := make(map[schemas.ModelProvider]configstore.ProviderConfig, len(providers))
+	for provider, cfg := range providers {
+		snapshot[provider] = cfg
+	}
+	c.tenantProviders[tenantID] = snapshot
+}
+
+// mergeTenantProvidersIntoGlobal copies tenant provider configs into the global
+// in-memory map used by the Bifrost account. Returns providers whose configs changed.
+func (c *Config) mergeTenantProvidersIntoGlobal(tenantID string, providers map[schemas.ModelProvider]configstore.ProviderConfig) []schemas.ModelProvider {
+	if len(providers) == 0 {
+		return nil
+	}
+
+	updated := make([]schemas.ModelProvider, 0, len(providers))
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
+	if c.Providers == nil {
+		c.Providers = make(map[schemas.ModelProvider]configstore.ProviderConfig)
+	}
+	for provider, cfg := range providers {
+		existing, exists := c.Providers[provider]
+		if exists && !providerConfigEqual(existing, cfg) {
+			logger.Warn("provider %s config differs across tenants; tenant %s updates global runtime config", provider, tenantID)
+		}
+		if !exists || !providerConfigEqual(existing, cfg) {
+			c.Providers[provider] = cfg
+			updated = append(updated, provider)
+		}
+	}
+	return updated
+}
+
+func (c *Config) upsertTenantProviderEntry(tenantID string, provider schemas.ModelProvider, cfg configstore.ProviderConfig) {
+	c.tenantProvidersMu.Lock()
+	defer c.tenantProvidersMu.Unlock()
+	if c.tenantProviders == nil {
+		c.tenantProviders = make(map[string]map[schemas.ModelProvider]configstore.ProviderConfig)
+	}
+	if c.tenantProviders[tenantID] == nil {
+		c.tenantProviders[tenantID] = make(map[schemas.ModelProvider]configstore.ProviderConfig)
+	}
+	c.tenantProviders[tenantID][provider] = cfg
 }
 
 // GetPluginOrder returns the names of all base plugins in their sorted placement order.
@@ -3687,14 +3499,17 @@ func (c *Config) Close(ctx context.Context) {
 	if c.KVStore != nil {
 		c.KVStore.Close()
 	}
-	if c.ConfigStore != nil {
-		c.ConfigStore.Close(ctx)
+	if c.StoreFromContext(ctx) != nil {
+		c.StoreFromContext(ctx).Close(ctx)
 	}
 	if c.LogsStore != nil {
 		c.LogsStore.Close(ctx)
 	}
 	if c.VectorStore != nil {
 		c.VectorStore.Close(ctx, "")
+	}
+	if c.TenantStore != nil {
+		c.TenantStore.Close(ctx)
 	}
 }
 
@@ -3717,8 +3532,8 @@ func initFeatureFlags(ctx context.Context, config *Config, configData *ConfigDat
 	}
 	config.FeatureFlags = store
 
-	if config.ConfigStore != nil {
-		rows, err := config.ConfigStore.ListFeatureFlags(ctx)
+	if config.StoreFromContext(ctx) != nil {
+		rows, err := config.StoreFromContext(ctx).ListFeatureFlags(ctx)
 		if err != nil {
 			logger.Warn("[featureflags] hydrate from configstore failed: %v", err)
 		} else {
@@ -4310,8 +4125,8 @@ func (c *Config) AddProvider(ctx context.Context, provider schemas.ModelProvider
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
-		if err := c.ConfigStore.AddProvider(ctx, provider, config); err != nil {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
+		if err := c.StoreFromContext(ctx).AddProvider(ctx, provider, config); err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				return ErrNotFound
 			}
@@ -4321,6 +4136,9 @@ func (c *Config) AddProvider(ctx context.Context, provider schemas.ModelProvider
 			if errors.Is(err, configstore.ErrAlreadyExists) {
 				// Provider already exists in DB but not in memory - sync and return
 				c.Providers[provider] = config
+				if tenantID := TenantIDFromContext(ctx); tenantID != "" {
+					c.upsertTenantProviderEntry(tenantID, provider, config)
+				}
 				logger.Info("provider %s already exists in DB, synced to memory", provider)
 				return fmt.Errorf("provider/provider key name %s: %w", provider, ErrAlreadyExists)
 			}
@@ -4328,6 +4146,9 @@ func (c *Config) AddProvider(ctx context.Context, provider schemas.ModelProvider
 		}
 	}
 	c.Providers[provider] = config
+	if tenantID := TenantIDFromContext(ctx); tenantID != "" {
+		c.upsertTenantProviderEntry(tenantID, provider, config)
+	}
 	logger.Info("added provider: %s", provider)
 	return nil
 }
@@ -4366,6 +4187,9 @@ func (c *Config) UpdateProviderConfig(ctx context.Context, provider schemas.Mode
 	config.ConfigHash = existingConfig.ConfigHash
 	// Update in-memory configuration first (so client can read updated config)
 	c.Providers[provider] = config
+	if tenantID := TenantIDFromContext(ctx); tenantID != "" {
+		c.upsertTenantProviderEntry(tenantID, provider, config)
+	}
 	for i, key := range config.Keys {
 		if key.ID == "" {
 			config.Keys[i].ID = uuid.NewString()
@@ -4377,11 +4201,11 @@ func (c *Config) UpdateProviderConfig(ctx context.Context, provider schemas.Mode
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
 		// Process environment variables in keys (including key-level configs)
 		// Update provider in database within a transaction
-		dbErr := c.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
-			if err := c.ConfigStore.UpdateProvider(ctx, provider, config, tx); err != nil {
+		dbErr := c.StoreFromContext(ctx).ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+			if err := c.StoreFromContext(ctx).UpdateProvider(ctx, provider, config, tx); err != nil {
 				if errors.Is(err, configstore.ErrNotFound) {
 					return ErrNotFound
 				}
@@ -4442,8 +4266,8 @@ func (c *Config) AddProviderKey(ctx context.Context, provider schemas.ModelProvi
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
-		if err := c.ConfigStore.CreateProviderKey(ctx, provider, key); err != nil {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
+		if err := c.StoreFromContext(ctx).CreateProviderKey(ctx, provider, key); err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				return ErrNotFound
 			}
@@ -4496,8 +4320,8 @@ func (c *Config) UpdateProviderKey(ctx context.Context, provider schemas.ModelPr
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
-		if err := c.ConfigStore.UpdateProviderKey(ctx, provider, keyID, key); err != nil {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
+		if err := c.StoreFromContext(ctx).UpdateProviderKey(ctx, provider, keyID, key); err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				return ErrNotFound
 			}
@@ -4549,8 +4373,8 @@ func (c *Config) RemoveProviderKey(ctx context.Context, provider schemas.ModelPr
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
-		if err := c.ConfigStore.DeleteProviderKey(ctx, provider, keyID); err != nil {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
+		if err := c.StoreFromContext(ctx).DeleteProviderKey(ctx, provider, keyID); err != nil {
 			if errors.Is(err, configstore.ErrNotFound) {
 				return ErrNotFound
 			}
@@ -4586,8 +4410,8 @@ func (c *Config) RemoveProvider(ctx context.Context, provider schemas.ModelProvi
 			skipDBUpdate = skip
 		}
 	}
-	if c.ConfigStore != nil && !skipDBUpdate {
-		if err := c.ConfigStore.DeleteProvider(ctx, provider); err != nil {
+	if c.StoreFromContext(ctx) != nil && !skipDBUpdate {
+		if err := c.StoreFromContext(ctx).DeleteProvider(ctx, provider); err != nil {
 			return fmt.Errorf("failed to delete provider config from store: %w", err)
 		}
 	}
@@ -4742,9 +4566,9 @@ func (c *Config) AddMCPClient(ctx context.Context, clientConfig *schemas.MCPClie
 		return fmt.Errorf("failed to connect MCP client: %w", err)
 	}
 	// Update MCP catalog pricing data for the new client
-	if c.MCPCatalog != nil && c.ConfigStore != nil {
+	if c.MCPCatalog != nil && c.StoreFromContext(ctx) != nil {
 		// Get the created client config from store to get tool_pricing
-		dbClientConfig, err := c.ConfigStore.GetMCPClientByName(ctx, clientConfig.Name)
+		dbClientConfig, err := c.StoreFromContext(ctx).GetMCPClientByName(ctx, clientConfig.Name)
 		if err != nil {
 			logger.Warn("failed to get MCP client config for catalog update: %v", err)
 		} else if dbClientConfig != nil {
@@ -4968,11 +4792,11 @@ func (c *Config) DisableMCPClient(ctx context.Context, id string) error {
 		return fmt.Errorf("bifrost client not set")
 	}
 
-	if c.ConfigStore == nil {
+	if c.StoreFromContext(ctx) == nil {
 		return fmt.Errorf("config store not set")
 	}
 
-	dbClient, err := c.ConfigStore.GetMCPClientByID(ctx, id)
+	dbClient, err := c.StoreFromContext(ctx).GetMCPClientByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("MCP client '%s' not found: %w", id, err)
 	}
@@ -4981,7 +4805,7 @@ func (c *Config) DisableMCPClient(ctx context.Context, id string) error {
 	}
 
 	dbClient.Disabled = true
-	if err := c.ConfigStore.UpdateMCPClientConfig(ctx, id, dbClient); err != nil {
+	if err := c.StoreFromContext(ctx).UpdateMCPClientConfig(ctx, id, dbClient); err != nil {
 		_ = c.client.EnableMCPClient(id) // rollback
 		return fmt.Errorf("failed to persist disabled state: %w", err)
 	}
@@ -5005,16 +4829,16 @@ func (c *Config) EnableMCPClient(ctx context.Context, id string) error {
 	if c.client == nil {
 		return fmt.Errorf("bifrost client not set")
 	}
-	if c.ConfigStore == nil {
+	if c.StoreFromContext(ctx) == nil {
 		return fmt.Errorf("config store not set")
 	}
 
-	dbClient, err := c.ConfigStore.GetMCPClientByID(ctx, id)
+	dbClient, err := c.StoreFromContext(ctx).GetMCPClientByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("MCP client '%s' not found: %w", id, err)
 	}
 	dbClient.Disabled = false
-	if err := c.ConfigStore.UpdateMCPClientConfig(ctx, id, dbClient); err != nil {
+	if err := c.StoreFromContext(ctx).UpdateMCPClientConfig(ctx, id, dbClient); err != nil {
 		return fmt.Errorf("failed to persist enabled state: %w", err)
 	}
 
@@ -5114,8 +4938,8 @@ func (c *Config) autoDetectProviders(ctx context.Context) {
 	}
 	if detectedCount > 0 {
 		logger.Info("auto-configured %d provider(s) from environment variables", detectedCount)
-		if c.ConfigStore != nil {
-			if err := c.ConfigStore.UpdateProvidersConfig(ctx, c.Providers); err != nil {
+		if c.StoreFromContext(ctx) != nil {
+			if err := c.StoreFromContext(ctx).UpdateProvidersConfig(ctx, c.Providers); err != nil {
 				logger.Error("failed to update providers in store: %v", err)
 			}
 		}
@@ -5126,8 +4950,8 @@ func (c *Config) autoDetectProviders(ctx context.Context) {
 func (c *Config) GetVectorStoreConfigRedacted(ctx context.Context) (*vectorstore.Config, error) {
 	var err error
 	var vectorStoreConfig *vectorstore.Config
-	if c.ConfigStore != nil {
-		vectorStoreConfig, err = c.ConfigStore.GetVectorStoreConfig(ctx)
+	if c.StoreFromContext(ctx) != nil {
+		vectorStoreConfig, err = c.StoreFromContext(ctx).GetVectorStoreConfig(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get vector store config: %w", err)
 		}

@@ -1813,6 +1813,16 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "env_var": {
+      "type": "object",
+      "description": "Environment variable reference supporting inline values or env indirection",
+      "properties": {
+        "value": { "type": "string" },
+        "env_var": { "type": "string" },
+        "from_env": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "feature_flags_config": {
       "type": "object",
       "description": "Boot-time overrides for feature flags. Flags themselves are declared in code via featureflags.Register; this block only sets initial values. Anything set here is rendered as locked in the UI - operators must edit the config (or Helm values) to change it.",

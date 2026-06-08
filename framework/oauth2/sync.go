@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 )
 
 // TokenRefreshWorker manages automatic token refresh for expiring OAuth tokens
@@ -20,8 +21,8 @@ type TokenRefreshWorker struct {
 
 // NewTokenRefreshWorker creates a new token refresh worker
 func NewTokenRefreshWorker(provider *OAuth2Provider, logger schemas.Logger) *TokenRefreshWorker {
-	if provider.configStore == nil {
-		logger.Warn("config store is nil, skipping token refresh worker")
+	if provider == nil || provider.tenantResolver == nil {
+		logger.Warn("tenant resolver is nil, skipping token refresh worker")
 		return nil
 	}
 	return &TokenRefreshWorker{
@@ -77,57 +78,45 @@ func (w *TokenRefreshWorker) run(ctx context.Context) {
 func (w *TokenRefreshWorker) refreshExpiredTokens(ctx context.Context) {
 	expiryThreshold := time.Now().Add(w.lookAheadWindow)
 
-	// Get tokens expiring before the threshold
-	tokens, err := w.provider.configStore.GetExpiringOauthTokens(ctx, expiryThreshold)
-	if err != nil {
-		if w.logger != nil {
-			w.logger.Error("Failed to get expiring tokens", "error", err)
-		}
-		return
-	}
-
-	if len(tokens) == 0 {
-		return
-	}
-
-	if w.logger != nil {
-		w.logger.Debug("Found expiring tokens to refresh: %d", len(tokens))
-	}
-
-	// Refresh each expiring token
-	for _, token := range tokens {
-		// Find the oauth_config that references this token
-		oauthConfig, err := w.provider.configStore.GetOauthConfigByTokenID(ctx, token.ID)
+	_ = w.provider.forEachTenant(ctx, func(tenantCtx context.Context, store configstore.ConfigStore) error {
+		tokens, err := store.GetExpiringOauthTokens(tenantCtx, expiryThreshold)
 		if err != nil {
 			if w.logger != nil {
-				w.logger.Error("Failed to find oauth config for token: %s, error: %s", token.ID, err.Error())
+				w.logger.Error("Failed to get expiring tokens", "error", err)
 			}
-			continue
+			return nil
 		}
-
-		if oauthConfig == nil {
-			if w.logger != nil {
-				w.logger.Warn("No oauth config found for token: %s", token.ID)
-			}
-			continue
+		if len(tokens) == 0 {
+			return nil
 		}
-
-		// Attempt to refresh the token
-		if err := w.provider.RefreshAccessToken(ctx, oauthConfig.ID); err != nil {
-			if w.logger != nil {
-				w.logger.Error("Failed to refresh token", "oauth_config_id", oauthConfig.ID, "error", err)
+		if w.logger != nil {
+			w.logger.Debug("Found expiring tokens to refresh: %d", len(tokens))
+		}
+		for _, token := range tokens {
+			oauthConfig, err := store.GetOauthConfigByTokenID(tenantCtx, token.ID)
+			if err != nil {
+				if w.logger != nil {
+					w.logger.Error("Failed to find oauth config for token: %s, error: %s", token.ID, err.Error())
+				}
+				continue
 			}
-
-			// Only mark as expired for permanent auth rejections (e.g. invalid_grant, 401).
-			// Transient failures (DNS, timeout, offline) are skipped — the worker will
-			// retry on the next tick and the connection heals automatically when online.
-			w.provider.markExpiredIfPermanent(ctx, oauthConfig, err)
-		} else {
-			if w.logger != nil {
+			if oauthConfig == nil {
+				if w.logger != nil {
+					w.logger.Warn("No oauth config found for token: %s", token.ID)
+				}
+				continue
+			}
+			if err := w.provider.RefreshAccessToken(tenantCtx, oauthConfig.ID); err != nil {
+				if w.logger != nil {
+					w.logger.Error("Failed to refresh token", "oauth_config_id", oauthConfig.ID, "error", err)
+				}
+				w.provider.markExpiredIfPermanent(tenantCtx, oauthConfig, err)
+			} else if w.logger != nil {
 				w.logger.Debug("Successfully refreshed token: %s", oauthConfig.ID)
 			}
 		}
-	}
+		return nil
+	})
 }
 
 // SetRefreshInterval updates the refresh check interval (for testing)
@@ -160,9 +149,9 @@ type PerUserOAuthSweepWorker struct {
 // NewPerUserOAuthSweepWorker creates a sweep worker with sensible defaults.
 // orphanRetention <= 0 disables the orphan-token sweep.
 func NewPerUserOAuthSweepWorker(provider *OAuth2Provider, orphanRetention time.Duration, logger schemas.Logger) *PerUserOAuthSweepWorker {
-	if provider == nil || provider.configStore == nil {
+	if provider == nil || provider.tenantResolver == nil {
 		if logger != nil {
-			logger.Warn("per-user OAuth sweep worker not started: provider or config store is nil")
+			logger.Warn("per-user OAuth sweep worker not started: provider or tenant resolver is nil")
 		}
 		return nil
 	}
@@ -221,32 +210,38 @@ func (w *PerUserOAuthSweepWorker) run(ctx context.Context) {
 }
 
 func (w *PerUserOAuthSweepWorker) sweepExpiredFlows(ctx context.Context) {
-	n, err := w.provider.configStore.DeleteExpiredOauthUserSessions(ctx)
-	if err != nil {
-		if w.logger != nil {
-			w.logger.Error("per-user OAuth flow sweep failed: %v", err)
+	_ = w.provider.forEachTenant(ctx, func(tenantCtx context.Context, store configstore.ConfigStore) error {
+		n, err := store.DeleteExpiredOauthUserSessions(tenantCtx)
+		if err != nil {
+			if w.logger != nil {
+				w.logger.Error("per-user OAuth flow sweep failed: %v", err)
+			}
+			return nil
 		}
-		return
-	}
-	if n > 0 && w.logger != nil {
-		w.logger.Debug("per-user OAuth flow sweep removed %d expired pending flows", n)
-	}
+		if n > 0 && w.logger != nil {
+			w.logger.Debug("per-user OAuth flow sweep removed %d expired pending flows", n)
+		}
+		return nil
+	})
 }
 
 func (w *PerUserOAuthSweepWorker) sweepOrphanedTokens(ctx context.Context) {
 	if w.orphanRetention <= 0 {
 		return
 	}
-	n, err := w.provider.configStore.DeleteOrphanedOauthUserTokens(ctx, w.orphanRetention)
-	if err != nil {
-		if w.logger != nil {
-			w.logger.Error("per-user OAuth orphan-token sweep failed: %v", err)
+	_ = w.provider.forEachTenant(ctx, func(tenantCtx context.Context, store configstore.ConfigStore) error {
+		n, err := store.DeleteOrphanedOauthUserTokens(tenantCtx, w.orphanRetention)
+		if err != nil {
+			if w.logger != nil {
+				w.logger.Error("per-user OAuth orphan-token sweep failed: %v", err)
+			}
+			return nil
 		}
-		return
-	}
-	if n > 0 && w.logger != nil {
-		w.logger.Info("per-user OAuth orphan-token sweep removed %d rows older than %s", n, w.orphanRetention)
-	}
+		if n > 0 && w.logger != nil {
+			w.logger.Info("per-user OAuth orphan-token sweep removed %d rows older than %s", n, w.orphanRetention)
+		}
+		return nil
+	})
 }
 
 // SetFlowSweepInterval updates the pending-flow sweep cadence (for testing).

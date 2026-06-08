@@ -38,9 +38,8 @@ func newSqliteLogStore(ctx context.Context, config *SQLiteConfig, logger schemas
 	logger.Debug("db opened for logstore")
 
 	s := &RDBLogStore{db: db, logger: logger}
-	// Run migrations
-	if err := triggerMigrations(ctx, db); err != nil {
-		return nil, err
+	if err := db.AutoMigrate(&Log{}, &MCPToolLog{}, &AsyncJob{}); err != nil {
+		return nil, fmt.Errorf("failed to auto-migrate logstore tables: %w", err)
 	}
 
 	return s, nil
