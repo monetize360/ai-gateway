@@ -1154,7 +1154,7 @@ func (m *MockConfigStore) CleanupExpiredLockByKey(ctx context.Context, lockKey s
 }
 
 // Key management
-func (m *MockConfigStore) GetKeysByProvider(ctx context.Context, provider string) ([]tables.TableKey, error) {
+func (m *MockConfigStore) GetKeysByProviderID(ctx context.Context, providerID string) ([]tables.TableKey, error) {
 	return nil, nil
 }
 
@@ -8218,7 +8218,11 @@ func TestSQLite_VirtualKey_MergePath_WithProviderConfigKeys(t *testing.T) {
 	}
 
 	// Get the actual TableKey from DB (we need the uint ID for association)
-	dbKeys, err := config1.ConfigStore.GetKeysByProvider(ctx, "openai")
+	openaiProvider, err := config1.ConfigStore.GetProvider(ctx, schemas.OpenAI)
+	if err != nil {
+		t.Fatalf("Failed to get openai provider: %v", err)
+	}
+	dbKeys, err := config1.ConfigStore.GetKeysByProviderID(ctx, openaiProvider.ID)
 	if err != nil {
 		t.Fatalf("Failed to get keys: %v", err)
 	}

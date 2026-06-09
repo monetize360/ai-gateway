@@ -30,6 +30,12 @@ func auditUserID(ctx context.Context) string {
 	return ""
 }
 
+// NormalizeRefreshSince converts incremental-refresh watermarks to UTC so updated_at
+// comparisons align with MPilot and Bifrost audit timestamps (timestamp without time zone).
+func NormalizeRefreshSince(since time.Time) time.Time {
+	return since.UTC()
+}
+
 // ApplyAuditOnCreate stamps create/update timestamps and audit user IDs on a
 // governance row before insert.
 func ApplyAuditOnCreate(ctx context.Context, cols *tables.SystemColumns) {

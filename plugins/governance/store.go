@@ -244,7 +244,7 @@ func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 		return nil
 	}
 
-	watermark := since.Add(-configstore.RefreshOverlap)
+	watermark := configstore.NormalizeRefreshSince(since).Add(-configstore.RefreshOverlap)
 	delta, err := gs.configStore.GetGovernanceRefreshDelta(ctx, watermark)
 	if err != nil {
 		return err

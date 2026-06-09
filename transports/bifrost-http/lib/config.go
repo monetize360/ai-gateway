@@ -3417,7 +3417,7 @@ func (c *Config) setTenantProviderRefreshWatermark(tenantID string, at time.Time
 	if c.tenantProviderRefreshAt == nil {
 		c.tenantProviderRefreshAt = make(map[string]time.Time)
 	}
-	c.tenantProviderRefreshAt[tenantID] = at
+	c.tenantProviderRefreshAt[tenantID] = configstore.NormalizeRefreshSince(at)
 }
 
 // GetPluginOrder returns the names of all base plugins in their sorted placement order.

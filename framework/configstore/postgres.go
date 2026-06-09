@@ -3,6 +3,7 @@ package configstore
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"gorm.io/driver/postgres"
@@ -23,14 +24,27 @@ type PostgresConfig struct {
 
 // buildPostgresDSN assembles a libpq-style DSN from the validated config.
 func buildPostgresDSN(config *PostgresConfig) string {
-	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+	return ensurePostgresDSNUTC(fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		config.Host.GetValue(), config.Port.GetValue(), config.User.GetValue(),
-		config.Password.GetValue(), config.DBName.GetValue(), config.SSLMode.GetValue())
+		config.Password.GetValue(), config.DBName.GetValue(), config.SSLMode.GetValue()))
+}
+
+// ensurePostgresDSNUTC appends timezone=UTC when missing so timestamp comparisons
+// match MPilot rows stored as UTC wall time in timestamp without time zone columns.
+func ensurePostgresDSNUTC(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return dsn
+	}
+	if strings.Contains(strings.ToLower(dsn), "timezone=") {
+		return dsn
+	}
+	return dsn + " timezone=UTC"
 }
 
 // openPostresConnection opens a *gorm.DB against the configured Postgres instance.
 func openPostresConnection(dsn string, logger schemas.Logger) (*gorm.DB, error) {
-	return gorm.Open(postgres.New(postgres.Config{DSN: dsn}), &gorm.Config{
+	return gorm.Open(postgres.New(postgres.Config{DSN: ensurePostgresDSNUTC(dsn)}), &gorm.Config{
 		Logger: newGormLogger(logger),
 	})
 }

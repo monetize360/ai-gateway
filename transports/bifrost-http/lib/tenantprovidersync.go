@@ -107,7 +107,7 @@ func syncTenantProviders(
 	store configstore.ConfigStore,
 ) error {
 	refreshStartedAt := time.Now().UTC()
-	since := cfg.tenantProviderRefreshWatermark(tenantID)
+	since := configstore.NormalizeRefreshSince(cfg.tenantProviderRefreshWatermark(tenantID))
 
 	if since.IsZero() {
 		return syncTenantProvidersFull(ctx, cfg, client, tenantID, store, refreshStartedAt)

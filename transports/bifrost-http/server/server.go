@@ -559,7 +559,7 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	hasNoKeys := len(inMemoryKeys) == 0 && !isKeylessProvider
 
 	// Getting allowed models from all provider keys (needed before model listing)
-	providerKeys, err := s.Config.StoreFromContext(ctx).GetKeysByProvider(ctx, string(provider))
+	providerKeys, err := s.Config.StoreFromContext(ctx).GetKeysByProviderID(ctx, providerInfo.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update provider model catalog: failed to get keys by provider: %s", err)
 	}

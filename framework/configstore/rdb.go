@@ -1432,6 +1432,7 @@ func (s *RDBConfigStore) UpdateStatus(ctx context.Context, provider schemas.Mode
 			Updates(map[string]interface{}{
 				"status":      status,
 				"description": description,
+				"updated_at":  time.Now().UTC(),
 			})
 		if result.Error != nil {
 			return s.parseGormError(result.Error)
@@ -1450,6 +1451,7 @@ func (s *RDBConfigStore) UpdateStatus(ctx context.Context, provider schemas.Mode
 			Updates(map[string]interface{}{
 				"status":      status,
 				"description": description,
+				"updated_at":  time.Now().UTC(),
 			})
 		if result.Error != nil {
 			return s.parseGormError(result.Error)
@@ -2318,7 +2320,7 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 			return db.Table("config_keys").
 				Where("config_keys.deleted = ?", false).
 				Joins("JOIN governance_virtual_key_provider_config_keys j ON j.table_key_id = config_keys.id AND j.deleted = ?", false).
-				Select("config_keys.id, config_keys.name, config_keys.key_id, config_keys.models_json, config_keys.provider")
+				Select("config_keys.id, config_keys.name, config_keys.key_id, config_keys.models_json, config_keys.provider_id")
 		}).
 		Preload("MCPConfigs", active("governance_virtual_key_mcp_configs")).
 		Preload("MCPConfigs.MCPClient")
@@ -2562,13 +2564,86 @@ func (s *RDBConfigStore) GetKeysByIDs(ctx context.Context, ids []string) ([]tabl
 	return keys, nil
 }
 
-// GetKeysByProvider retrieves all keys for a specific provider
-func (s *RDBConfigStore) GetKeysByProvider(ctx context.Context, provider string) ([]tables.TableKey, error) {
+// GetKeysByProviderID retrieves all keys for a specific provider by config_providers.id.
+func (s *RDBConfigStore) GetKeysByProviderID(ctx context.Context, providerID string) ([]tables.TableKey, error) {
 	var keys []tables.TableKey
-	if err := ActiveRows(s.DB().WithContext(ctx)).Where("provider = ?", provider).Find(&keys).Error; err != nil {
+	if err := ActiveRows(s.DB().WithContext(ctx)).Where("provider_id = ?", providerID).Find(&keys).Error; err != nil {
 		return nil, err
 	}
 	return keys, nil
+}
+
+func (s *RDBConfigStore) getProviderIDByName(ctx context.Context, txDB *gorm.DB, providerName string) (string, error) {
+	var providerID string
+	err := ActiveRows(txDB.WithContext(ctx)).
+		Model(&tables.TableProvider{}).
+		Where("name = ?", providerName).
+		Select("id").
+		Scan(&providerID).Error
+	if err != nil {
+		return "", err
+	}
+	if providerID == "" {
+		return "", ErrNotFound
+	}
+	return providerID, nil
+}
+
+func (s *RDBConfigStore) resolveVirtualKeyProviderConfigKeys(
+	ctx context.Context,
+	txDB *gorm.DB,
+	virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig,
+	keysToAssociate []tables.TableKey,
+) ([]tables.TableKey, error) {
+	if len(keysToAssociate) == 0 {
+		return keysToAssociate, nil
+	}
+
+	providerID, err := s.getProviderIDByName(ctx, txDB, virtualKeyProviderConfig.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve provider %q: %w", virtualKeyProviderConfig.Provider, err)
+	}
+
+	resolvedKeys := make([]tables.TableKey, 0, len(keysToAssociate))
+	var unresolvedKeys []string
+	for i, k := range keysToAssociate {
+		if k.ID != "" {
+			resolvedKeys = append(resolvedKeys, k)
+			continue
+		}
+
+		var dbKey tables.TableKey
+		var resolved bool
+		if k.KeyID != "" {
+			if err := ActiveRows(txDB.WithContext(ctx)).
+				Where("key_id = ? AND provider_id = ?", k.KeyID, providerID).
+				First(&dbKey).Error; err == nil {
+				resolvedKeys = append(resolvedKeys, dbKey)
+				resolved = true
+			}
+		}
+		if !resolved && k.Name != "" {
+			if err := ActiveRows(txDB.WithContext(ctx)).
+				Where("name = ? AND provider_id = ?", k.Name, providerID).
+				First(&dbKey).Error; err == nil {
+				resolvedKeys = append(resolvedKeys, dbKey)
+				resolved = true
+			}
+		}
+		if !resolved {
+			if k.KeyID != "" {
+				unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key_id=%s", k.KeyID))
+			} else if k.Name != "" {
+				unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("name=%s", k.Name))
+			} else {
+				unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key[%d]", i))
+			}
+		}
+	}
+	if len(unresolvedKeys) > 0 {
+		return nil, &ErrUnresolvedKeys{Identifiers: unresolvedKeys}
+	}
+	return resolvedKeys, nil
 }
 
 // GetAllRedactedKeys retrieves all redacted keys from the database.
@@ -2707,42 +2782,9 @@ func (s *RDBConfigStore) CreateVirtualKeyProviderConfig(ctx context.Context, vir
 	// Resolve keys by name/key_id if they don't have database IDs
 	// This handles config file inputs that only specify name
 	if len(keysToAssociate) > 0 {
-		resolvedKeys := make([]tables.TableKey, 0, len(keysToAssociate))
-		var unresolvedKeys []string
-		for i, k := range keysToAssociate {
-			// If key already has a database ID (from UI), use it directly
-			if k.ID != "" {
-				resolvedKeys = append(resolvedKeys, k)
-				continue
-			}
-			// Otherwise resolve by KeyID or Name (from config file)
-			var dbKey tables.TableKey
-			var resolved bool
-			if k.KeyID != "" {
-				if err := txDB.WithContext(ctx).Where("key_id = ?", k.KeyID).First(&dbKey).Error; err == nil {
-					resolvedKeys = append(resolvedKeys, dbKey)
-					resolved = true
-				}
-			}
-			if !resolved && k.Name != "" {
-				if err := txDB.WithContext(ctx).Where("name = ? AND provider = ?", k.Name, virtualKeyProviderConfig.Provider).First(&dbKey).Error; err == nil {
-					resolvedKeys = append(resolvedKeys, dbKey)
-					resolved = true
-				}
-			}
-			if !resolved {
-				// Collect identifier for unresolved key
-				if k.KeyID != "" {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key_id=%s", k.KeyID))
-				} else if k.Name != "" {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("name=%s", k.Name))
-				} else {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key[%d]", i))
-				}
-			}
-		}
-		if len(unresolvedKeys) > 0 {
-			return &ErrUnresolvedKeys{Identifiers: unresolvedKeys}
+		resolvedKeys, err := s.resolveVirtualKeyProviderConfigKeys(ctx, txDB, virtualKeyProviderConfig, keysToAssociate)
+		if err != nil {
+			return err
 		}
 		keysToAssociate = resolvedKeys
 	}
@@ -2794,42 +2836,9 @@ func (s *RDBConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, vir
 	// Resolve keys by name/key_id if they don't have database IDs
 	// This handles config file inputs that only specify name
 	if len(keysToAssociate) > 0 {
-		resolvedKeys := make([]tables.TableKey, 0, len(keysToAssociate))
-		var unresolvedKeys []string
-		for i, k := range keysToAssociate {
-			// If key already has a database ID (from UI), use it directly
-			if k.ID != "" {
-				resolvedKeys = append(resolvedKeys, k)
-				continue
-			}
-			// Otherwise resolve by KeyID or Name (from config file)
-			var dbKey tables.TableKey
-			var resolved bool
-			if k.KeyID != "" {
-				if err := txDB.WithContext(ctx).Where("key_id = ?", k.KeyID).First(&dbKey).Error; err == nil {
-					resolvedKeys = append(resolvedKeys, dbKey)
-					resolved = true
-				}
-			}
-			if !resolved && k.Name != "" {
-				if err := txDB.WithContext(ctx).Where("name = ? AND provider = ?", k.Name, virtualKeyProviderConfig.Provider).First(&dbKey).Error; err == nil {
-					resolvedKeys = append(resolvedKeys, dbKey)
-					resolved = true
-				}
-			}
-			if !resolved {
-				// Collect identifier for unresolved key
-				if k.KeyID != "" {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key_id=%s", k.KeyID))
-				} else if k.Name != "" {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("name=%s", k.Name))
-				} else {
-					unresolvedKeys = append(unresolvedKeys, fmt.Sprintf("key[%d]", i))
-				}
-			}
-		}
-		if len(unresolvedKeys) > 0 {
-			return &ErrUnresolvedKeys{Identifiers: unresolvedKeys}
+		resolvedKeys, err := s.resolveVirtualKeyProviderConfigKeys(ctx, txDB, virtualKeyProviderConfig, keysToAssociate)
+		if err != nil {
+			return err
 		}
 		keysToAssociate = resolvedKeys
 	}

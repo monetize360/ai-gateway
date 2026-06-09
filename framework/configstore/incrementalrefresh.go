@@ -61,6 +61,7 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	if since.IsZero() {
 		return nil, fmt.Errorf("governance refresh since watermark is required")
 	}
+	since = NormalizeRefreshSince(since)
 	db := s.DB().WithContext(ctx)
 	delta := &GovernanceRefreshDelta{}
 
@@ -208,6 +209,7 @@ func (s *RDBConfigStore) GetProviderConfigRefreshDelta(ctx context.Context, sinc
 	if since.IsZero() {
 		return nil, fmt.Errorf("provider config refresh since watermark is required")
 	}
+	since = NormalizeRefreshSince(since)
 	db := s.DB().WithContext(ctx)
 	delta := &ProviderConfigRefreshDelta{
 		Changed: make(map[schemas.ModelProvider]ProviderConfig),

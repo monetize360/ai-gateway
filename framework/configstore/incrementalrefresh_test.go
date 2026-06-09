@@ -31,3 +31,12 @@ func TestProviderConfigRefreshDeltaIsEmpty(t *testing.T) {
 func TestRefreshOverlapIsPositive(t *testing.T) {
 	require.Greater(t, RefreshOverlap, time.Duration(0))
 }
+
+func TestNormalizeRefreshSinceUsesUTC(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	local := time.Date(2026, 6, 9, 10, 0, 0, 0, loc)
+	normalized := NormalizeRefreshSince(local)
+	require.Equal(t, time.UTC, normalized.Location())
+	require.Equal(t, local.UTC(), normalized)
+}

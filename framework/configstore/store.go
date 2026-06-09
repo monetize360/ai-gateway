@@ -291,7 +291,7 @@ type ConfigStore interface {
 
 	// Key management
 	GetKeysByIDs(ctx context.Context, ids []string) ([]tables.TableKey, error)
-	GetKeysByProvider(ctx context.Context, provider string) ([]tables.TableKey, error)
+	GetKeysByProviderID(ctx context.Context, providerID string) ([]tables.TableKey, error)
 	GetAllRedactedKeys(ctx context.Context, ids []string) ([]schemas.Key, error) // leave ids empty to get all
 
 	// Generic transaction manager
