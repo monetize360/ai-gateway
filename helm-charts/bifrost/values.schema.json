@@ -212,6 +212,10 @@
       "type": "object",
       "description": "Bifrost application configuration",
       "properties": {
+        "rawConfigJson": {
+          "type": "string",
+          "description": "Verbatim config.json content. When set, the chart writes this string to config.json instead of generating it from the bifrost.* values (e.g. for multi-tenant tenant_store mode not modeled by the chart)."
+        },
         "appDir": {
           "type": "string",
           "description": "Application data directory"
