@@ -30,7 +30,7 @@ func TestUsageTracker_UpdateUsage_FailedRequest(t *testing.T) {
 	defer tracker.Cleanup()
 
 	update := &UsageUpdate{
-		VirtualKey: "sk-bf-test",
+		VirtualKey: "vk1",
 		Provider:   schemas.OpenAI,
 		Model:      "gpt-4",
 		Success:    false, // Failed request
@@ -65,7 +65,7 @@ func TestUsageTracker_UpdateUsage_VirtualKeyNotFound(t *testing.T) {
 	defer tracker.Cleanup()
 
 	update := &UsageUpdate{
-		VirtualKey: "sk-bf-nonexistent",
+		VirtualKey: "vk-missing",
 		Provider:   schemas.OpenAI,
 		Model:      "gpt-4",
 		Success:    true,
@@ -100,7 +100,7 @@ func TestUsageTracker_UpdateUsage_StreamingOptimization(t *testing.T) {
 
 	// First streaming chunk (not final, has usage data)
 	update1 := &UsageUpdate{
-		VirtualKey:   "sk-bf-test",
+		VirtualKey:   "vk1",
 		Provider:     schemas.OpenAI,
 		Model:        "gpt-4",
 		Success:      true,
@@ -126,7 +126,7 @@ func TestUsageTracker_UpdateUsage_StreamingOptimization(t *testing.T) {
 
 	// Final chunk
 	update2 := &UsageUpdate{
-		VirtualKey:   "sk-bf-test",
+		VirtualKey:   "vk1",
 		Provider:     schemas.OpenAI,
 		Model:        "gpt-4",
 		Success:      true,

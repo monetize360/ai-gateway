@@ -382,8 +382,9 @@ import (
 
 // MockConfigStore implements the ConfigStore interface for testing
 type MockConfigStore struct {
-	clientConfig     *configstore.ClientConfig
-	providers        map[schemas.ModelProvider]configstore.ProviderConfig
+	clientConfig         *configstore.ClientConfig
+	providers            map[schemas.ModelProvider]configstore.ProviderConfig
+	providerRefreshDelta *configstore.ProviderConfigRefreshDelta
 	mcpConfig        *schemas.MCPConfig
 	governanceConfig *configstore.GovernanceConfig
 	authConfig       *configstore.AuthConfig
@@ -477,6 +478,23 @@ func (m *MockConfigStore) GetProvidersConfig(ctx context.Context) (map[schemas.M
 		return nil, nil
 	}
 	return m.providers, nil
+}
+
+func (m *MockConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since time.Time) (*configstore.GovernanceRefreshDelta, error) {
+	if since.IsZero() {
+		return nil, fmt.Errorf("governance refresh since watermark is required")
+	}
+	return &configstore.GovernanceRefreshDelta{}, nil
+}
+
+func (m *MockConfigStore) GetProviderConfigRefreshDelta(ctx context.Context, since time.Time) (*configstore.ProviderConfigRefreshDelta, error) {
+	if since.IsZero() {
+		return nil, fmt.Errorf("provider config refresh since watermark is required")
+	}
+	if m.providerRefreshDelta != nil {
+		return m.providerRefreshDelta, nil
+	}
+	return &configstore.ProviderConfigRefreshDelta{Changed: make(map[schemas.ModelProvider]configstore.ProviderConfig)}, nil
 }
 
 func (m *MockConfigStore) AddProvider(ctx context.Context, provider schemas.ModelProvider, config configstore.ProviderConfig, tx ...*gorm.DB) error {
@@ -1032,6 +1050,10 @@ func (m *MockConfigStore) DeletePricingOverride(ctx context.Context, id string, 
 // Provider methods
 func (m *MockConfigStore) GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error) {
 	return nil, nil
+}
+
+func (m *MockConfigStore) SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tx ...*gorm.DB) error {
+	return nil
 }
 
 func (m *MockConfigStore) GetProviders(ctx context.Context) ([]tables.TableProvider, error) {

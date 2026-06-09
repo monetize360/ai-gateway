@@ -49,11 +49,11 @@ func TestHTTPTransportPreHook_VirtualKeyReplicateRefinesNestedModel(t *testing.T
 	defer schemas.ReleaseHTTPRequest(req)
 	req.Method = "POST"
 	req.Path = "/v1/chat/completions"
-	req.Headers["Authorization"] = "Bearer sk-bf-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"model":"gpt-5-nano","messages":[{"role":"user","content":"Hello!"}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk1")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)
@@ -115,11 +115,11 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget(t *testing.T) {
 	req.Method = "POST"
 	req.Path = "/genai/v1beta/models/probe-genai-model:generateContent"
 	req.PathParams["model"] = "probe-genai-model:generateContent"
-	req.Headers["Authorization"] = "Bearer sk-bf-genai-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-genai")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)
@@ -194,11 +194,11 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget_WithStore(t *testi
 	req.Method = "POST"
 	req.Path = "/genai/v1beta/models/probe-genai-model:generateContent"
 	req.PathParams["model"] = "probe-genai-model:generateContent"
-	req.Headers["Authorization"] = "Bearer sk-bf-genai-ws-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-genai-ws")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)
@@ -240,11 +240,11 @@ func TestHTTPTransportPreHook_GenAINoRoutingRuleStillLoadBalances(t *testing.T) 
 	req.Method = "POST"
 	req.Path = "/genai/v1beta/models/probe-genai-model:generateContent"
 	req.PathParams["model"] = "probe-genai-model:generateContent"
-	req.Headers["Authorization"] = "Bearer sk-bf-genai-lb-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-genai-lb")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)
@@ -305,11 +305,11 @@ func TestHTTPTransportPreHook_BedrockRoutingRulePreservesTarget(t *testing.T) {
 	req.Method = "POST"
 	req.Path = "/bedrock/model/probe-bedrock-model/converse"
 	req.PathParams["modelId"] = "probe-bedrock-model"
-	req.Headers["Authorization"] = "Bearer sk-bf-bedrock-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"messages":[{"role":"user","content":[{"text":"hi"}]}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-bedrock")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)
@@ -353,11 +353,11 @@ func TestHTTPTransportPreHook_BedrockNoRoutingRuleStillLoadBalances(t *testing.T
 	req.Method = "POST"
 	req.Path = "/bedrock/model/probe-bedrock-model/converse"
 	req.PathParams["modelId"] = "probe-bedrock-model"
-	req.Headers["Authorization"] = "Bearer sk-bf-bedrock-lb-test"
 	req.Headers["Content-Type"] = "application/json"
 	req.Body = []byte(`{"messages":[{"role":"user","content":[{"text":"hi"}]}]}`)
 
 	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-bedrock-lb")
 	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
 	require.NoError(t, err)
 	require.Nil(t, resp)

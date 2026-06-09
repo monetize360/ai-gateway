@@ -17,10 +17,10 @@ type TenantClaims struct {
 	UserID string `json:"userId"`
 	// MorgID is the UUID of the user's organisation within the tenant.
 	MorgID string `json:"morgId"`
-	// AccessKey is the UUID that is the primary key of the access_key_token row
+	// VirtualKey is the UUID primary key of the governance_virtual_keys row
 	// representing this credential. It is used to validate the key against the
 	// tenant DB and to drive governance data lookup.
-	AccessKey string `json:"accessKey"`
+	VirtualKey string `json:"virtualKey"`
 	// Roles holds the authority strings assigned to the user (e.g. "TENANTADMIN").
 	Roles []string `json:"roles"`
 
@@ -40,7 +40,7 @@ type TenantClaims struct {
 //   - the signing method is unexpected
 //   - the signature is invalid
 //   - the token has expired or is not yet valid
-//   - tenantId or accessKey claims are missing
+//   - tenantId or virtualKey claims are missing
 func ExtractClaimsFromJWT(tokenStr string, key []byte) (*TenantClaims, error) {
 	if tokenStr == "" {
 		return nil, fmt.Errorf("token string is empty")
@@ -80,15 +80,15 @@ func ExtractClaimsFromJWT(tokenStr string, key []byte) (*TenantClaims, error) {
 	if claims.TenantID == "" {
 		return nil, fmt.Errorf("token missing tenantId claim")
 	}
-	if claims.AccessKey == "" {
-		return nil, fmt.Errorf("token missing accessKey claim")
+	if claims.VirtualKey == "" {
+		return nil, fmt.Errorf("token missing virtualKey claim")
 	}
 	return claims, nil
 }
 
 // ExtractTenantIDFromJWT is a backward-compatible shim that calls
 // ExtractClaimsFromJWT and returns only the tenantId.
-// Prefer ExtractClaimsFromJWT when you also need the accessKey or other claims.
+// Prefer ExtractClaimsFromJWT when you also need the virtualKey or other claims.
 func ExtractTenantIDFromJWT(tokenStr string, key []byte) (string, error) {
 	claims, err := ExtractClaimsFromJWT(tokenStr, key)
 	if err != nil {

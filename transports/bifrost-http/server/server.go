@@ -632,7 +632,78 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	} else {
 		s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModels)
 	}
+	s.syncListedModelsToConfigStore(ctx, provider, unfilteredModels, listModelsErr, allModels, bifrostErr)
 	return updatedProvider, nil
+}
+
+func (s *BifrostHTTPServer) syncListedModelsToConfigStore(
+	ctx context.Context,
+	provider schemas.ModelProvider,
+	unfiltered *schemas.BifrostListModelsResponse,
+	unfilteredErr *schemas.BifrostError,
+	filtered *schemas.BifrostListModelsResponse,
+	filteredErr *schemas.BifrostError,
+) {
+	if s.Config == nil {
+		return
+	}
+	store := s.Config.StoreFromContext(ctx)
+	if store == nil {
+		return
+	}
+
+	var listResp *schemas.BifrostListModelsResponse
+	if unfilteredErr == nil && unfiltered != nil {
+		listResp = unfiltered
+	} else if filteredErr == nil && filtered != nil {
+		listResp = filtered
+	} else {
+		return
+	}
+
+	modelNames := configstore.ModelNamesFromListResponse(provider, listResp)
+	if len(modelNames) == 0 {
+		return
+	}
+	if err := store.SyncProviderModels(ctx, provider, modelNames); err != nil {
+		logger.Warn("failed to sync config_models for provider %s: %v", provider, err)
+	}
+}
+
+// syncProviderModelsForAllTenants lists models for each tenant's providers and
+// persists them into that tenant's config_models table. Startup and pricing reload
+// paths run without a tenant on the root context, so they must iterate tenants
+// explicitly instead of relying on StoreFromContext(ctx).
+func (s *BifrostHTTPServer) syncProviderModelsForAllTenants(ctx context.Context) {
+	if s.Config == nil || s.Config.TenantStore == nil || s.Config.TenantStore.Registry == nil {
+		return
+	}
+
+	registry := s.Config.TenantStore.Registry
+	if err := registry.SyncTenants(ctx); err != nil {
+		logger.Warn("tenant model sync: failed to refresh tenant registry: %v", err)
+	}
+
+	for _, tenantID := range registry.ListTenantIDs(ctx) {
+		tenantCtx := context.WithValue(ctx, schemas.BifrostContextKeyTenantID, tenantID)
+		store := registry.GetStoreForTenant(ctx, tenantID)
+		if store == nil {
+			logger.Warn("tenant model sync: no config store for tenant %s", tenantID)
+			continue
+		}
+
+		providers, err := store.GetProvidersConfig(tenantCtx)
+		if err != nil {
+			logger.Warn("tenant model sync: failed to list providers for tenant %s: %v", tenantID, err)
+			continue
+		}
+
+		for provider := range providers {
+			if _, err := s.ReloadProvider(tenantCtx, provider); err != nil {
+				logger.Warn("tenant model sync: failed for tenant %s provider %s: %v", tenantID, provider, err)
+			}
+		}
+	}
 }
 
 // RemoveProvider removes a provider from the in-memory store
@@ -835,11 +906,11 @@ func (s *BifrostHTTPServer) populateModelPoolWithListModels(ctx context.Context)
 			bfCtx := schemas.NewBifrostContext(ctx, time.Now().Add(15*time.Second))
 			bfCtx.SetValue(schemas.BifrostContextKeySkipPluginPipeline, true)
 			defer bfCtx.Cancel()
-			modelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+			modelData, filteredErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
 				Provider: provider,
 			})
-			if listModelsErr != nil {
-				logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+			if filteredErr != nil {
+				logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(filteredErr))
 			}
 			allowedModels := make([]schemas.Model, 0)
 			for _, key := range providerConfig.Keys {
@@ -853,18 +924,22 @@ func (s *BifrostHTTPServer) populateModelPoolWithListModels(ctx context.Context)
 				}
 			}
 			s.Config.ModelCatalog.UpsertModelDataForProvider(provider, modelData, allowedModels)
-			unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+			unfilteredModelData, unfilteredErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
 				Provider:   provider,
 				Unfiltered: true,
 			})
-			if listModelsErr != nil {
-				logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+			if unfilteredErr != nil {
+				logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(unfilteredErr))
 			} else {
 				s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
 			}
+			s.syncListedModelsToConfigStore(ctx, provider, unfilteredModelData, unfilteredErr, modelData, filteredErr)
 		}(provider, providerConfig)
 	}
 	wg.Wait()
+	if s.Config.TenantStore != nil {
+		s.syncProviderModelsForAllTenants(ctx)
+	}
 	return nil
 }
 
@@ -1320,7 +1395,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		}
 		s.Config.TenantStore = tenantHolder
 		if tenantHolder != nil {
-			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey)
+			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey, tenantHolder.Registry)
 		}
 	}
 	if s.Config.KVStore != nil {
@@ -1429,17 +1504,17 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 				bfCtx.SetValue(schemas.BifrostContextKeySkipPluginPipeline, true)
 				defer bfCtx.Cancel()
 
-				modelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+				modelData, filteredErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
 					Provider: provider,
 				})
 				if modelData != nil && len(modelData.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
 					s.updateKeyStatus(ctx, modelData.KeyStatuses)
 				}
-				if listModelsErr != nil {
-					if len(listModelsErr.ExtraFields.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
-						s.updateKeyStatus(ctx, listModelsErr.ExtraFields.KeyStatuses)
+				if filteredErr != nil {
+					if len(filteredErr.ExtraFields.KeyStatuses) > 0 && s.Config.StoreFromContext(ctx) != nil {
+						s.updateKeyStatus(ctx, filteredErr.ExtraFields.KeyStatuses)
 					}
-					logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+					logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(filteredErr))
 				}
 				allowedModels := make([]schemas.Model, 0)
 				for _, key := range providerConfig.Keys {
@@ -1453,18 +1528,24 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 					}
 				}
 				s.Config.ModelCatalog.UpsertModelDataForProvider(provider, modelData, allowedModels)
-				unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+				unfilteredModelData, unfilteredErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
 					Provider:   provider,
 					Unfiltered: true,
 				})
-				if listModelsErr != nil {
-					logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+				if unfilteredErr != nil {
+					logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(unfilteredErr))
 				} else {
 					s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
+				}
+				if s.Config.TenantStore == nil {
+					s.syncListedModelsToConfigStore(ctx, provider, unfilteredModelData, unfilteredErr, modelData, filteredErr)
 				}
 			}(provider, providerConfig)
 		}
 		wg.Wait()
+		if s.Config.TenantStore != nil {
+			s.syncProviderModelsForAllTenants(ctx)
+		}
 	}
 	logger.Info("models added to catalog")
 	// Initialize routes

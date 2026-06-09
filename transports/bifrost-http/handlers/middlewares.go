@@ -1217,8 +1217,10 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 // automatically via VisitUserValuesAll.
 //
 // Values written to context on success:
-//   - BifrostContextKeyTenantID  — tenantId claim (UUID)
-//   - BifrostContextKeyAccessKey — accessKey claim (UUID, primary key of access_key_token)
+//   - BifrostContextKeyTenantID                — tenantId claim (UUID)
+//   - BifrostContextKeyGovernanceVirtualKeyID  — virtualKey claim (UUID, governance_virtual_keys.id)
+//   - BifrostContextKeyUserID                  — userId claim (UUID)
+//   - BifrostContextKeyGovernanceOrgID         — morgId claim (UUID) when present
 //
 // The JWT key is shared across all tenants and loaded from config.json at
 // startup. Both RS256 (PEM RSA public key) and HS256 (HMAC secret) are
@@ -1227,19 +1229,22 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 // Returns 401 when:
 //   - the Authorization header is missing or does not start with "Bearer "
 //   - the JWT signature is invalid or the token has expired
-//   - the tenantId or accessKey claims are absent or empty
+//   - the tenantId or virtualKey claims are absent or empty
+//   - the virtual key does not exist or is inactive in the tenant DB
 type TenantMiddleware struct {
-	jwtKey []byte
+	jwtKey   []byte
+	registry tenantstore.Resolver
 }
 
 // NewTenantMiddleware creates a TenantMiddleware using the supplied key bytes.
 // For RS256 tokens pass a PEM-encoded RSA public key; for HS256 pass the raw secret.
-func NewTenantMiddleware(jwtKey []byte) *TenantMiddleware {
-	return &TenantMiddleware{jwtKey: jwtKey}
+// registry resolves per-tenant config stores for virtual key validation.
+func NewTenantMiddleware(jwtKey []byte, registry tenantstore.Resolver) *TenantMiddleware {
+	return &TenantMiddleware{jwtKey: jwtKey, registry: registry}
 }
 
 // Middleware returns a schemas.BifrostHTTPMiddleware that validates the JWT and
-// injects tenantId + accessKey into the request context.
+// injects tenantId + virtualKey into the request context.
 // OptionalMiddleware returns tenant JWT middleware that skips whitelisted paths
 // (health, metrics, UI static, session login, etc.).
 func (m *TenantMiddleware) OptionalMiddleware() schemas.BifrostHTTPMiddleware {
@@ -1270,8 +1275,34 @@ func (m *TenantMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
 				return
 			}
 
+			if m.registry == nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, "tenant store not configured")
+				return
+			}
+			store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
+			if store == nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, "unknown tenant")
+				return
+			}
+			vk, vkErr := store.GetVirtualKey(ctx, claims.VirtualKey)
+			if vkErr != nil || vk == nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, "virtual key not found")
+				return
+			}
+			if !vk.IsActiveValue() {
+				SendError(ctx, fasthttp.StatusUnauthorized, "virtual key is inactive")
+				return
+			}
+
 			ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
-			ctx.SetUserValue(schemas.BifrostContextKeyAccessKey, claims.AccessKey)
+			ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, claims.VirtualKey)
+			ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, claims.VirtualKey)
+			if claims.UserID != "" {
+				ctx.SetUserValue(schemas.BifrostContextKeyUserID, claims.UserID)
+			}
+			if claims.MorgID != "" {
+				ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
+			}
 			next(ctx)
 		}
 	}

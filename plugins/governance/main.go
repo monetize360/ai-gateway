@@ -335,7 +335,7 @@ func (p *GovernancePlugin) UpdateEnforceAuthOnInference(enforceAuthOnInference b
 // It modifies the request in-place and returns nil to continue, or an HTTPResponse to short-circuit.
 // Optimized to skip unnecessary operations: only unmarshals/marshals when needed
 func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
-	virtualKeyValue := parseVirtualKeyFromHTTPRequest(req)
+	virtualKeyValue := VirtualKeyIDFromBifrostContext(ctx)
 	comp := p.getComponentsForContext(ctx)
 	if comp == nil {
 		return nil, nil
@@ -1188,9 +1188,9 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	}
 	p.cfgMutex.RLock()
 	if !isVirtualKeyValid && evaluationRequest.UserID == "" && p.isVkMandatory != nil && *p.isVkMandatory {
-		message := "virtual key is required. Provide a virtual key via the x-bf-vk header."
+		message := "virtual key is required. Authenticate with a tenant JWT that includes a virtualKey claim."
 		if p.isEnterprise {
-			message = "authentication is required. Provide a virtual key (x-bf-vk), API key, or user token."
+			message = "authentication is required. Provide a tenant JWT with virtualKey claim or user token."
 		}
 		p.cfgMutex.RUnlock()
 		return nil, &schemas.BifrostError{

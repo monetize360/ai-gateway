@@ -505,7 +505,7 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 	// For keyless providers, model discovery is skipped but we still need to
 	// call ReloadProvider directly so the config change is broadcast to cluster peers.
 	if payload.CustomProviderConfig != nil && payload.CustomProviderConfig.IsKeyLess {
-		ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctxWithTimeout, cancel := lib.ContextWithTimeoutPreservingTenant(ctx, 15*time.Second)
 		defer cancel()
 		if _, reloadErr := h.modelsManager.ReloadProvider(ctxWithTimeout, provider); reloadErr != nil {
 			logger.Warn("ReloadProvider failed for keyless provider %s: %v", provider, reloadErr)
@@ -749,16 +749,14 @@ func (h *ProviderHandler) parseModelListQuery(ctx *fasthttp.RequestCtx, defaultL
 		}
 	}
 
-	// Resolve virtual key from request headers and populate provider/model filters.
-	if vkValue := governanceplugin.ParseVirtualKeyFromFastHTTPRequest(ctx); vkValue != nil {
-		trimmedVKValue := strings.TrimSpace(*vkValue)
-
+	// Resolve virtual key from tenant JWT context and populate provider/model filters.
+	if vkID := governanceplugin.VirtualKeyIDFromFastHTTPContext(ctx); vkID != "" {
 		if h.inMemoryStore.StoreFromRequestCtx(ctx) == nil {
 			SendError(ctx, fasthttp.StatusServiceUnavailable, "database store unavailable")
 			return query, false
 		}
 
-		vk, err := h.inMemoryStore.StoreFromRequestCtx(ctx).GetVirtualKeyByValue(ctx, trimmedVKValue)
+		vk, err := h.inMemoryStore.StoreFromRequestCtx(ctx).GetVirtualKey(ctx, vkID)
 		if err != nil {
 			if !errors.Is(err, configstore.ErrNotFound) {
 				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to resolve virtual key: %v", err))
@@ -1090,7 +1088,7 @@ func (h *ProviderHandler) listBaseModels(ctx *fasthttp.RequestCtx) {
 // reloadProviderAfterCreate performs a single bounded runtime reload after provider creation.
 // ReloadProvider also refreshes model discovery, so create should not invoke a second discovery pass.
 func (h *ProviderHandler) reloadProviderAfterCreate(ctx *fasthttp.RequestCtx, provider schemas.ModelProvider) error {
-	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctxWithTimeout, cancel := lib.ContextWithTimeoutPreservingTenant(ctx, 15*time.Second)
 	defer cancel()
 
 	_, err := h.modelsManager.ReloadProvider(ctxWithTimeout, provider)
@@ -1108,7 +1106,7 @@ func (h *ProviderHandler) attemptModelDiscovery(ctx *fasthttp.RequestCtx, provid
 	}
 
 	// Attempt model discovery with reasonable timeout
-	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctxWithTimeout, cancel := lib.ContextWithTimeoutPreservingTenant(ctx, 15*time.Second)
 	defer cancel()
 
 	_, err := h.modelsManager.ReloadProvider(ctxWithTimeout, provider)

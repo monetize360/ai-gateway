@@ -3,6 +3,7 @@ package lib
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -61,4 +62,17 @@ func TenantIDFromRequest(ctx *fasthttp.RequestCtx) string {
 	}
 	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
 	return tenantID
+}
+
+// ContextWithTimeoutPreservingTenant returns a detached context.Context with the
+// same tenant ID as parent and the given timeout. Use this for background work
+// started from a tenant-scoped HTTP request so StoreFromContext keeps resolving
+// the correct tenant database.
+func ContextWithTimeoutPreservingTenant(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	tenantID := TenantIDFromContext(parent)
+	if tenantID == "" {
+		return context.WithTimeout(parent, timeout)
+	}
+	base := context.WithValue(context.Background(), schemas.BifrostContextKeyTenantID, tenantID)
+	return context.WithTimeout(base, timeout)
 }

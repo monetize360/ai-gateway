@@ -120,6 +120,7 @@ type ConfigStore interface {
 	DeleteProviderKey(ctx context.Context, provider schemas.ModelProvider, keyID string, tx ...*gorm.DB) error
 	GetProviders(ctx context.Context) ([]tables.TableProvider, error)
 	GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
+	SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tx ...*gorm.DB) error
 	UpdateStatus(ctx context.Context, provider schemas.ModelProvider, keyID string, status, errorMsg string) error
 
 	// MCP config CRUD
@@ -198,6 +199,10 @@ type ConfigStore interface {
 
 	// Organization hierarchy (read-only; sourced from mpilotv2 organizations table)
 	GetOrganizations(ctx context.Context) ([]tables.TableOrganization, error)
+
+	// Incremental refresh (updated_at watermark). Returns nil delta when since is zero (full reload required).
+	GetGovernanceRefreshDelta(ctx context.Context, since time.Time) (*GovernanceRefreshDelta, error)
+	GetProviderConfigRefreshDelta(ctx context.Context, since time.Time) (*ProviderConfigRefreshDelta, error)
 
 	// Org limit CRUD (per-org budget/rate-limit references)
 	GetOrgLimits(ctx context.Context) ([]tables.TableOrgLimit, error)

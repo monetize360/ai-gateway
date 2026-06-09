@@ -28,32 +28,32 @@ func TestGovernanceStore_GetVirtualKey(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		vkValue string
+		vkID    string
 		wantNil bool
 		wantID  string
 	}{
 		{
 			name:    "Found active VK",
-			vkValue: "sk-bf-test1",
+			vkID:    "vk1",
 			wantNil: false,
 			wantID:  "vk1",
 		},
 		{
 			name:    "Found inactive VK",
-			vkValue: "sk-bf-test2",
+			vkID:    "vk2",
 			wantNil: false,
 			wantID:  "vk2",
 		},
 		{
 			name:    "VK not found",
-			vkValue: "sk-bf-nonexistent",
+			vkID:    "vk-missing",
 			wantNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vk, exists := store.GetVirtualKey(context.Background(), tt.vkValue)
+			vk, exists := store.GetVirtualKey(context.Background(), tt.vkID)
 			if tt.wantNil {
 				assert.False(t, exists)
 				assert.Nil(t, vk)
@@ -85,7 +85,7 @@ func TestGovernanceStore_ConcurrentReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				vk, exists := store.GetVirtualKey(context.Background(), "sk-bf-test")
+				vk, exists := store.GetVirtualKey(context.Background(), "vk1")
 				if !exists || vk == nil {
 					errorCount.Add(1)
 					return
@@ -114,7 +114,7 @@ func TestGovernanceStore_CheckBudget_SingleBudget(t *testing.T) {
 	require.NoError(t, err)
 
 	// Retrieve VK with budget
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 
 	tests := []struct {
 		name      string
@@ -152,7 +152,7 @@ func TestGovernanceStore_CheckBudget_SingleBudget(t *testing.T) {
 				Budgets:     []configstoreTables.TableBudget{*testBudget},
 			}, nil)
 
-			testVK, _ = testStore.GetVirtualKey(context.Background(), "sk-bf-test")
+			testVK, _ = testStore.GetVirtualKey(context.Background(), "vk1")
 			_, err := testStore.CheckVirtualKeyBudget(context.Background(), testVK, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
 			if tt.shouldErr {
 				assert.Error(t, err, "Expected error for usage check")
@@ -190,7 +190,7 @@ func TestGovernanceStore_CheckBudget_HierarchyValidation(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 
 	// Test: All budgets under limit should pass
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
@@ -232,7 +232,7 @@ func TestGovernanceStore_MultiBudget_AllUnderLimit(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
 	assert.NoError(t, err, "Should pass when all budgets are under limit")
 }
@@ -257,7 +257,7 @@ func TestGovernanceStore_MultiBudget_SmallBudgetExceeded(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
 	require.Error(t, err, "Should fail when hourly budget is exceeded even though daily is fine")
 	assert.Contains(t, err.Error(), "budget exceeded")
@@ -283,7 +283,7 @@ func TestGovernanceStore_MultiBudget_LargeBudgetExceeded(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
 	require.Error(t, err, "Should fail when daily budget is exceeded even though hourly is fine")
 	assert.Contains(t, err.Error(), "budget exceeded")
@@ -308,7 +308,7 @@ func TestGovernanceStore_MultiBudget_UsageUpdatesAllBudgets(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 
 	// Simulate a $3.50 request
 	err = store.UpdateVirtualKeyBudgetUsageInMemory(context.Background(), vk, schemas.OpenAI, 3.50)
@@ -359,7 +359,7 @@ func TestGovernanceStore_MultiBudget_ProviderConfigBudgets(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
 	require.Error(t, err, "Should fail when provider config hourly budget is exceeded")
 	assert.Contains(t, err.Error(), "budget exceeded")
@@ -388,7 +388,7 @@ func TestGovernanceStore_MultiBudget_VKAndProviderConfigCombined(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 
 	// Provider config budget exceeded → should block even though VK budget is fine
 	_, err = store.CheckVirtualKeyBudget(context.Background(), vk, &EvaluationRequest{Provider: schemas.OpenAI}, nil)
@@ -419,7 +419,7 @@ func TestGovernanceStore_MultiBudget_ResolverBlocksOnBudgetExceeded(t *testing.T
 	resolver := NewBudgetResolver(store, nil, logger, nil)
 	ctx := &schemas.BifrostContext{}
 
-	result := resolver.EvaluateVirtualKeyRequest(ctx, "sk-bf-test", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
+	result := resolver.EvaluateVirtualKeyRequest(ctx, "vk1", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
 	assertDecision(t, DecisionBudgetExceeded, result)
 	assert.Contains(t, result.Reason, "budget exceeded")
 }
@@ -446,7 +446,7 @@ func TestGovernanceStore_MultiBudget_ResolverAllowsUnderLimit(t *testing.T) {
 	resolver := NewBudgetResolver(store, nil, logger, nil)
 	ctx := &schemas.BifrostContext{}
 
-	result := resolver.EvaluateVirtualKeyRequest(ctx, "sk-bf-test", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
+	result := resolver.EvaluateVirtualKeyRequest(ctx, "vk1", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
 	assertDecision(t, DecisionAllow, result)
 }
 
@@ -474,30 +474,30 @@ func TestGovernanceStore_MultiBudget_UsageDrivesBlockAfterRequests(t *testing.T)
 	resolver := NewBudgetResolver(store, nil, logger, nil)
 
 	// Request 1: $0.80 — both budgets fine
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	err = store.UpdateVirtualKeyBudgetUsageInMemory(context.Background(), vk, schemas.OpenAI, 0.80)
 	require.NoError(t, err)
 
 	ctx := &schemas.BifrostContext{}
-	result := resolver.EvaluateVirtualKeyRequest(ctx, "sk-bf-test", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
+	result := resolver.EvaluateVirtualKeyRequest(ctx, "vk1", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
 	assertDecision(t, DecisionAllow, result)
 
 	// Request 2: $0.80 — still fine ($1.60 total)
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	err = store.UpdateVirtualKeyBudgetUsageInMemory(context.Background(), vk, schemas.OpenAI, 0.80)
 	require.NoError(t, err)
 
 	ctx = &schemas.BifrostContext{}
-	result = resolver.EvaluateVirtualKeyRequest(ctx, "sk-bf-test", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
+	result = resolver.EvaluateVirtualKeyRequest(ctx, "vk1", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
 	assertDecision(t, DecisionAllow, result)
 
 	// Request 3: $0.80 — pushes hourly to $2.40 > $2.00 limit → blocked
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	err = store.UpdateVirtualKeyBudgetUsageInMemory(context.Background(), vk, schemas.OpenAI, 0.80)
 	require.NoError(t, err)
 
 	ctx = &schemas.BifrostContext{}
-	result = resolver.EvaluateVirtualKeyRequest(ctx, "sk-bf-test", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
+	result = resolver.EvaluateVirtualKeyRequest(ctx, "vk1", schemas.OpenAI, "gpt-4", schemas.ChatCompletionRequest, false)
 	assertDecision(t, DecisionBudgetExceeded, result)
 	assert.Contains(t, result.Reason, "budget exceeded")
 
@@ -542,7 +542,7 @@ func TestGovernanceStore_MultiBudget_CalendarAligned(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify VK-level calendar_aligned is set
-	vk, _ = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	vk, _ = store.GetVirtualKey(context.Background(), "vk1")
 	assert.True(t, vk.CalendarAligned, "VK should have calendar_aligned=true")
 
 	// Both under limit — should pass
@@ -575,7 +575,7 @@ func TestGovernanceStore_MultiBudget_InMemoryCreateAndDelete(t *testing.T) {
 	_, exists = store.budgets.Load("b2")
 	assert.True(t, exists, "Budget b2 should be in memory after create")
 
-	retrieved, found := store.GetVirtualKey(context.Background(), "sk-bf-test")
+	retrieved, found := store.GetVirtualKey(context.Background(), "vk1")
 	require.True(t, found)
 	assert.Len(t, retrieved.Budgets, 2, "VK should have 2 budgets")
 
@@ -587,14 +587,14 @@ func TestGovernanceStore_MultiBudget_InMemoryCreateAndDelete(t *testing.T) {
 	_, exists = store.budgets.Load("b2")
 	assert.False(t, exists, "Budget b2 should be removed after delete")
 
-	_, found = store.GetVirtualKey(context.Background(), "sk-bf-test")
+	_, found = store.GetVirtualKey(context.Background(), "vk1")
 	assert.False(t, found, "VK should not be found after delete")
 }
 
-func TestGovernanceStore_UpdateVirtualKeyInMemory_RotatedValueRemovesOldLookup(t *testing.T) {
+func TestGovernanceStore_UpdateVirtualKeyInMemory_PreservesUsageByID(t *testing.T) {
 	logger := NewMockLogger()
 	budget := buildBudgetWithUsage("budget1", 100.0, 25.0, "1d")
-	vk := buildVirtualKeyWithBudget("vk1", "sk-bf-old", "Test VK", budget)
+	vk := buildVirtualKeyWithBudget("vk1", "", "Test VK", budget)
 
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
 		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
@@ -603,19 +603,15 @@ func TestGovernanceStore_UpdateVirtualKeyInMemory_RotatedValueRemovesOldLookup(t
 	require.NoError(t, err)
 
 	updated := *vk
-	updated.Value = "sk-bf-new"
+	updated.Name = "Updated VK"
 	store.UpdateVirtualKeyInMemory(context.Background(), &updated, nil, nil, nil)
 
-	oldVK, oldFound := store.GetVirtualKey(context.Background(), "sk-bf-old")
-	assert.False(t, oldFound)
-	assert.Nil(t, oldVK)
-
-	newVK, newFound := store.GetVirtualKey(context.Background(), "sk-bf-new")
-	require.True(t, newFound)
-	require.NotNil(t, newVK)
-	assert.Equal(t, "vk1", newVK.ID)
-	require.Len(t, newVK.Budgets, 1)
-	assert.Equal(t, 25.0, newVK.Budgets[0].CurrentUsage)
+	loadedVK, found := store.GetVirtualKey(context.Background(), "vk1")
+	require.True(t, found)
+	require.NotNil(t, loadedVK)
+	assert.Equal(t, "Updated VK", loadedVK.Name)
+	require.Len(t, loadedVK.Budgets, 1)
+	assert.Equal(t, 25.0, loadedVK.Budgets[0].CurrentUsage)
 }
 
 // TestGovernanceStore_UpdateRateLimitUsage_TokensAndRequests tests atomic rate limit usage updates
@@ -690,7 +686,7 @@ func TestGovernanceStore_ResetExpiredRateLimits(t *testing.T) {
 	assert.NoError(t, err, "Reset should succeed")
 
 	// Retrieve the updated VK to check rate limit changes
-	updatedVK, _ := store.GetVirtualKey(context.Background(), "sk-bf-test")
+	updatedVK, _ := store.GetVirtualKey(context.Background(), "vk1")
 	require.NotNil(t, updatedVK)
 	require.NotNil(t, updatedVK.RateLimit)
 
@@ -725,7 +721,7 @@ func TestGovernanceStore_ResetExpiredBudgets(t *testing.T) {
 	assert.NoError(t, err, "Reset should succeed")
 
 	// Retrieve the updated VK to check budget changes
-	updatedVK, _ := store.GetVirtualKey(context.Background(), "sk-bf-test")
+	updatedVK, _ := store.GetVirtualKey(context.Background(), "vk1")
 	require.NotNil(t, updatedVK)
 	require.True(t, len(updatedVK.Budgets) > 0, "VK should have budgets")
 

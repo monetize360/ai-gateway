@@ -11,72 +11,32 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// ParseVirtualKeyFromFastHTTPRequest parses the virtual key from FastHTTP request headers.
-// Parameters:
-//   - req: The FastHTTP request containing headers to parse
-//
-// Returns:
-//   - *string: The virtual key if found, nil otherwise
-func ParseVirtualKeyFromFastHTTPRequest(req *fasthttp.RequestCtx) *string {
-	vkHeader := string(req.Request.Header.Peek("x-bf-vk"))
-	if vkHeader != "" && strings.HasPrefix(strings.ToLower(vkHeader), VirtualKeyPrefix) {
-		return bifrost.Ptr(vkHeader)
+// VirtualKeyIDFromBifrostContext returns the virtual key UUID injected by tenant JWT middleware.
+func VirtualKeyIDFromBifrostContext(ctx *schemas.BifrostContext) *string {
+	if ctx == nil {
+		return nil
 	}
-	authHeader := string(req.Request.Header.Peek("Authorization"))
-	if authHeader != "" {
-		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-			authHeaderValue := strings.TrimSpace(authHeader[7:]) // Remove "Bearer " prefix
-			if authHeaderValue != "" && strings.HasPrefix(strings.ToLower(authHeaderValue), VirtualKeyPrefix) {
-				return bifrost.Ptr(authHeaderValue)
-			}
-		}
+	if id := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID); id != "" {
+		return bifrost.Ptr(id)
 	}
-	xAPIKey := string(req.Request.Header.Peek("x-api-key"))
-	if xAPIKey != "" && strings.HasPrefix(strings.ToLower(xAPIKey), VirtualKeyPrefix) {
-		return bifrost.Ptr(xAPIKey)
-	}
-	xGoogleAPIKey := string(req.Request.Header.Peek("x-goog-api-key"))
-	if xGoogleAPIKey != "" && strings.HasPrefix(strings.ToLower(xGoogleAPIKey), VirtualKeyPrefix) {
-		return bifrost.Ptr(xGoogleAPIKey)
+	if id := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey); id != "" {
+		return bifrost.Ptr(id)
 	}
 	return nil
 }
 
-// parseVirtualKeyFromHTTPRequest parses the virtual key from HTTP request headers.
-// It checks multiple headers in order: x-bf-vk, Authorization (Bearer token), x-api-key, and x-goog-api-key.
-// Parameters:
-//   - req: The HTTP request containing headers to parse
-//
-// Returns:
-//   - *string: The virtual key if found, nil otherwise
-func parseVirtualKeyFromHTTPRequest(req *schemas.HTTPRequest) *string {
-	var virtualKeyValue string
-	vkHeader := req.CaseInsensitiveHeaderLookup("x-bf-vk")
-	if vkHeader != "" && strings.HasPrefix(strings.ToLower(vkHeader), VirtualKeyPrefix) {
-		return bifrost.Ptr(vkHeader)
+// VirtualKeyIDFromFastHTTPContext returns the virtual key UUID from tenant JWT user values.
+func VirtualKeyIDFromFastHTTPContext(ctx *fasthttp.RequestCtx) string {
+	if ctx == nil {
+		return ""
 	}
-	authHeader := req.CaseInsensitiveHeaderLookup("Authorization")
-	if authHeader != "" {
-		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-			authHeaderValue := strings.TrimSpace(authHeader[7:]) // Remove "Bearer " prefix
-			if authHeaderValue != "" && strings.HasPrefix(strings.ToLower(authHeaderValue), VirtualKeyPrefix) {
-				virtualKeyValue = authHeaderValue
-			}
-		}
+	if id, ok := ctx.UserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string); ok && id != "" {
+		return id
 	}
-	if virtualKeyValue != "" {
-		return bifrost.Ptr(virtualKeyValue)
+	if id, ok := ctx.UserValue(schemas.BifrostContextKeyVirtualKey).(string); ok && id != "" {
+		return id
 	}
-	xAPIKey := req.CaseInsensitiveHeaderLookup("x-api-key")
-	if xAPIKey != "" && strings.HasPrefix(strings.ToLower(xAPIKey), VirtualKeyPrefix) {
-		return bifrost.Ptr(xAPIKey)
-	}
-	// Checking x-goog-api-key header
-	xGoogleAPIKey := req.CaseInsensitiveHeaderLookup("x-goog-api-key")
-	if xGoogleAPIKey != "" && strings.HasPrefix(strings.ToLower(xGoogleAPIKey), VirtualKeyPrefix) {
-		return bifrost.Ptr(xGoogleAPIKey)
-	}
-	return nil
+	return ""
 }
 
 // getWeight safely dereferences a *float64 weight pointer, returning 1.0 as default if nil.
@@ -123,15 +83,15 @@ func isModelBlockedByList(blacklist schemas.BlackList, model string) bool {
 func (p *GovernancePlugin) filterModelsForVirtualKey(
 	ctx context.Context,
 	models []schemas.Model,
-	virtualKeyValue string,
+	virtualKeyID string,
 ) []schemas.Model {
 	comp := p.getComponentsForContext(ctx)
 	if comp == nil {
 		return []schemas.Model{}
 	}
-	vk, exists := comp.store.GetVirtualKey(ctx, virtualKeyValue)
+	vk, exists := comp.store.GetVirtualKey(ctx, virtualKeyID)
 	if !exists {
-		p.logger.Warn("[Governance] Virtual key not found for list models filtering: %s", virtualKeyValue)
+		p.logger.Warn("[Governance] Virtual key not found for list models filtering: %s", virtualKeyID)
 		return []schemas.Model{} // VK not found, return empty list
 	}
 
