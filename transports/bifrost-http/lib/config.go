@@ -497,33 +497,37 @@ func promoteDeprecatedCalendarAligned(configData *ConfigData) {
 	}
 	for i := range configData.Governance.VirtualKeys {
 		vk := &configData.Governance.VirtualKeys[i]
-		promoteCalendarAligned(&vk.CalendarAligned, vk.Budgets, vk.RateLimit)
+		promoteCalendarAligned(&vk.CalendarAligned, vk.Budgets, vk.RateLimits)
 		for j := range vk.ProviderConfigs {
 			pc := &vk.ProviderConfigs[j]
-			promoteCalendarAligned(&vk.CalendarAligned, pc.Budgets, pc.RateLimit)
+			promoteCalendarAligned(&vk.CalendarAligned, pc.Budgets, pc.RateLimits)
 		}
 	}
 	for i := range configData.Governance.Teams {
 		team := &configData.Governance.Teams[i]
-		promoteCalendarAligned(&team.CalendarAligned, team.Budgets, team.RateLimit)
+		var teamRateLimits []configstoreTables.TableRateLimit
+		if team.RateLimit != nil {
+			teamRateLimits = []configstoreTables.TableRateLimit{*team.RateLimit}
+		}
+		promoteCalendarAligned(&team.CalendarAligned, team.Budgets, teamRateLimits)
 	}
 }
 
 // promoteCalendarAligned ORs each child's legacy calendar_aligned input into
 // the owner's flag and clears the child field. Treats a nil child pointer as
 // "not set" — only explicit true contributes.
-func promoteCalendarAligned(owner *bool, budgets []configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit) {
+func promoteCalendarAligned(owner *bool, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit) {
 	for i := range budgets {
 		if budgets[i].CalendarAlignedInput != nil && *budgets[i].CalendarAlignedInput {
 			*owner = true
 		}
 		budgets[i].CalendarAlignedInput = nil
 	}
-	if rateLimit != nil && rateLimit.CalendarAlignedInput != nil {
-		if *rateLimit.CalendarAlignedInput {
+	for i := range rateLimits {
+		if rateLimits[i].CalendarAlignedInput != nil && *rateLimits[i].CalendarAlignedInput {
 			*owner = true
 		}
-		rateLimit.CalendarAlignedInput = nil
+		rateLimits[i].CalendarAlignedInput = nil
 	}
 }
 
@@ -2167,6 +2171,9 @@ func updateGovernanceConfigInStore(
 			if err := config.StoreFromContext(ctx).CreateModelConfig(ctx, &modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to create model config %s: %w", modelConfig.ID, err)
 			}
+			if err := syncModelConfigGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, &modelConfig); err != nil {
+				return err
+			}
 		}
 
 		// Update model configs (config.json changed)
@@ -2177,9 +2184,12 @@ func updateGovernanceConfigInStore(
 			if err := config.StoreFromContext(ctx).UpdateModelConfig(ctx, &modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to update model config %s: %w", modelConfig.ID, err)
 			}
+			if err := syncModelConfigGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, &modelConfig); err != nil {
+				return err
+			}
 		}
 
-		// Upsert provider governance links (budget_id/rate_limit_id) for newly added mappings.
+		// Upsert provider governance links via child-row ownership for newly added mappings.
 		for _, provider := range providersToAdd {
 			if provider.Name == "" {
 				continue
@@ -2187,24 +2197,8 @@ func updateGovernanceConfigInStore(
 			if err := validateProviderGovernanceOwnership(tx, provider); err != nil {
 				return err
 			}
-			updates := map[string]interface{}{
-				"budget_id":     provider.BudgetID,
-				"rate_limit_id": provider.RateLimitID,
-			}
-			result := tx.Model(&configstoreTables.TableProvider{}).
-				Where("name = ?", provider.Name).
-				Select("budget_id", "rate_limit_id").
-				Updates(updates)
-			if result.Error != nil {
-				return fmt.Errorf("failed to create provider governance mapping for %s: %w", provider.Name, result.Error)
-			}
-			if result.RowsAffected == 0 {
-				return fmt.Errorf(
-					"failed to create provider governance mapping for %s: no provider row found (budget_id=%v, rate_limit_id=%v)",
-					provider.Name,
-					provider.BudgetID,
-					provider.RateLimitID,
-				)
+			if err := syncProviderGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, provider); err != nil {
+				return err
 			}
 		}
 
@@ -2216,24 +2210,8 @@ func updateGovernanceConfigInStore(
 			if err := validateProviderGovernanceOwnership(tx, provider); err != nil {
 				return err
 			}
-			updates := map[string]interface{}{
-				"budget_id":     provider.BudgetID,
-				"rate_limit_id": provider.RateLimitID,
-			}
-			result := tx.Model(&configstoreTables.TableProvider{}).
-				Where("name = ?", provider.Name).
-				Select("budget_id", "rate_limit_id").
-				Updates(updates)
-			if result.Error != nil {
-				return fmt.Errorf("failed to update provider governance mapping for %s: %w", provider.Name, result.Error)
-			}
-			if result.RowsAffected == 0 {
-				return fmt.Errorf(
-					"failed to update provider governance mapping for %s: no provider row found (budget_id=%v, rate_limit_id=%v)",
-					provider.Name,
-					provider.BudgetID,
-					provider.RateLimitID,
-				)
+			if err := syncProviderGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, provider); err != nil {
+				return err
 			}
 		}
 
@@ -2242,108 +2220,128 @@ func updateGovernanceConfigInStore(
 }
 
 func validateModelConfigGovernanceOwnership(tx *gorm.DB, modelConfig configstoreTables.TableModelConfig) error {
-	if err := validateBudgetLinkOwnership(tx, modelConfig.BudgetID, "model config", modelConfig.ID); err != nil {
-		return err
+	for i := range modelConfig.Budgets {
+		if err := validateBudgetLinkOwnership(tx, modelConfig.Budgets[i].ID, "model_config_id", modelConfig.ID, "model config", modelConfig.ID); err != nil {
+			return err
+		}
 	}
-	if err := validateRateLimitLinkOwnership(tx, modelConfig.RateLimitID, "model config", modelConfig.ID); err != nil {
-		return err
+	for i := range modelConfig.RateLimits {
+		if err := validateRateLimitLinkOwnership(tx, modelConfig.RateLimits[i].ID, "model_config_id", modelConfig.ID, "model config", modelConfig.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func validateProviderGovernanceOwnership(tx *gorm.DB, provider configstoreTables.TableProvider) error {
-	if err := validateBudgetLinkOwnership(tx, provider.BudgetID, "provider", provider.Name); err != nil {
-		return err
+	var providerID string
+	if len(provider.Budgets) > 0 || len(provider.RateLimits) > 0 {
+		if err := tx.Model(&configstoreTables.TableProvider{}).Where("name = ?", provider.Name).Select("id").Scan(&providerID).Error; err != nil {
+			return fmt.Errorf("failed to look up provider %q: %w", provider.Name, err)
+		}
+		if providerID == "" {
+			return fmt.Errorf("provider %q not found", provider.Name)
+		}
 	}
-	if err := validateRateLimitLinkOwnership(tx, provider.RateLimitID, "provider", provider.Name); err != nil {
-		return err
+	for i := range provider.Budgets {
+		if err := validateBudgetLinkOwnership(tx, provider.Budgets[i].ID, "provider_id", providerID, "provider", provider.Name); err != nil {
+			return err
+		}
+	}
+	for i := range provider.RateLimits {
+		if err := validateRateLimitLinkOwnership(tx, provider.RateLimits[i].ID, "provider_id", providerID, "provider", provider.Name); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func validateBudgetLinkOwnership(tx *gorm.DB, budgetID *string, ownerType, ownerID string) error {
-	if budgetID == nil {
-		return nil
+func budgetOwnerConflict(b configstoreTables.TableBudget, allowedField, allowedID string) string {
+	checks := []struct {
+		field string
+		id    *string
+	}{
+		{"virtual_key_id", b.VirtualKeyID},
+		{"provider_config_id", b.ProviderConfigID},
+		{"team_id", b.TeamID},
+		{"provider_id", b.ProviderID},
+		{"model_config_id", b.ModelConfigID},
+		{"governed_organization_id", b.GovernedOrganizationID},
 	}
-	id := strings.TrimSpace(*budgetID)
+	for _, c := range checks {
+		if c.id == nil || *c.id == "" {
+			continue
+		}
+		if c.field == allowedField && *c.id == allowedID {
+			continue
+		}
+		return c.field
+	}
+	return ""
+}
+
+func rateLimitOwnerConflict(rl configstoreTables.TableRateLimit, allowedField, allowedID string) string {
+	checks := []struct {
+		field string
+		id    *string
+	}{
+		{"virtual_key_id", rl.VirtualKeyID},
+		{"provider_config_id", rl.ProviderConfigID},
+		{"provider_id", rl.ProviderID},
+		{"model_config_id", rl.ModelConfigID},
+		{"governed_organization_id", rl.GovernedOrganizationID},
+	}
+	for _, c := range checks {
+		if c.id == nil || *c.id == "" {
+			continue
+		}
+		if c.field == allowedField && *c.id == allowedID {
+			continue
+		}
+		return c.field
+	}
+	return ""
+}
+
+func validateBudgetLinkOwnership(tx *gorm.DB, budgetID, ownerField, ownerID, ownerType, ownerLabel string) error {
+	id := strings.TrimSpace(budgetID)
 	if id == "" {
 		return nil
 	}
 
 	var budget configstoreTables.TableBudget
-	if err := tx.Select("id", "virtual_key_id", "provider_config_id").Where("id = ?", id).First(&budget).Error; err != nil {
+	if err := tx.Select("id", "virtual_key_id", "provider_config_id", "team_id", "provider_id", "model_config_id", "governed_organization_id").
+		Where("id = ?", id).First(&budget).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("budget_id %q referenced by %s %q does not exist", id, ownerType, ownerID)
+			return fmt.Errorf("budget_id %q referenced by %s %q does not exist", id, ownerType, ownerLabel)
 		}
-		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerID, err)
+		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerLabel, err)
 	}
 
-	if budget.VirtualKeyID != nil || budget.ProviderConfigID != nil {
-		return fmt.Errorf("budget_id %q is already owned by another governance entity and cannot be linked to %s %q", id, ownerType, ownerID)
-	}
-
-	modelQuery := tx.Model(&configstoreTables.TableModelConfig{}).Where("budget_id = ?", id)
-	if ownerType == "model config" {
-		modelQuery = modelQuery.Where("id <> ?", ownerID)
-	}
-	var modelOwner configstoreTables.TableModelConfig
-	if err := modelQuery.Select("id").First(&modelOwner).Error; err == nil {
-		return fmt.Errorf("budget_id %q is already linked to model config %q; cannot link to %s %q", id, modelOwner.ID, ownerType, ownerID)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerID, err)
-	}
-
-	providerQuery := tx.Model(&configstoreTables.TableProvider{}).Where("budget_id = ?", id)
-	if ownerType == "provider" {
-		providerQuery = providerQuery.Where("name <> ?", ownerID)
-	}
-	var providerOwner configstoreTables.TableProvider
-	if err := providerQuery.Select("name").First(&providerOwner).Error; err == nil {
-		return fmt.Errorf("budget_id %q is already linked to provider %q; cannot link to %s %q", id, providerOwner.Name, ownerType, ownerID)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate budget ownership for %s %q: %w", ownerType, ownerID, err)
+	if conflict := budgetOwnerConflict(budget, ownerField, ownerID); conflict != "" {
+		return fmt.Errorf("budget_id %q is already owned by %s and cannot be linked to %s %q", id, conflict, ownerType, ownerLabel)
 	}
 
 	return nil
 }
 
-func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID *string, ownerType, ownerID string) error {
-	if rateLimitID == nil {
-		return nil
-	}
-	id := strings.TrimSpace(*rateLimitID)
+func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID, ownerField, ownerID, ownerType, ownerLabel string) error {
+	id := strings.TrimSpace(rateLimitID)
 	if id == "" {
 		return nil
 	}
 
 	var rateLimit configstoreTables.TableRateLimit
-	if err := tx.Select("id").Where("id = ?", id).First(&rateLimit).Error; err != nil {
+	if err := tx.Select("id", "virtual_key_id", "provider_config_id", "provider_id", "model_config_id", "governed_organization_id").
+		Where("id = ?", id).First(&rateLimit).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("rate_limit_id %q referenced by %s %q does not exist", id, ownerType, ownerID)
+			return fmt.Errorf("rate_limit_id %q referenced by %s %q does not exist", id, ownerType, ownerLabel)
 		}
-		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
+		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerLabel, err)
 	}
 
-	modelQuery := tx.Model(&configstoreTables.TableModelConfig{}).Where("rate_limit_id = ?", id)
-	if ownerType == "model config" {
-		modelQuery = modelQuery.Where("id <> ?", ownerID)
-	}
-	var modelOwner configstoreTables.TableModelConfig
-	if err := modelQuery.Select("id").First(&modelOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to model config %q; cannot link to %s %q", id, modelOwner.ID, ownerType, ownerID)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
-	}
-
-	providerQuery := tx.Model(&configstoreTables.TableProvider{}).Where("rate_limit_id = ?", id)
-	if ownerType == "provider" {
-		providerQuery = providerQuery.Where("name <> ?", ownerID)
-	}
-	var providerOwner configstoreTables.TableProvider
-	if err := providerQuery.Select("name").First(&providerOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to provider %q; cannot link to %s %q", id, providerOwner.Name, ownerType, ownerID)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
+	if conflict := rateLimitOwnerConflict(rateLimit, ownerField, ownerID); conflict != "" {
+		return fmt.Errorf("rate_limit_id %q is already owned by %s and cannot be linked to %s %q", id, conflict, ownerType, ownerLabel)
 	}
 
 	var teamOwner configstoreTables.TableTeam
@@ -2351,21 +2349,131 @@ func validateRateLimitLinkOwnership(tx *gorm.DB, rateLimitID *string, ownerType,
 		Where("rate_limit_id = ?", id).
 		Select("id").
 		First(&teamOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to team %q; cannot link to %s %q", id, teamOwner.ID, ownerType, ownerID)
+		return fmt.Errorf("rate_limit_id %q is already linked to team %q; cannot link to %s %q", id, teamOwner.ID, ownerType, ownerLabel)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
+		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerLabel, err)
 	}
 
-	var vkOwner configstoreTables.TableVirtualKeyProviderConfig
-	if err := tx.Model(&configstoreTables.TableVirtualKeyProviderConfig{}).
-		Where("rate_limit_id = ?", id).
-		Select("id").
-		First(&vkOwner).Error; err == nil {
-		return fmt.Errorf("rate_limit_id %q is already linked to virtual-key provider config %s; cannot link to %s %q", id, vkOwner.ID, ownerType, ownerID)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to validate rate_limit ownership for %s %q: %w", ownerType, ownerID, err)
-	}
+	return nil
+}
 
+func syncProviderGovernanceFromConfig(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, provider configstoreTables.TableProvider) error {
+	var dbProvider configstoreTables.TableProvider
+	if err := tx.Select("id").Where("name = ?", provider.Name).First(&dbProvider).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("failed to apply provider governance config for %s: no provider row found", provider.Name)
+		}
+		return fmt.Errorf("failed to look up provider %s: %w", provider.Name, err)
+	}
+	if err := syncOwnerBudgetsFromConfig(ctx, store, tx, "provider_id", dbProvider.ID, provider.Budgets, provider.Name, "provider",
+		func(b *configstoreTables.TableBudget, ownerID string) { b.ProviderID = &ownerID },
+	); err != nil {
+		return err
+	}
+	return syncOwnerRateLimitsFromConfig(ctx, store, tx, "provider_id", dbProvider.ID, provider.RateLimits, provider.Name, "provider",
+		func(rl *configstoreTables.TableRateLimit, ownerID string) { rl.ProviderID = &ownerID },
+	)
+}
+
+func syncModelConfigGovernanceFromConfig(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, modelConfig *configstoreTables.TableModelConfig) error {
+	mcID := modelConfig.ID
+	if err := syncOwnerBudgetsFromConfig(ctx, store, tx, "model_config_id", mcID, modelConfig.Budgets, mcID, "model config",
+		func(b *configstoreTables.TableBudget, ownerID string) { b.ModelConfigID = &ownerID },
+	); err != nil {
+		return err
+	}
+	return syncOwnerRateLimitsFromConfig(ctx, store, tx, "model_config_id", mcID, modelConfig.RateLimits, mcID, "model config",
+		func(rl *configstoreTables.TableRateLimit, ownerID string) { rl.ModelConfigID = &ownerID },
+	)
+}
+
+func syncOwnerBudgetsFromConfig(
+	ctx context.Context,
+	store configstore.ConfigStore,
+	tx *gorm.DB,
+	ownerField, ownerID string,
+	budgets []configstoreTables.TableBudget,
+	ownerLabel, ownerType string,
+	setOwner func(*configstoreTables.TableBudget, string),
+) error {
+	if len(budgets) == 0 {
+		if err := configstore.MarkGovernanceDeleted(ctx, tx, &configstoreTables.TableBudget{}, ownerField+" = ?", ownerID); err != nil {
+			return fmt.Errorf("failed to clear %s budgets for %s: %w", ownerType, ownerLabel, err)
+		}
+		return nil
+	}
+	kept := make(map[string]bool, len(budgets))
+	for i := range budgets {
+		id := strings.TrimSpace(budgets[i].ID)
+		if id == "" {
+			continue
+		}
+		kept[id] = true
+		var budget configstoreTables.TableBudget
+		if err := tx.First(&budget, "id = ?", id).Error; err != nil {
+			return fmt.Errorf("budget_id %q for %s %s does not exist: %w", id, ownerType, ownerLabel, err)
+		}
+		setOwner(&budget, ownerID)
+		if err := store.UpdateBudget(ctx, &budget, tx); err != nil {
+			return fmt.Errorf("failed to link budget to %s %s: %w", ownerType, ownerLabel, err)
+		}
+	}
+	var existing []configstoreTables.TableBudget
+	if err := tx.Where(ownerField+" = ?", ownerID).Find(&existing).Error; err != nil {
+		return fmt.Errorf("failed to list %s budgets for %s: %w", ownerType, ownerLabel, err)
+	}
+	for _, b := range existing {
+		if !kept[b.ID] {
+			if err := configstore.MarkGovernanceDeleted(ctx, tx, &configstoreTables.TableBudget{}, "id = ?", b.ID); err != nil {
+				return fmt.Errorf("failed to remove orphan budget %s from %s %s: %w", b.ID, ownerType, ownerLabel, err)
+			}
+		}
+	}
+	return nil
+}
+
+func syncOwnerRateLimitsFromConfig(
+	ctx context.Context,
+	store configstore.ConfigStore,
+	tx *gorm.DB,
+	ownerField, ownerID string,
+	rateLimits []configstoreTables.TableRateLimit,
+	ownerLabel, ownerType string,
+	setOwner func(*configstoreTables.TableRateLimit, string),
+) error {
+	if len(rateLimits) == 0 {
+		if err := configstore.MarkGovernanceDeleted(ctx, tx, &configstoreTables.TableRateLimit{}, ownerField+" = ?", ownerID); err != nil {
+			return fmt.Errorf("failed to clear %s rate limits for %s: %w", ownerType, ownerLabel, err)
+		}
+		return nil
+	}
+	kept := make(map[string]bool, len(rateLimits))
+	for i := range rateLimits {
+		id := strings.TrimSpace(rateLimits[i].ID)
+		if id == "" {
+			continue
+		}
+		kept[id] = true
+		var rateLimit configstoreTables.TableRateLimit
+		if err := tx.First(&rateLimit, "id = ?", id).Error; err != nil {
+			return fmt.Errorf("rate_limit_id %q for %s %s does not exist: %w", id, ownerType, ownerLabel, err)
+		}
+		setOwner(&rateLimit, ownerID)
+		if err := store.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+			return fmt.Errorf("failed to link rate limit to %s %s: %w", ownerType, ownerLabel, err)
+		}
+	}
+	var existing []configstoreTables.TableRateLimit
+	if err := tx.Where(ownerField+" = ?", ownerID).Find(&existing).Error; err != nil {
+		return fmt.Errorf("failed to list %s rate limits for %s: %w", ownerType, ownerLabel, err)
+	}
+	for _, rl := range existing {
+		if !kept[rl.ID] {
+			if err := configstore.MarkGovernanceDeleted(ctx, tx, &configstoreTables.TableRateLimit{}, "id = ?", rl.ID); err != nil {
+				return fmt.Errorf("failed to remove orphan rate limit %s from %s %s: %w", rl.ID, ownerType, ownerLabel, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -2440,6 +2548,9 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			if err := config.StoreFromContext(ctx).CreateModelConfig(ctx, modelConfig, tx); err != nil {
 				return fmt.Errorf("failed to create model config %s: %w", modelConfig.ID, err)
 			}
+			if err := syncModelConfigGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, modelConfig); err != nil {
+				return err
+			}
 		}
 		for i := range config.GovernanceConfig.Providers {
 			provider := &config.GovernanceConfig.Providers[i]
@@ -2449,19 +2560,8 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			if err := validateProviderGovernanceOwnership(tx, *provider); err != nil {
 				return err
 			}
-			updates := map[string]interface{}{
-				"budget_id":     provider.BudgetID,
-				"rate_limit_id": provider.RateLimitID,
-			}
-			result := tx.Model(&configstoreTables.TableProvider{}).
-				Where("name = ?", provider.Name).
-				Select("budget_id", "rate_limit_id").
-				Updates(updates)
-			if result.Error != nil {
-				return fmt.Errorf("failed to apply provider governance config for %s: %w", provider.Name, result.Error)
-			}
-			if result.RowsAffected == 0 {
-				return fmt.Errorf("failed to apply provider governance config for %s: no provider row found", provider.Name)
+			if err := syncProviderGovernanceFromConfig(ctx, config.StoreFromContext(ctx), tx, *provider); err != nil {
+				return err
 			}
 		}
 
@@ -3102,7 +3202,7 @@ func reconcileVirtualKeyAssociations(
 			// Update existing provider config from file
 			existing.Weight = newPC.Weight
 			existing.AllowedModels = newPC.AllowedModels
-			existing.RateLimitID = newPC.RateLimitID
+			existing.RateLimits = newPC.RateLimits
 			existing.Keys = newPC.Keys
 			if err := store.UpdateVirtualKeyProviderConfig(ctx, &existing, tx); err != nil {
 				return fmt.Errorf("failed to update provider config for %s: %w", newPC.Provider, err)

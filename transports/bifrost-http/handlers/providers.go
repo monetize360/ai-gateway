@@ -786,10 +786,9 @@ func (h *ProviderHandler) listManagementModels(query modelListQuery) ([]listedMo
 		}
 	}
 
-	// When a virtual key is present, restrict the provider list to those explicitly
-	// permitted by the VK. An empty ProviderConfigs means no providers are allowed
-	// (deny-by-default), so we return nothing even if providers are configured.
-	if query.HasVKFilter {
+	// When a virtual key has provider configs, restrict to those providers.
+	// Empty ProviderConfigs means no provider-level restrictions (allow all).
+	if query.HasVKFilter && len(query.VKProviderConfigs) > 0 {
 		providers = slices.DeleteFunc(providers, func(p schemas.ModelProvider) bool {
 			return !slices.ContainsFunc(query.VKProviderConfigs, func(pc tables.TableVirtualKeyProviderConfig) bool {
 				return strings.EqualFold(pc.Provider, string(p))
@@ -820,9 +819,9 @@ func (h *ProviderHandler) listManagementModelsForProvider(
 		models = h.modelsManager.GetUnfilteredModelsForProvider(provider)
 	}
 
-	// Apply VK-level model whitelist filtering.
+	// Apply VK-level model whitelist when provider configs are present.
 	// AllowedModels=["*"] passes all; empty AllowedModels denies all (deny-by-default).
-	if query.HasVKFilter {
+	if query.HasVKFilter && len(query.VKProviderConfigs) > 0 {
 		if idx := slices.IndexFunc(query.VKProviderConfigs, func(pc tables.TableVirtualKeyProviderConfig) bool {
 			return strings.EqualFold(pc.Provider, string(provider))
 		}); idx >= 0 {

@@ -3,7 +3,6 @@ package tables
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -36,16 +35,12 @@ type TableProvider struct {
 	CustomProviderConfig *schemas.CustomProviderConfig `gorm:"-" json:"custom_provider_config,omitempty"`
 	OpenAIConfig         *schemas.OpenAIConfig         `gorm:"-" json:"openai_config,omitempty"`
 
-	// Foreign keys
+	// Models relationship
 	Models []TableModel `gorm:"foreignKey:ProviderID;constraint:OnDelete:CASCADE" json:"models"`
 
-	// Governance fields - Budget and Rate Limit for provider-level governance
-	BudgetID    *string `gorm:"type:uuid;index:idx_provider_budget" json:"budget_id,omitempty"`
-	RateLimitID *string `gorm:"type:uuid;index:idx_provider_rate_limit" json:"rate_limit_id,omitempty"`
-
-	// Governance relationships
-	Budget    *TableBudget    `gorm:"foreignKey:BudgetID;onDelete:CASCADE" json:"budget,omitempty"`
-	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
+	// Governance relationships (FK lives on budget/rate_limit rows)
+	Budgets    []TableBudget    `gorm:"foreignKey:ProviderID;references:ID" json:"budgets,omitempty"`
+	RateLimits []TableRateLimit `gorm:"foreignKey:ProviderID;references:ID" json:"rate_limits,omitempty"`
 
 	// Config hash is used to detect the changes synced from config.json file
 	// Every time we sync the config.json file, we will update the config hash
@@ -106,13 +101,6 @@ func (p *TableProvider) BeforeSave(tx *gorm.DB) error {
 		p.OpenAIConfigJSON = string(data)
 	} else {
 		p.OpenAIConfigJSON = ""
-	}
-	// Validate governance fields
-	if p.BudgetID != nil && strings.TrimSpace(*p.BudgetID) == "" {
-		return fmt.Errorf("budget_id cannot be an empty string")
-	}
-	if p.RateLimitID != nil && strings.TrimSpace(*p.RateLimitID) == "" {
-		return fmt.Errorf("rate_limit_id cannot be an empty string")
 	}
 
 	// Encrypt proxy config after serialization (only if there's data to encrypt)

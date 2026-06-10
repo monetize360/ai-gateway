@@ -469,21 +469,35 @@ func (s *BifrostHTTPServer) ReloadModelConfig(ctx context.Context, id string) (*
 		return preloadedMC, nil
 	}
 
-	// Sync updated usage values back to database if they changed
-	if updatedMC.Budget != nil && preloadedMC.Budget != nil {
-		if updatedMC.Budget.CurrentUsage != preloadedMC.Budget.CurrentUsage {
-			if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedMC.Budget.ID, updatedMC.Budget.CurrentUsage); err != nil {
-				logger.Error("failed to sync budget usage to database: %v", err)
-			}
+	preloadedBudgets := make(map[string]tables.TableBudget, len(preloadedMC.Budgets))
+	for _, b := range preloadedMC.Budgets {
+		preloadedBudgets[b.ID] = b
+	}
+	for _, updatedBudget := range updatedMC.Budgets {
+		preloadedBudget, ok := preloadedBudgets[updatedBudget.ID]
+		if !ok || updatedBudget.CurrentUsage == preloadedBudget.CurrentUsage {
+			continue
+		}
+		if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedBudget.ID, updatedBudget.CurrentUsage); err != nil {
+			logger.Error("failed to sync budget usage to database: %v", err)
 		}
 	}
-	if updatedMC.RateLimit != nil && preloadedMC.RateLimit != nil {
-		tokenUsageChanged := updatedMC.RateLimit.TokenCurrentUsage != preloadedMC.RateLimit.TokenCurrentUsage
-		requestUsageChanged := updatedMC.RateLimit.RequestCurrentUsage != preloadedMC.RateLimit.RequestCurrentUsage
-		if tokenUsageChanged || requestUsageChanged {
-			if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedMC.RateLimit.ID, updatedMC.RateLimit.TokenCurrentUsage, updatedMC.RateLimit.RequestCurrentUsage); err != nil {
-				logger.Error("failed to sync rate limit usage to database: %v", err)
-			}
+	preloadedRateLimits := make(map[string]tables.TableRateLimit, len(preloadedMC.RateLimits))
+	for _, rl := range preloadedMC.RateLimits {
+		preloadedRateLimits[rl.ID] = rl
+	}
+	for _, updatedRL := range updatedMC.RateLimits {
+		preloadedRL, ok := preloadedRateLimits[updatedRL.ID]
+		if !ok {
+			continue
+		}
+		tokenUsageChanged := updatedRL.TokenCurrentUsage != preloadedRL.TokenCurrentUsage
+		requestUsageChanged := updatedRL.RequestCurrentUsage != preloadedRL.RequestCurrentUsage
+		if !tokenUsageChanged && !requestUsageChanged {
+			continue
+		}
+		if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedRL.ID, updatedRL.TokenCurrentUsage, updatedRL.RequestCurrentUsage); err != nil {
+			logger.Error("failed to sync rate limit usage to database: %v", err)
 		}
 	}
 
@@ -533,21 +547,35 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 				updatedProvider = govUpdated
 			}
 
-			// Sync updated usage values back to database if they changed
-			if updatedProvider.Budget != nil && providerInfo.Budget != nil {
-				if updatedProvider.Budget.CurrentUsage != providerInfo.Budget.CurrentUsage {
-					if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedProvider.Budget.ID, updatedProvider.Budget.CurrentUsage); err != nil {
-						logger.Error("failed to sync budget usage to database: %v", err)
-					}
+			preloadedBudgets := make(map[string]tables.TableBudget, len(providerInfo.Budgets))
+			for _, b := range providerInfo.Budgets {
+				preloadedBudgets[b.ID] = b
+			}
+			for _, updatedBudget := range updatedProvider.Budgets {
+				preloadedBudget, ok := preloadedBudgets[updatedBudget.ID]
+				if !ok || updatedBudget.CurrentUsage == preloadedBudget.CurrentUsage {
+					continue
+				}
+				if err := s.Config.StoreFromContext(ctx).UpdateBudgetUsage(ctx, updatedBudget.ID, updatedBudget.CurrentUsage); err != nil {
+					logger.Error("failed to sync budget usage to database: %v", err)
 				}
 			}
-			if updatedProvider.RateLimit != nil && providerInfo.RateLimit != nil {
-				tokenUsageChanged := updatedProvider.RateLimit.TokenCurrentUsage != providerInfo.RateLimit.TokenCurrentUsage
-				requestUsageChanged := updatedProvider.RateLimit.RequestCurrentUsage != providerInfo.RateLimit.RequestCurrentUsage
-				if tokenUsageChanged || requestUsageChanged {
-					if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedProvider.RateLimit.ID, updatedProvider.RateLimit.TokenCurrentUsage, updatedProvider.RateLimit.RequestCurrentUsage); err != nil {
-						logger.Error("failed to sync rate limit usage to database: %v", err)
-					}
+			preloadedRateLimits := make(map[string]tables.TableRateLimit, len(providerInfo.RateLimits))
+			for _, rl := range providerInfo.RateLimits {
+				preloadedRateLimits[rl.ID] = rl
+			}
+			for _, updatedRL := range updatedProvider.RateLimits {
+				preloadedRL, ok := preloadedRateLimits[updatedRL.ID]
+				if !ok {
+					continue
+				}
+				tokenUsageChanged := updatedRL.TokenCurrentUsage != preloadedRL.TokenCurrentUsage
+				requestUsageChanged := updatedRL.RequestCurrentUsage != preloadedRL.RequestCurrentUsage
+				if !tokenUsageChanged && !requestUsageChanged {
+					continue
+				}
+				if err := s.Config.StoreFromContext(ctx).UpdateRateLimitUsage(ctx, updatedRL.ID, updatedRL.TokenCurrentUsage, updatedRL.RequestCurrentUsage); err != nil {
+					logger.Error("failed to sync rate limit usage to database: %v", err)
 				}
 			}
 		}

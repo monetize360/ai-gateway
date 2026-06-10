@@ -204,14 +204,6 @@ type ConfigStore interface {
 	GetGovernanceRefreshDelta(ctx context.Context, since time.Time) (*GovernanceRefreshDelta, error)
 	GetProviderConfigRefreshDelta(ctx context.Context, since time.Time) (*ProviderConfigRefreshDelta, error)
 
-	// Org limit CRUD (per-org budget/rate-limit references)
-	GetOrgLimits(ctx context.Context) ([]tables.TableOrgLimit, error)
-	GetOrgLimit(ctx context.Context, id string) (*tables.TableOrgLimit, error)
-	GetOrgLimitByOrgID(ctx context.Context, orgID string) (*tables.TableOrgLimit, error)
-	CreateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
-	UpdateOrgLimit(ctx context.Context, orgLimit *tables.TableOrgLimit, tx ...*gorm.DB) error
-	DeleteOrgLimit(ctx context.Context, id string, tx ...*gorm.DB) error
-
 	// Rate limit CRUD
 	GetRateLimits(ctx context.Context) ([]tables.TableRateLimit, error)
 	GetRateLimit(ctx context.Context, id string, tx ...*gorm.DB) (*tables.TableRateLimit, error)

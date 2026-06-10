@@ -33,11 +33,10 @@ type TableVirtualKeyProviderConfig struct {
 	AllowedModels     schemas.WhiteList `gorm:"type:text;serializer:json" json:"allowed_models"`
 	BlacklistedModels schemas.BlackList `gorm:"type:text;serializer:json" json:"blacklisted_models"`
 	AllowAllKeys      bool              `gorm:"default:false" json:"allow_all_keys"`
-	RateLimitID       *string           `gorm:"type:uuid;index" json:"rate_limit_id,omitempty"`
 
-	// Relationships
-	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
-	Budgets   []TableBudget   `gorm:"foreignKey:ProviderConfigID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`              // Multiple budgets with different reset intervals
+	// Relationships — budget/rate limit FK columns live on child rows
+	RateLimits []TableRateLimit `gorm:"foreignKey:ProviderConfigID;references:ID" json:"rate_limits,omitempty"`
+	Budgets    []TableBudget    `gorm:"foreignKey:ProviderConfigID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`
 	Keys      []TableKey      `gorm:"many2many:governance_virtual_key_provider_config_keys;constraint:OnDelete:CASCADE" json:"keys"`
 
 	SystemColumns
@@ -214,17 +213,16 @@ type TableVirtualKey struct {
 	Description     string                          `gorm:"type:text" json:"description,omitempty"`
 	Value           string                          `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`           // The virtual key value
 	IsActive        *bool                           `gorm:"default:true" json:"is_active,omitempty"`                                     // Nil means true (DB default); false means inactive
-	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means no providers allowed (deny-by-default)
+	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means all providers allowed
 	MCPConfigs      []TableVirtualKeyMCPConfig      `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
 	OrgID       *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
-	RateLimitID *string `gorm:"type:uuid;index" json:"rate_limit_id,omitempty"`
 
 	CalendarAligned bool `gorm:"default:false" json:"calendar_aligned"`
 
-	// Relationships
-	RateLimit *TableRateLimit `gorm:"foreignKey:RateLimitID;onDelete:CASCADE" json:"rate_limit,omitempty"`
-	Budgets   []TableBudget   `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"` // Multiple budgets with different reset intervals
+	// Relationships — budget/rate limit FK columns live on child rows
+	RateLimits []TableRateLimit `gorm:"foreignKey:VirtualKeyID;references:ID" json:"rate_limits,omitempty"`
+	Budgets    []TableBudget    `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`
 
 	// Config hash is used to detect the changes synced from config.json file
 	// Every time we sync the config.json file, we will update the config hash
@@ -280,16 +278,16 @@ func (vk *TableVirtualKey) AfterFind(tx *gorm.DB) error {
 	for i := range vk.Budgets {
 		vk.Budgets[i].IsCalendarAligned = vk.CalendarAligned
 	}
-	if vk.RateLimit != nil {
-		vk.RateLimit.IsCalendarAligned = vk.CalendarAligned
+	for i := range vk.RateLimits {
+		vk.RateLimits[i].IsCalendarAligned = vk.CalendarAligned
 	}
 	for i := range vk.ProviderConfigs {
 		pc := &vk.ProviderConfigs[i]
 		for j := range pc.Budgets {
 			pc.Budgets[j].IsCalendarAligned = vk.CalendarAligned
 		}
-		if pc.RateLimit != nil {
-			pc.RateLimit.IsCalendarAligned = vk.CalendarAligned
+		for j := range pc.RateLimits {
+			pc.RateLimits[j].IsCalendarAligned = vk.CalendarAligned
 		}
 	}
 	return nil

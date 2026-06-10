@@ -18,7 +18,6 @@ const RefreshOverlap = 2 * time.Second
 // GovernanceRefreshDelta holds governance entities changed since the previous refresh.
 type GovernanceRefreshDelta struct {
 	Organizations []tables.TableOrganization
-	OrgLimits     []tables.TableOrgLimit
 	VirtualKeys   []tables.TableVirtualKey
 	Budgets       []tables.TableBudget
 	RateLimits    []tables.TableRateLimit
@@ -33,7 +32,6 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		return true
 	}
 	return len(d.Organizations) == 0 &&
-		len(d.OrgLimits) == 0 &&
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
 		len(d.RateLimits) == 0 &&
@@ -71,12 +69,6 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	if err := appendDeletedRowsSince(db, since, &delta.Organizations); err != nil {
 		return nil, err
 	}
-	if err := preloadOrgLimitRelations(db.Where("updated_at >= ?", since)).Find(&delta.OrgLimits).Error; err != nil {
-		return nil, fmt.Errorf("org limits changed since: %w", err)
-	}
-	if err := appendDeletedOrgLimitsSince(db, since, &delta.OrgLimits); err != nil {
-		return nil, err
-	}
 
 	if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.Budgets).Error; err != nil {
 		return nil, fmt.Errorf("budgets changed since: %w", err)
@@ -94,8 +86,8 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 
 	pre := governanceActivePreload()
 	if err := GovernanceActive(db.Where("updated_at >= ?", since)).
-		Preload("Budget", pre).
-		Preload("RateLimit", pre).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
 		Find(&delta.ModelConfigs).Error; err != nil {
 		return nil, fmt.Errorf("model configs changed since: %w", err)
 	}
@@ -104,8 +96,8 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 
 	if err := ActiveRows(db.Where("updated_at >= ?", since)).
-		Preload("Budget").
-		Preload("RateLimit").
+		Preload("Budgets").
+		Preload("RateLimits").
 		Find(&delta.Providers).Error; err != nil {
 		return nil, fmt.Errorf("providers changed since: %w", err)
 	}
@@ -138,18 +130,6 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 
 	return delta, nil
-}
-
-func appendDeletedOrgLimitsSince(db *gorm.DB, since time.Time, dest *[]tables.TableOrgLimit) error {
-	var deleted []tables.TableOrgLimit
-	if err := db.Unscoped().Where("updated_at >= ? AND deleted = ?", since, true).Find(&deleted).Error; err != nil {
-		return fmt.Errorf("deleted org limits since: %w", err)
-	}
-	for i := range deleted {
-		deleted[i].Deleted = true
-		*dest = append(*dest, deleted[i])
-	}
-	return nil
 }
 
 func appendDeletedRowsSince[T any](db *gorm.DB, since time.Time, dest *[]T) error {

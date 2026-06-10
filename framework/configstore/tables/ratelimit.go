@@ -7,7 +7,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// TableRateLimit defines rate limiting rules for virtual keys using flexible max+reset approach
+// TableRateLimit defines rate limiting rules using flexible max+reset approach.
+// Parent ownership is expressed via FK columns on this row.
 type TableRateLimit struct {
 	ID string `gorm:"primaryKey;type:uuid" json:"id"`
 
@@ -20,6 +21,13 @@ type TableRateLimit struct {
 	RequestResetDuration *string   `gorm:"type:varchar(50)" json:"request_reset_duration,omitempty"`
 	RequestCurrentUsage  int64     `gorm:"default:0" json:"request_current_usage"`
 	RequestLastReset     time.Time `gorm:"index" json:"request_last_reset"`
+
+	VirtualKeyID     *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
+	ProviderConfigID *string `gorm:"type:uuid;index" json:"provider_config_id,omitempty"`
+	ProviderID       *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
+	ModelConfigID    *string `gorm:"type:uuid;index" json:"model_config_id,omitempty"`
+	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
 
 	CalendarAlignedInput *bool `gorm:"-" json:"calendar_aligned,omitempty"`
 	IsCalendarAligned    bool  `gorm:"-" json:"-"`
@@ -34,6 +42,9 @@ func (TableRateLimit) TableName() string { return "governance_rate_limits" }
 
 // BeforeSave hook for RateLimit to validate reset duration formats
 func (rl *TableRateLimit) BeforeSave(tx *gorm.DB) error {
+	if err := validateRateLimitOwner(rl); err != nil {
+		return err
+	}
 	if rl.TokenResetDuration != nil {
 		if d, err := ParseDuration(*rl.TokenResetDuration); err != nil {
 			return fmt.Errorf("invalid token reset duration format: %s", *rl.TokenResetDuration)

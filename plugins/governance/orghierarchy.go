@@ -28,60 +28,40 @@ func (gs *LocalGovernanceStore) walkOrgAncestors(orgID string, visit func(orgID 
 	}
 }
 
-func (gs *LocalGovernanceStore) loadOrgLimit(orgID string) *configstoreTables.TableOrgLimit {
-	limitValue, exists := gs.orgLimits.Load(orgID)
-	if !exists || limitValue == nil {
-		return nil
-	}
-	limit, ok := limitValue.(*configstoreTables.TableOrgLimit)
-	if !ok {
-		return nil
-	}
-	return limit
-}
-
 func (gs *LocalGovernanceStore) appendOrgHierarchyBudgets(orgID string, entityWiseBudgets EntityWiseBudgets, seen map[string]bool) {
 	gs.walkOrgAncestors(orgID, func(currentOrgID string) bool {
-		limit := gs.loadOrgLimit(currentOrgID)
-		if limit == nil || limit.BudgetID == nil {
-			return true
-		}
-		if seen[*limit.BudgetID] {
-			return true
-		}
-		if budgetValue, exists := gs.budgets.Load(*limit.BudgetID); exists && budgetValue != nil {
-			if budget, ok := budgetValue.(*configstoreTables.TableBudget); ok && budget != nil {
-				key := "Org:" + currentOrgID
-				if categoryBudgets := entityWiseBudgets[key]; categoryBudgets == nil {
-					entityWiseBudgets[key] = []*configstoreTables.TableBudget{}
-				}
-				entityWiseBudgets[key] = append(entityWiseBudgets[key], budget)
-				seen[budget.ID] = true
+		gs.budgets.Range(func(_, value interface{}) bool {
+			budget, ok := value.(*configstoreTables.TableBudget)
+			if !ok || budget == nil || budget.GovernedOrganizationID == nil || *budget.GovernedOrganizationID != currentOrgID {
+				return true
 			}
-		}
+			if seen[budget.ID] {
+				return true
+			}
+			key := "Org:" + currentOrgID
+			entityWiseBudgets[key] = append(entityWiseBudgets[key], budget)
+			seen[budget.ID] = true
+			return true
+		})
 		return true
 	})
 }
 
 func (gs *LocalGovernanceStore) appendOrgHierarchyRateLimits(orgID string, rateLimitsWithCategories map[string][]*configstoreTables.TableRateLimit, seen map[string]bool) {
 	gs.walkOrgAncestors(orgID, func(currentOrgID string) bool {
-		limit := gs.loadOrgLimit(currentOrgID)
-		if limit == nil || limit.RateLimitID == nil {
-			return true
-		}
-		if seen[*limit.RateLimitID] {
-			return true
-		}
-		if rateLimitValue, exists := gs.rateLimits.Load(*limit.RateLimitID); exists && rateLimitValue != nil {
-			if rateLimit, ok := rateLimitValue.(*configstoreTables.TableRateLimit); ok && rateLimit != nil {
-				key := "Org:" + currentOrgID
-				if categoryRateLimits := rateLimitsWithCategories[key]; categoryRateLimits == nil {
-					rateLimitsWithCategories[key] = []*configstoreTables.TableRateLimit{}
-				}
-				rateLimitsWithCategories[key] = append(rateLimitsWithCategories[key], rateLimit)
-				seen[rateLimit.ID] = true
+		gs.rateLimits.Range(func(_, value interface{}) bool {
+			rateLimit, ok := value.(*configstoreTables.TableRateLimit)
+			if !ok || rateLimit == nil || rateLimit.GovernedOrganizationID == nil || *rateLimit.GovernedOrganizationID != currentOrgID {
+				return true
 			}
-		}
+			if seen[rateLimit.ID] {
+				return true
+			}
+			key := "Org:" + currentOrgID
+			rateLimitsWithCategories[key] = append(rateLimitsWithCategories[key], rateLimit)
+			seen[rateLimit.ID] = true
+			return true
+		})
 		return true
 	})
 }

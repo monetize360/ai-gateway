@@ -55,7 +55,7 @@ func newSqliteConfigStore(ctx context.Context, config *SQLiteConfig, logger sche
 // autoMigrateConfigTables runs GORM AutoMigrate for all configstore table models.
 // AutoMigrate is idempotent: it creates missing tables/columns but never drops columns.
 func autoMigrateConfigTables(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&tables.TableBudget{},
 		&tables.TableRateLimit{},
 		&tables.TableProvider{},
@@ -70,7 +70,6 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.TableEnvKey{},
 		&tables.TableVectorStoreConfig{},
 		&tables.TableLogStoreConfig{},
-		&tables.TableOrgLimit{},
 		&tables.TableVirtualKey{},
 		&tables.TableVirtualKeyProviderConfig{},
 		&tables.TableVirtualKeyMCPConfig{},
@@ -93,5 +92,11 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.TablePromptSession{},
 		&tables.TablePromptSessionMessage{},
 		&tables.TableAccessKeyToken{},
-	)
+	); err != nil {
+		return err
+	}
+	if err := migrateGovernanceReverseOwnership(db); err != nil {
+		return err
+	}
+	return migrateGovernanceOrgOwnership(db)
 }

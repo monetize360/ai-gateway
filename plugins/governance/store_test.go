@@ -176,8 +176,8 @@ func TestGovernanceStore_CheckBudget_HierarchyValidation(t *testing.T) {
 	childOrgID := "org-child"
 	parentOrg := buildOrganization(parentOrgID, "Parent Org", nil)
 	childOrg := buildOrganization(childOrgID, "Child Org", &parentOrgID)
-	childLimit := buildOrgLimit("limit-child", childOrgID, childOrgBudget)
-	parentLimit := buildOrgLimit("limit-parent", parentOrgID, parentOrgBudget)
+	markBudgetGovernedByOrg(childOrgBudget, childOrgID)
+	markBudgetGovernedByOrg(parentOrgBudget, parentOrgID)
 
 	vk := buildVirtualKeyWithBudget("vk1", "sk-bf-test", "Test VK", vkBudget)
 	vk.OrgID = &childOrgID
@@ -186,7 +186,6 @@ func TestGovernanceStore_CheckBudget_HierarchyValidation(t *testing.T) {
 		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
 		Budgets:       []configstoreTables.TableBudget{*vkBudget, *childOrgBudget, *parentOrgBudget},
 		Organizations: []configstoreTables.TableOrganization{*parentOrg, *childOrg},
-		OrgLimits:     []configstoreTables.TableOrgLimit{*childLimit, *parentLimit},
 	}, nil)
 	require.NoError(t, err)
 
@@ -688,10 +687,10 @@ func TestGovernanceStore_ResetExpiredRateLimits(t *testing.T) {
 	// Retrieve the updated VK to check rate limit changes
 	updatedVK, _ := store.GetVirtualKey(context.Background(), "vk1")
 	require.NotNil(t, updatedVK)
-	require.NotNil(t, updatedVK.RateLimit)
+	require.NotEmpty(t, updatedVK.RateLimits)
 
-	assert.Equal(t, int64(0), updatedVK.RateLimit.TokenCurrentUsage, "Token usage should be reset")
-	assert.Equal(t, int64(0), updatedVK.RateLimit.RequestCurrentUsage, "Request usage should be reset")
+	assert.Equal(t, int64(0), updatedVK.RateLimits[0].TokenCurrentUsage, "Token usage should be reset")
+	assert.Equal(t, int64(0), updatedVK.RateLimits[0].RequestCurrentUsage, "Request usage should be reset")
 }
 
 // TestGovernanceStore_ResetExpiredBudgets tests budget reset
@@ -943,8 +942,8 @@ func TestGovernanceStore_RateLimitStatus(t *testing.T) {
 
 	// Create a provider config that references the rate limit
 	providerConfig := &configstoreTables.TableProvider{
-		Name:        "openai",
-		RateLimitID: &rateLimitID,
+		Name:       "openai",
+		RateLimits: []configstoreTables.TableRateLimit{*rl},
 	}
 	store.providers.Store("openai", providerConfig)
 
@@ -978,8 +977,8 @@ func TestGovernanceStore_BudgetStatus(t *testing.T) {
 
 	// Create a provider config that references the budget
 	providerConfig := &configstoreTables.TableProvider{
-		Name:     "openai",
-		BudgetID: &budgetID,
+		Name:    "openai",
+		Budgets: []configstoreTables.TableBudget{*budget},
 	}
 	store.providers.Store("openai", providerConfig)
 

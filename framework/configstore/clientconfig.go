@@ -766,7 +766,7 @@ type VirtualKeyHashInput struct {
 	IsActive    bool
 	TeamID      *string
 	CustomerID  *string
-	RateLimitID *string
+	RateLimitIDs []string
 	// ProviderConfigs and MCPConfigs are hashed separately as they contain nested data
 	ProviderConfigs []VirtualKeyProviderConfigHashInput
 	MCPConfigs      []VirtualKeyMCPConfigHashInput
@@ -777,7 +777,7 @@ type VirtualKeyProviderConfigHashInput struct {
 	Provider      string
 	Weight        *float64
 	AllowedModels []string
-	RateLimitID   *string
+	RateLimitIDs []string
 	KeyIDs        []string // Only key IDs, not full key objects
 }
 
@@ -808,9 +808,9 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 	if vk.OrgID != nil {
 		hash.Write([]byte("orgID:" + *vk.OrgID))
 	}
-	// Hash RateLimitID
-	if vk.RateLimitID != nil {
-		hash.Write([]byte("rateLimitID:" + *vk.RateLimitID))
+	// Hash VK-level rate limits (reverse FK on governance_rate_limits.virtual_key_id)
+	if ids := tables.JoinRateLimitRefIDs(vk.RateLimits); ids != "" {
+		hash.Write([]byte("rateLimitIDs:" + ids))
 	}
 	// Hash ProviderConfigs
 	if len(vk.ProviderConfigs) > 0 {
@@ -822,11 +822,11 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 				return sortedProviderConfigs[i].Provider < sortedProviderConfigs[j].Provider
 			}
 			ri, rj := "", ""
-			if sortedProviderConfigs[i].RateLimitID != nil {
-				ri = *sortedProviderConfigs[i].RateLimitID
+			if len(sortedProviderConfigs[i].RateLimits) > 0 {
+				ri = tables.JoinRateLimitRefIDs(sortedProviderConfigs[i].RateLimits)
 			}
-			if sortedProviderConfigs[j].RateLimitID != nil {
-				rj = *sortedProviderConfigs[j].RateLimitID
+			if len(sortedProviderConfigs[j].RateLimits) > 0 {
+				rj = tables.JoinRateLimitRefIDs(sortedProviderConfigs[j].RateLimits)
 			}
 			if ri != rj {
 				return ri < rj
@@ -858,7 +858,7 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 				Provider:      pc.Provider,
 				Weight:        pc.Weight,
 				AllowedModels: sortedAllowedModels,
-				RateLimitID:   pc.RateLimitID,
+				RateLimitIDs:  rateLimitIDsFromSlice(pc.RateLimits),
 				KeyIDs:        keyIDs,
 			}
 		}
@@ -1062,8 +1062,8 @@ func GenerateModelConfigHash(m tables.TableModelConfig) (string, error) {
 	writeHashField(hash, "id", m.ID)
 	writeHashField(hash, "model_name", m.ModelName)
 	writeHashField(hash, "provider", derefStr(m.Provider))
-	writeHashField(hash, "budget_id", derefStr(m.BudgetID))
-	writeHashField(hash, "rate_limit_id", derefStr(m.RateLimitID))
+	writeHashField(hash, "budget_ids", tables.JoinBudgetRefIDs(m.Budgets))
+	writeHashField(hash, "rate_limit_ids", tables.JoinRateLimitRefIDs(m.RateLimits))
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
@@ -1073,8 +1073,8 @@ func GenerateModelConfigHash(m tables.TableModelConfig) (string, error) {
 func GenerateProviderGovernanceHash(p tables.TableProvider) (string, error) {
 	hash := sha256.New()
 	writeHashField(hash, "name", p.Name)
-	writeHashField(hash, "budget_id", derefStr(p.BudgetID))
-	writeHashField(hash, "rate_limit_id", derefStr(p.RateLimitID))
+	writeHashField(hash, "budget_ids", tables.JoinBudgetRefIDs(p.Budgets))
+	writeHashField(hash, "rate_limit_ids", tables.JoinRateLimitRefIDs(p.RateLimits))
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
@@ -1107,6 +1107,27 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func ptrIfNonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func rateLimitIDsFromSlice(rateLimits []tables.TableRateLimit) []string {
+	if len(rateLimits) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(rateLimits))
+	for i := range rateLimits {
+		if rateLimits[i].ID != "" {
+			ids = append(ids, rateLimits[i].ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // Skips: CreatedAt, UpdatedAt (dynamic fields)
@@ -1366,9 +1387,8 @@ type ConfigMap map[schemas.ModelProvider]ProviderConfig
 type GovernanceConfig struct {
 	VirtualKeys      []tables.TableVirtualKey      `json:"virtual_keys"`
 	Organizations []tables.TableOrganization `json:"organizations,omitempty"`
-	OrgLimits     []tables.TableOrgLimit     `json:"org_limits,omitempty"`
-	Teams            []tables.TableTeam            `json:"teams,omitempty"`     // deprecated: use org_limits
-	Customers        []tables.TableCustomer        `json:"customers,omitempty"` // deprecated: use org_limits
+	Teams            []tables.TableTeam            `json:"teams,omitempty"`     // deprecated: use governed_organization_id on budgets/rate limits
+	Customers        []tables.TableCustomer        `json:"customers,omitempty"` // deprecated: use governed_organization_id on budgets/rate limits
 	Budgets          []tables.TableBudget          `json:"budgets"`
 	RateLimits       []tables.TableRateLimit       `json:"rate_limits"`
 	ModelConfigs     []tables.TableModelConfig     `json:"model_configs"`

@@ -125,7 +125,7 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 	}
 
 	// Update rate limit usage (VK-level, provider-config-level, team-level, customer-level) if applicable
-	if vk.RateLimit != nil || len(vk.ProviderConfigs) > 0 || vk.OrgID != nil {
+	if len(vk.RateLimits) > 0 || len(vk.ProviderConfigs) > 0 || vk.OrgID != nil {
 		if err := t.store.UpdateVirtualKeyRateLimitUsageInMemory(ctx, vk, update.Provider, update.TokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
 			t.logger.Error("failed to update rate limit usage for VK %s: %v", vk.ID, err)
 		}
@@ -213,49 +213,58 @@ func (t *UsageTracker) PerformStartupResets(ctx context.Context) error {
 		t.logger.Debug(fmt.Sprintf("startup reset: checking %d virtual keys (active + inactive) for expired rate limits", len(allVKs)))
 	}
 
-	for i := range allVKs {
-		vk := &allVKs[i] // Get pointer to VK for modifications
-		if vk.RateLimit == nil {
-			vksWithoutRateLimits++
-			continue
+	resetIfExpired := func(rateLimit *configstoreTables.TableRateLimit) {
+		if rateLimit == nil {
+			return
 		}
-
-		vksWithRateLimits++
-
-		rateLimit := vk.RateLimit
 		rateLimitUpdated := false
 
-		// Check token limits
 		if rateLimit.TokenResetDuration != nil {
 			if duration, err := configstoreTables.ParseDuration(*rateLimit.TokenResetDuration); err == nil {
-				timeSinceReset := now.Sub(rateLimit.TokenLastReset)
-				if timeSinceReset >= duration {
+				if now.Sub(rateLimit.TokenLastReset) >= duration {
 					rateLimit.TokenCurrentUsage = 0
 					rateLimit.TokenLastReset = now
 					rateLimitUpdated = true
 				}
-			} else {
-				errs = append(errs, fmt.Sprintf("invalid token reset duration for VK %s: %s", vk.ID, *rateLimit.TokenResetDuration))
+			} else if rateLimit.VirtualKeyID != nil {
+				errs = append(errs, fmt.Sprintf("invalid token reset duration for VK %s: %s", *rateLimit.VirtualKeyID, *rateLimit.TokenResetDuration))
 			}
 		}
 
-		// Check request limits
 		if rateLimit.RequestResetDuration != nil {
 			if duration, err := configstoreTables.ParseDuration(*rateLimit.RequestResetDuration); err == nil {
-				timeSinceReset := now.Sub(rateLimit.RequestLastReset)
-				if timeSinceReset >= duration {
+				if now.Sub(rateLimit.RequestLastReset) >= duration {
 					rateLimit.RequestCurrentUsage = 0
 					rateLimit.RequestLastReset = now
 					rateLimitUpdated = true
 				}
-			} else {
-				errs = append(errs, fmt.Sprintf("invalid request reset duration for VK %s: %s", vk.ID, *rateLimit.RequestResetDuration))
+			} else if rateLimit.VirtualKeyID != nil {
+				errs = append(errs, fmt.Sprintf("invalid request reset duration for VK %s: %s", *rateLimit.VirtualKeyID, *rateLimit.RequestResetDuration))
 			}
 		}
 
 		if rateLimitUpdated {
 			resetRateLimits = append(resetRateLimits, rateLimit)
 		}
+	}
+
+	for i := range allVKs {
+		vk := &allVKs[i]
+		hasRateLimits := len(vk.RateLimits) > 0
+		for j := range vk.RateLimits {
+			resetIfExpired(&vk.RateLimits[j])
+		}
+		for j := range vk.ProviderConfigs {
+			for k := range vk.ProviderConfigs[j].RateLimits {
+				hasRateLimits = true
+				resetIfExpired(&vk.ProviderConfigs[j].RateLimits[k])
+			}
+		}
+		if !hasRateLimits {
+			vksWithoutRateLimits++
+			continue
+		}
+		vksWithRateLimits++
 	}
 
 	// DB reset is also handled by this function

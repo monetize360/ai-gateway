@@ -698,9 +698,9 @@ func TestListModels_VKFilterDeniesAllModelsWhenAllowedModelsEmpty(t *testing.T) 
 	}
 }
 
-// TestListModels_VKFilterNoProviderConfigsDeniesAll verifies that a VK with no
-// ProviderConfigs returns 0 models (deny-by-default at provider level).
-func TestListModels_VKFilterNoProviderConfigsDeniesAll(t *testing.T) {
+// TestListModels_VKFilterNoProviderConfigsAllowsAll verifies that a VK with no
+// ProviderConfigs does not restrict providers or models.
+func TestListModels_VKFilterNoProviderConfigsAllowsAll(t *testing.T) {
 	SetLogger(&mockLogger{})
 
 	h := &ProviderHandler{
@@ -728,8 +728,8 @@ func TestListModels_VKFilterNoProviderConfigsDeniesAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if total != 0 || len(models) != 0 {
-		t.Fatalf("expected 0 models when VK has no provider configs, got total=%d", total)
+	if total != 2 || len(models) != 2 {
+		t.Fatalf("expected all models when VK has no provider configs, got total=%d", total)
 	}
 }
 

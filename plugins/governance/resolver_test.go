@@ -102,7 +102,7 @@ func TestBudgetResolver_EvaluateRequest_ModelBlocked(t *testing.T) {
 			Provider:      "openai",
 			AllowedModels: []string{"gpt-4", "gpt-4-turbo"}, // Only these models
 			Weight:        bifrost.Ptr(1.0),
-			RateLimit:     nil,
+		RateLimits:    nil,
 			Keys:          []configstoreTables.TableKey{},
 		},
 	}
@@ -267,8 +267,8 @@ func TestBudgetResolver_EvaluateRequest_MultiLevelBudgetHierarchy(t *testing.T) 
 	childOrgID := "org-child"
 	parentOrg := buildOrganization(parentOrgID, "Parent Org", nil)
 	childOrg := buildOrganization(childOrgID, "Child Org", &parentOrgID)
-	childLimit := buildOrgLimit("limit-child", childOrgID, childOrgBudget)
-	parentLimit := buildOrgLimit("limit-parent", parentOrgID, parentOrgBudget)
+	markBudgetGovernedByOrg(childOrgBudget, childOrgID)
+	markBudgetGovernedByOrg(parentOrgBudget, parentOrgID)
 
 	vk := buildVirtualKeyWithBudget("vk1", "sk-bf-test", "Test VK", vkBudget)
 	vk.OrgID = &childOrgID
@@ -277,7 +277,6 @@ func TestBudgetResolver_EvaluateRequest_MultiLevelBudgetHierarchy(t *testing.T) 
 		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
 		Budgets:       []configstoreTables.TableBudget{*vkBudget, *childOrgBudget, *parentOrgBudget},
 		Organizations: []configstoreTables.TableOrganization{*parentOrg, *childOrg},
-		OrgLimits:     []configstoreTables.TableOrgLimit{*childLimit, *parentLimit},
 	}, nil)
 	require.NoError(t, err)
 
@@ -362,10 +361,10 @@ func TestBudgetResolver_IsProviderAllowed(t *testing.T) {
 		shouldBeAllowed bool
 	}{
 		{
-			name:            "No provider configs (none allowed - deny-by-default)",
+			name:            "No provider configs (all providers allowed)",
 			vk:              buildVirtualKey("vk1", "sk-bf-test", "Test", true),
 			provider:        schemas.OpenAI,
-			shouldBeAllowed: false,
+			shouldBeAllowed: true,
 		},
 		{
 			name: "Provider in allowlist",
@@ -411,11 +410,11 @@ func TestBudgetResolver_IsModelAllowed(t *testing.T) {
 		shouldBeAllowed bool
 	}{
 		{
-			name:            "No provider configs (no models allowed - deny-by-default)",
+			name:            "No provider configs (all models allowed)",
 			vk:              buildVirtualKey("vk1", "sk-bf-test", "Test", true),
 			provider:        schemas.OpenAI,
 			model:           "gpt-4",
-			shouldBeAllowed: false,
+			shouldBeAllowed: true,
 		},
 		{
 			name: "Wildcard allowed models (all models allowed)",
@@ -472,7 +471,6 @@ func TestBudgetResolver_ContextPopulation(t *testing.T) {
 	logger := NewMockLogger()
 	orgID := "org1"
 	org := buildOrganization(orgID, "Org 1", nil)
-	limit := buildOrgLimit("limit1", orgID, nil)
 	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
 	vk.OrgID = &orgID
 	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
@@ -482,7 +480,6 @@ func TestBudgetResolver_ContextPopulation(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
 		VirtualKeys:   []configstoreTables.TableVirtualKey{*vk},
 		Organizations: []configstoreTables.TableOrganization{*org},
-		OrgLimits:     []configstoreTables.TableOrgLimit{*limit},
 	}, nil)
 	require.NoError(t, err)
 

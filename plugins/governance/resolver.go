@@ -281,9 +281,9 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 // Blacklisted models win over allowed models (same semantics as provider-key enforcement).
 // Two-pass: blacklist scan across all matching configs first, then allowlist scan.
 func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
-	// Empty ProviderConfigs means no models are allowed (deny-by-default)
+	// Empty ProviderConfigs means no provider-level restrictions (allow all).
 	if len(vk.ProviderConfigs) == 0 {
-		return false
+		return true
 	}
 
 	// Pass 1: if any matching provider config blacklists the model, block immediately.
@@ -316,9 +316,9 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 
 // isProviderAllowed checks if the requested provider is allowed for this VK
 func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) bool {
-	// Empty ProviderConfigs means no providers are allowed (deny-by-default)
+	// Empty ProviderConfigs means no provider-level restrictions (allow all).
 	if len(vk.ProviderConfigs) == 0 {
-		return false
+		return true
 	}
 
 	for _, pc := range vk.ProviderConfigs {
@@ -336,13 +336,13 @@ func (r *BudgetResolver) checkRateLimitHierarchy(ctx context.Context, vk *config
 		// Check provider-level first (matching check order), then VK-level
 		var rateLimitInfo *configstoreTables.TableRateLimit
 		for _, pc := range vk.ProviderConfigs {
-			if pc.Provider == string(request.Provider) && pc.RateLimit != nil {
-				rateLimitInfo = pc.RateLimit
+			if pc.Provider == string(request.Provider) && len(pc.RateLimits) > 0 {
+				rateLimitInfo = &pc.RateLimits[0]
 				break
 			}
 		}
-		if rateLimitInfo == nil && vk.RateLimit != nil {
-			rateLimitInfo = vk.RateLimit
+		if rateLimitInfo == nil && len(vk.RateLimits) > 0 {
+			rateLimitInfo = &vk.RateLimits[0]
 		}
 		return &EvaluationResult{
 			Decision:      decision,
@@ -403,7 +403,7 @@ func (r *BudgetResolver) isProviderRateLimitViolated(ctx context.Context, vk *co
 	}
 
 	// 2. Check VK-level provider config rate limit
-	if config.RateLimit == nil {
+	if len(config.RateLimits) == 0 {
 		return false
 	}
 	decision, err := r.store.CheckVirtualKeyRateLimit(ctx, vk, request, nil, nil)

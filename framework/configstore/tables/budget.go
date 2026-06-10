@@ -7,7 +7,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// TableBudget defines spending limits with configurable reset periods
+// TableBudget defines spending limits with configurable reset periods.
+// Parent ownership is expressed via FK columns on this row (virtual_key_id,
+// provider_config_id, provider_id, model_config_id, team_id, governed_organization_id).
+// org_id is a visibility column (tenant scoping); governed_organization_id links
+// the budget to an organization for hierarchy governance checks.
 type TableBudget struct {
 	ID            string    `gorm:"primaryKey;type:uuid" json:"id"`
 	MaxLimit      float64   `gorm:"not null" json:"max_limit"`
@@ -17,6 +21,11 @@ type TableBudget struct {
 
 	VirtualKeyID     *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
 	ProviderConfigID *string `gorm:"type:uuid;index" json:"provider_config_id,omitempty"`
+	TeamID           *string `gorm:"type:uuid;index" json:"team_id,omitempty"`
+	ProviderID       *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
+	ModelConfigID    *string `gorm:"type:uuid;index" json:"model_config_id,omitempty"`
+	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
 
 	CalendarAlignedInput *bool `gorm:"-" json:"calendar_aligned,omitempty"`
 	IsCalendarAligned    bool  `gorm:"-" json:"-"`
@@ -31,15 +40,8 @@ func (TableBudget) TableName() string { return "governance_budgets" }
 
 // BeforeSave hook for Budget to validate reset duration format and max limit
 func (b *TableBudget) BeforeSave(tx *gorm.DB) error {
-	owners := 0
-	if b.VirtualKeyID != nil {
-		owners++
-	}
-	if b.ProviderConfigID != nil {
-		owners++
-	}
-	if owners > 1 {
-		return fmt.Errorf("budget cannot have more than one owner (virtual key/provider config)")
+	if err := validateBudgetOwner(b); err != nil {
+		return err
 	}
 	if d, err := ParseDuration(b.ResetDuration); err != nil {
 		return fmt.Errorf("invalid reset duration format: %s", b.ResetDuration)

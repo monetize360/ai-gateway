@@ -95,9 +95,9 @@ func (p *GovernancePlugin) filterModelsForVirtualKey(
 		return []schemas.Model{} // VK not found, return empty list
 	}
 
-	// Empty ProviderConfigs means no models are allowed (deny-by-default)
+	// Empty ProviderConfigs means no provider-level restrictions (allow all models).
 	if len(vk.ProviderConfigs) == 0 {
-		return []schemas.Model{}
+		return models
 	}
 
 	// Filter models based on ProviderConfigs

@@ -96,9 +96,11 @@ func buildVirtualKeyWithBudget(id, value, name string, budget *configstoreTables
 
 func buildVirtualKeyWithRateLimit(id, value, name string, rateLimit *configstoreTables.TableRateLimit) *configstoreTables.TableVirtualKey {
 	vk := buildVirtualKey(id, value, name, true)
-	vk.RateLimit = rateLimit
-	rateLimitID := rateLimit.ID
-	vk.RateLimitID = &rateLimitID
+	vk.RateLimits = []configstoreTables.TableRateLimit{*rateLimit}
+	if rateLimit != nil {
+		vkID := id
+		rateLimit.VirtualKeyID = &vkID
+	}
 	// Add a default provider config so the resolver doesn't block at provider check
 	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
@@ -195,16 +197,18 @@ func buildOrganization(id, name string, parentOrgID *string) *configstoreTables.
 	return org
 }
 
-func buildOrgLimit(id, orgID string, budget *configstoreTables.TableBudget) *configstoreTables.TableOrgLimit {
-	limit := &configstoreTables.TableOrgLimit{
-		ID:    id,
-		OrgID: orgID,
+func markBudgetGovernedByOrg(budget *configstoreTables.TableBudget, orgID string) {
+	if budget == nil || orgID == "" {
+		return
 	}
-	if budget != nil {
-		limit.BudgetID = &budget.ID
-		limit.Budget = budget
+	budget.GovernedOrganizationID = &orgID
+}
+
+func markRateLimitGovernedByOrg(rateLimit *configstoreTables.TableRateLimit, orgID string) {
+	if rateLimit == nil || orgID == "" {
+		return
 	}
-	return limit
+	rateLimit.GovernedOrganizationID = &orgID
 }
 
 func buildProviderConfig(provider string, allowedModels []string) configstoreTables.TableVirtualKeyProviderConfig {
@@ -212,7 +216,7 @@ func buildProviderConfig(provider string, allowedModels []string) configstoreTab
 		Provider:      provider,
 		AllowedModels: allowedModels,
 		Weight:        bifrost.Ptr(1.0),
-		RateLimit:     nil,
+		RateLimits:    nil,
 		Keys:          []configstoreTables.TableKey{},
 	}
 }
@@ -235,10 +239,7 @@ func buildVirtualKeyWithMultiBudgets(id, value, name string, budgets []configsto
 
 func buildProviderConfigWithRateLimit(provider string, allowedModels []string, rateLimit *configstoreTables.TableRateLimit) configstoreTables.TableVirtualKeyProviderConfig {
 	pc := buildProviderConfig(provider, allowedModels)
-	pc.RateLimit = rateLimit
-	if rateLimit != nil {
-		pc.RateLimitID = &rateLimit.ID
-	}
+	pc.RateLimits = []configstoreTables.TableRateLimit{*rateLimit}
 	return pc
 }
 
@@ -272,12 +273,14 @@ func buildModelConfig(id, modelName string, provider *string, budget *configstor
 		},
 	}
 	if budget != nil {
-		mc.Budget = budget
-		mc.BudgetID = &budget.ID
+		mc.Budgets = []configstoreTables.TableBudget{*budget}
+		mcID := id
+		budget.ModelConfigID = &mcID
 	}
 	if rateLimit != nil {
-		mc.RateLimit = rateLimit
-		mc.RateLimitID = &rateLimit.ID
+		mc.RateLimits = []configstoreTables.TableRateLimit{*rateLimit}
+		mcID := id
+		rateLimit.ModelConfigID = &mcID
 	}
 	return mc
 }
@@ -292,12 +295,18 @@ func buildProviderWithGovernance(name string, budget *configstoreTables.TableBud
 		},
 	}
 	if budget != nil {
-		provider.Budget = budget
-		provider.BudgetID = &budget.ID
+		provider.Budgets = []configstoreTables.TableBudget{*budget}
+		if provider.ID != "" {
+			providerID := provider.ID
+			budget.ProviderID = &providerID
+		}
 	}
 	if rateLimit != nil {
-		provider.RateLimit = rateLimit
-		provider.RateLimitID = &rateLimit.ID
+		provider.RateLimits = []configstoreTables.TableRateLimit{*rateLimit}
+		if provider.ID != "" {
+			providerID := provider.ID
+			rateLimit.ProviderID = &providerID
+		}
 	}
 	return provider
 }

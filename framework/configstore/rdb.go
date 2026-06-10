@@ -99,6 +99,22 @@ func lockBudgetOwner(ctx context.Context, txDB *gorm.DB, budget tables.TableBudg
 			}
 			return err
 		}
+	case budget.ProviderID != nil && *budget.ProviderID != "":
+		var provider tables.TableProvider
+		if err := dbForUpdate(txDB.WithContext(ctx)).First(&provider, "id = ?", *budget.ProviderID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+	case budget.ModelConfigID != nil && *budget.ModelConfigID != "":
+		var modelConfig tables.TableModelConfig
+		if err := dbForUpdate(txDB.WithContext(ctx)).First(&modelConfig, "id = ?", *budget.ModelConfigID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -572,25 +588,6 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 	} else {
 		txDB = s.DB()
 	}
-	// Pre-fetch governance FK references for all existing providers in one query.
-	// ProviderConfig carries no governance fields, so without this the upsert
-	// below would write NULL into budget_id/rate_limit_id on every startup.
-	// If the columns don't exist yet, the fetch simply returns nothing
-	governanceFKs := make(map[string]tables.TableProvider)
-	var existingProviders []tables.TableProvider
-	providerTableName := tables.TableProvider{}.TableName()
-
-	if s.doesColumnExist(ctx, providerTableName, "budget_id") &&
-		s.doesColumnExist(ctx, providerTableName, "rate_limit_id") {
-		if err := ActiveRows(txDB.WithContext(ctx)).
-			Select("name", "budget_id", "rate_limit_id").
-			Find(&existingProviders).Error; err != nil {
-			return fmt.Errorf("failed to prefetch provider governance fks: %w", err)
-		}
-		for _, p := range existingProviders {
-			governanceFKs[p.Name] = p
-		}
-	}
 
 	for _, providerName := range sortedProviderNames(providers) {
 		providerConfig := providers[providerName]
@@ -607,14 +604,6 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 			ConfigHash:               providerConfig.ConfigHash,
 			Status:                   providerConfig.Status,
 			Description:              providerConfig.Description,
-		}
-
-		// Carry over governance FKs from the existing row so UpdateAll never
-		// overwrites them with NULL. New providers (not in governanceFKs) correctly
-		// start with nil governance — governance is never set via the file sync path.
-		if existing, ok := governanceFKs[string(providerName)]; ok {
-			dbProvider.BudgetID = existing.BudgetID
-			dbProvider.RateLimitID = existing.RateLimitID
 		}
 
 		// Upsert provider (create or update if exists).
@@ -1116,9 +1105,12 @@ func (s *RDBConfigStore) DeleteProvider(ctx context.Context, provider schemas.Mo
 		return err
 	}
 
-	// Store the budget and rate limit IDs before deleting
-	budgetID := dbProvider.BudgetID
-	rateLimitID := dbProvider.RateLimitID
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "provider_id = ?", dbProvider.ID); err != nil {
+		return err
+	}
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "provider_id = ?", dbProvider.ID); err != nil {
+		return err
+	}
 
 	if err := MarkDeleted(ctx, txDB, &tables.TableKey{}, "provider_id = ?", dbProvider.ID); err != nil {
 		return err
@@ -1130,19 +1122,6 @@ func (s *RDBConfigStore) DeleteProvider(ctx context.Context, provider schemas.Mo
 	}
 	if err := MarkDeleted(ctx, txDB, &tables.TableProvider{}, "id = ?", dbProvider.ID); err != nil {
 		return err
-	}
-
-	// Delete the budget if it exists
-	if budgetID != nil {
-		if err := txDB.WithContext(ctx).Delete(&tables.TableBudget{}, "id = ?", *budgetID).Error; err != nil {
-			return err
-		}
-	}
-	// Delete the rate limit if it exists
-	if rateLimitID != nil {
-		if err := txDB.WithContext(ctx).Delete(&tables.TableRateLimit{}, "id = ?", *rateLimitID).Error; err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -1390,7 +1369,7 @@ func (s *RDBConfigStore) DeleteProviderKey(ctx context.Context, provider schemas
 // GetProviders retrieves all providers from the database with their governance relationships.
 func (s *RDBConfigStore) GetProviders(ctx context.Context) ([]tables.TableProvider, error) {
 	var providers []tables.TableProvider
-	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budget").Preload("RateLimit").Find(&providers).Error; err != nil {
+	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits").Find(&providers).Error; err != nil {
 		return nil, err
 	}
 	return providers, nil
@@ -1399,7 +1378,7 @@ func (s *RDBConfigStore) GetProviders(ctx context.Context) ([]tables.TableProvid
 // GetProvider retrieves a provider by name from the database with governance relationships.
 func (s *RDBConfigStore) GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error) {
 	var providerInfo tables.TableProvider
-	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budget").Preload("RateLimit").Where("name = ?", string(provider)).First(&providerInfo).Error; err != nil {
+	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits").Where("name = ?", string(provider)).First(&providerInfo).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -1411,7 +1390,7 @@ func (s *RDBConfigStore) GetProvider(ctx context.Context, provider schemas.Model
 // GetProviderByName retrieves a provider by name from the database with governance relationships.
 func (s *RDBConfigStore) GetProviderByName(ctx context.Context, name string) (*tables.TableProvider, error) {
 	var provider tables.TableProvider
-	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budget").Preload("RateLimit").Where("name = ?", name).First(&provider).Error; err != nil {
+	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits").Where("name = ?", name).First(&provider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -2312,10 +2291,10 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 	}
 	return GovernanceActive(db).
 		Preload("Budgets", active("governance_budgets")).
-		Preload("RateLimit", active("governance_rate_limits")).
+		Preload("RateLimits", active("governance_rate_limits")).
 		Preload("ProviderConfigs", active("governance_virtual_key_provider_configs")).
 		Preload("ProviderConfigs.Budgets", active("governance_budgets")).
-		Preload("ProviderConfigs.RateLimit", active("governance_rate_limits")).
+		Preload("ProviderConfigs.RateLimits", active("governance_rate_limits")).
 		Preload("ProviderConfigs.Keys", func(db *gorm.DB) *gorm.DB {
 			return db.Table("config_keys").
 				Where("config_keys.deleted = ?", false).
@@ -2480,10 +2459,10 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 	var virtualKey tables.TableVirtualKey
 	baseQuery := s.DB().WithContext(ctx).
 		Preload("Budgets").
-		Preload("RateLimit").
+		Preload("RateLimits").
 		Preload("ProviderConfigs").
 		Preload("ProviderConfigs.Budgets").
-		Preload("ProviderConfigs.RateLimit")
+		Preload("ProviderConfigs.RateLimits")
 	if err := baseQuery.Session(&gorm.Session{}).Where("value_hash = ?", valueHash).First(&virtualKey).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Fallback: try plaintext lookup for rows not yet migrated
@@ -2711,8 +2690,10 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "provider_config_id = ?", pc.ID); err != nil {
 				return err
 			}
-			if pc.RateLimitID != nil {
-				providerConfigRateLimitIDs = append(providerConfigRateLimitIDs, *pc.RateLimitID)
+			for _, rl := range pc.RateLimits {
+				if id := rl.ID; id != "" {
+					providerConfigRateLimitIDs = append(providerConfigRateLimitIDs, id)
+				}
 			}
 			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfig{}, "id = ?", pc.ID); err != nil {
 				return err
@@ -2730,14 +2711,11 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "virtual_key_id = ?", id); err != nil {
 			return err
 		}
-		rateLimitID := virtualKey.RateLimitID
-		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKey{}, "id = ?", id); err != nil {
+		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "virtual_key_id = ?", id); err != nil {
 			return err
 		}
-		if rateLimitID != nil {
-			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "id = ?", *rateLimitID); err != nil {
-				return err
-			}
+		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKey{}, "id = ?", id); err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {
@@ -2883,17 +2861,14 @@ func (s *RDBConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id 
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfigKey{}, "table_virtual_key_provider_config_id = ?", id); err != nil {
 		return err
 	}
-	rateLimitID := providerConfig.RateLimitID
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "provider_config_id = ?", id); err != nil {
+		return err
+	}
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "provider_config_id = ?", id); err != nil {
 		return err
 	}
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfig{}, "id = ?", id); err != nil {
 		return err
-	}
-	if rateLimitID != nil {
-		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "id = ?", *rateLimitID); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -3181,15 +3156,15 @@ func (s *RDBConfigStore) DeleteTeam(ctx context.Context, id string) error {
 		if err := tx.WithContext(ctx).Model(&tables.TableVirtualKey{}).Where("team_id = ?", id).Update("team_id", nil).Error; err != nil {
 			return err
 		}
-		rateLimitID := team.RateLimitID
+		rateLimitID := tables.RateLimitRefID(team.RateLimit)
 		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableBudget{}, "team_id = ?", id); err != nil {
 			return err
 		}
 		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableTeam{}, "id = ?", id); err != nil {
 			return err
 		}
-		if rateLimitID != nil {
-			if err := MarkGovernanceDeleted(ctx, tx, &tables.TableRateLimit{}, "id = ?", *rateLimitID); err != nil {
+		if rateLimitID != "" {
+			if err := MarkGovernanceDeleted(ctx, tx, &tables.TableRateLimit{}, "id = ?", rateLimitID); err != nil {
 				return err
 			}
 		}
@@ -3538,6 +3513,12 @@ func (s *RDBConfigStore) UpdateBudget(ctx context.Context, budget *tables.TableB
 		}
 		if ownerBudget.ProviderConfigID == nil {
 			ownerBudget.ProviderConfigID = existing.ProviderConfigID
+		}
+		if ownerBudget.ProviderID == nil {
+			ownerBudget.ProviderID = existing.ProviderID
+		}
+		if ownerBudget.ModelConfigID == nil {
+			ownerBudget.ModelConfigID = existing.ModelConfigID
 		}
 		if err := lockBudgetOwner(ctx, txDB, ownerBudget); err != nil {
 			return err
@@ -3894,8 +3875,8 @@ func (s *RDBConfigStore) GetModelConfigs(ctx context.Context) ([]tables.TableMod
 	var modelConfigs []tables.TableModelConfig
 	pre := governanceActivePreload()
 	if err := GovernanceActive(s.DB().WithContext(ctx)).
-		Preload("Budget", pre).
-		Preload("RateLimit", pre).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
 		Find(&modelConfigs).Error; err != nil {
 		return nil, err
 	}
@@ -3932,8 +3913,8 @@ func (s *RDBConfigStore) GetModelConfigsPaginated(ctx context.Context, params Mo
 	var modelConfigs []tables.TableModelConfig
 	pre := governanceActivePreload()
 	if err := baseQuery.
-		Preload("Budget", pre).
-		Preload("RateLimit", pre).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
 		Order("created_at ASC, id ASC").
 		Offset(offset).
 		Limit(limit).
@@ -3953,7 +3934,7 @@ func (s *RDBConfigStore) GetModelConfig(ctx context.Context, modelName string, p
 	} else {
 		query = query.Where("provider IS NULL")
 	}
-	if err := query.Preload("Budget", pre).Preload("RateLimit", pre).First(&modelConfig).Error; err != nil {
+	if err := query.Preload("Budgets", pre).Preload("RateLimits", pre).First(&modelConfig).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -3967,8 +3948,8 @@ func (s *RDBConfigStore) GetModelConfigByID(ctx context.Context, id string) (*ta
 	var modelConfig tables.TableModelConfig
 	pre := governanceActivePreload()
 	if err := GovernanceActive(s.DB().WithContext(ctx)).
-		Preload("Budget", pre).
-		Preload("RateLimit", pre).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
 		First(&modelConfig, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -4048,20 +4029,14 @@ func (s *RDBConfigStore) DeleteModelConfig(ctx context.Context, id string) error
 			}
 			return err
 		}
-		budgetID := modelConfig.BudgetID
-		rateLimitID := modelConfig.RateLimitID
+		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableBudget{}, "model_config_id = ?", id); err != nil {
+			return err
+		}
+		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableRateLimit{}, "model_config_id = ?", id); err != nil {
+			return err
+		}
 		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableModelConfig{}, "id = ?", id); err != nil {
 			return s.parseGormError(err)
-		}
-		if budgetID != nil {
-			if err := MarkGovernanceDeleted(ctx, tx, &tables.TableBudget{}, "id = ?", *budgetID); err != nil {
-				return err
-			}
-		}
-		if rateLimitID != nil {
-			if err := MarkGovernanceDeleted(ctx, tx, &tables.TableRateLimit{}, "id = ?", *rateLimitID); err != nil {
-				return err
-			}
 		}
 		return nil
 	})
@@ -4147,6 +4122,8 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 			}
 		}
 	}
+	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
+
 	return &GovernanceConfig{
 		VirtualKeys:      virtualKeys,
 		Teams:            teams,
