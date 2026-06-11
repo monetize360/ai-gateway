@@ -6,37 +6,37 @@ import (
 )
 
 // AI Gateway provider picklist category (MPilot picklists/finops/ai_gateway_provider.json).
-const AIGatewayProviderPicklistCategoryID = "7a8b9c0d-1e2f-4a3b-8c9d-0e1f2a3b4c5e"
+const AIGatewayProviderPicklistCategoryID = "3cfb7d8a-d898-487c-b786-ff5f0e76bd50"
 
 // CustomProviderPicklistItemID is the picklist item for custom (non-standard) providers.
-const CustomProviderPicklistItemID = "11b352c3-d94d-4d71-9118-a307124a2cf2"
+const CustomProviderPicklistItemID = "2382e8b8-bfb0-4c6d-a273-2e5b55fa13a8"
 
 // providerPicklistIDToName maps MPilot picklist item IDs to Bifrost ModelProvider names.
 // Keep in sync with picklists/finops/ai_gateway_provider.json.
 var providerPicklistIDToName = map[string]string{
-	"d3fa620b-10f4-4135-93c6-52f22099a5a9": "anthropic",
-	"a65a4896-5356-4755-9b7e-1589212d5ae0": "azure",
-	"d3bc3107-8341-46ff-9443-80a13912111e": "bedrock",
-	"f989621f-c2cc-4fa9-9760-540daa619a22": "cerebras",
-	"7e6afda0-51c8-4844-852a-96660fe16eb1": "cohere",
-	"92e17c0d-132a-45e4-a961-c20d3cf51002": "gemini",
-	"6f18fce3-b9d2-4d34-9877-68f80b37e8a7": "groq",
-	"c8b0b87a-a6d7-4f1d-84c5-6b3946c9fa20": "mistral",
-	"deb879c3-0843-435c-aa06-38e8a4949be6": "ollama",
-	"d2803e2c-5ae8-4496-a264-c979c5be5d30": "openai",
-	"8980aa09-9a05-42a1-8ccc-f9fc02a4c4b0": "parasail",
-	"de04d873-43dd-48c8-b2fb-e6b378f1ff10": "perplexity",
-	"a861d23a-1b81-4c1a-bb7c-4b3ae53fc18f": "sgl",
-	"63e75a9d-4319-4968-ae69-960589df3421": "vertex",
-	"b9f74b0c-6a15-4998-b8ac-0c676a460058": "openrouter",
-	"a904b921-42e1-43e7-9655-85f88451c054": "elevenlabs",
-	"9734abc7-136a-4be2-8a5d-d47b98e153ba": "huggingface",
-	"c4db6e60-8b03-4d38-8a90-6407ad339ee4": "nebius",
-	"c93fa8f1-4275-41ea-90e7-b01a8c1c4b80": "xai",
-	"887bc31a-fce6-4d3d-a86f-0f023eac471e": "replicate",
-	"1c651d32-ac21-4a6f-ae58-9bbc55c96e9a": "vllm",
-	"cf63883b-4df7-4492-bfc1-653dc47931fa": "runway",
-	"9b63b21b-174c-4f75-b43a-ca70385397cd": "fireworks",
+	"94e96a44-740d-4372-a0e0-bc9837173c3a": "anthropic",
+	"63a9d811-67c3-435d-8ab9-7eb330313f77": "azure",
+	"498ad9a1-bd88-4d5e-a94c-23a82a89c7d9": "bedrock",
+	"3c6fc643-f00c-438c-868e-024464e99e56": "cerebras",
+	"a09093f1-096f-4d4a-b95b-6a5355b2215d": "cohere",
+	"d7c998e8-178e-4d84-a114-8a95460aec2a": "gemini",
+	"f51459ec-5b3b-442d-aa9d-7a0d1bbfa929": "groq",
+	"1a18fe88-ea83-49a1-b70d-7671c17ec6ef": "mistral",
+	"c38e9cbb-9c1c-4e28-ab75-32bbf7b48c6b": "ollama",
+	"145e3a40-2018-4f73-a51e-ffb63a79e861": "openai",
+	"2d949387-1087-48c8-9782-de4e4914744f": "parasail",
+	"55ba5daa-dd04-4bca-a85b-258389f18378": "perplexity",
+	"69e5752d-8707-4470-9b7b-826062f76335": "sgl",
+	"e71db6cb-0c72-4e19-9c7d-f3fd8daa2555": "vertex",
+	"5568452c-11ba-49f2-af3f-98bf4a52b045": "openrouter",
+	"60aa81fc-2133-41a0-9889-ae7a8586d1a7": "elevenlabs",
+	"8ad88d7b-42e4-4618-b13e-71bc0235ad08": "huggingface",
+	"4885dbb8-f309-43fd-bb61-e5e87975c66d": "nebius",
+	"4d664ca9-e5be-40d4-b5f0-7a3a76a5ea47": "xai",
+	"fff3f397-2a3a-436a-bb43-494b6b501599": "replicate",
+	"e710614b-d2cf-446e-9d90-4344208426d8": "vllm",
+	"66c23df2-e276-47d3-8f93-f44c3536f3f0": "runway",
+	"b702493d-1741-45da-8111-3f2ebab753bb": "fireworks",
 }
 
 var providerNameToPicklistID = func() map[string]string {

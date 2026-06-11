@@ -3,7 +3,7 @@ package tables
 import "testing"
 
 func TestSyncProviderTypeAssociations_StandardProviderDerivesName(t *testing.T) {
-	openaiID := "d2803e2c-5ae8-4496-a264-c979c5be5d30"
+	openaiID := "145e3a40-2018-4f73-a51e-ffb63a79e861"
 	p := &TableProvider{
 		ProviderType: &openaiID,
 		Name:         "wrong-name",
@@ -36,7 +36,7 @@ func TestSyncProviderTypeAssociations_BackfillTypeFromStandardName(t *testing.T)
 	if err := p.SyncProviderTypeAssociations(); err != nil {
 		t.Fatalf("SyncProviderTypeAssociations() error = %v", err)
 	}
-	if p.ProviderType == nil || *p.ProviderType != "d3fa620b-10f4-4135-93c6-52f22099a5a9" {
+	if p.ProviderType == nil || *p.ProviderType != "94e96a44-740d-4372-a0e0-bc9837173c3a" {
 		t.Fatalf("ProviderType = %v, want anthropic picklist id", p.ProviderType)
 	}
 	if p.Name != "anthropic" {
@@ -45,7 +45,7 @@ func TestSyncProviderTypeAssociations_BackfillTypeFromStandardName(t *testing.T)
 }
 
 func TestRuntimeProviderKey_FromProviderType(t *testing.T) {
-	openaiID := "d2803e2c-5ae8-4496-a264-c979c5be5d30"
+	openaiID := "145e3a40-2018-4f73-a51e-ffb63a79e861"
 	p := &TableProvider{
 		ProviderType: &openaiID,
 		Name:         "ignored",

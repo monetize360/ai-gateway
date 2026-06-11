@@ -13,7 +13,7 @@ func TestScopeProviderByRuntimeKey_StandardProviderUsesProviderType(t *testing.T
 	store := setupRDBTestStore(t)
 	ctx := context.Background()
 
-	openaiType := "d2803e2c-5ae8-4496-a264-c979c5be5d30"
+	openaiType := "145e3a40-2018-4f73-a51e-ffb63a79e861"
 	provider := tables.TableProvider{
 		Name:         "stale-name",
 		ProviderType: &openaiType,
