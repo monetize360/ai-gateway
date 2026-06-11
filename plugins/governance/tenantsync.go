@@ -53,12 +53,14 @@ func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context) {
 	for _, tenantID := range tenantIDs {
 		configStore := p.registry.GetStoreForTenant(ctx, tenantID)
 		if configStore == nil {
-			p.logger.Warn("tenant governance sync: no config store for tenant %s", tenantID)
+			p.logger.Debug("tenant governance sync: no config store for tenant %s", tenantID)
 			continue
 		}
 		if err := p.syncTenantGovernanceStore(ctx, tenantID, configStore); err != nil {
-			p.logger.Warn("tenant governance sync failed for tenant %s: %v", tenantID, err)
+			p.logger.Debug("tenant governance sync failed for tenant %s: %v", tenantID, err)
+			continue
 		}
+		p.logger.Info("tenant governance sync succeeded for tenant %s", tenantID)
 	}
 }
 
@@ -91,14 +93,14 @@ func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, t
 
 	store, err := NewLocalGovernanceStore(ctx, p.logger, configStore, nil, p.modelCatalog)
 	if err != nil {
-		p.logger.Warn("failed to initialise governance store for tenant %s: %v", tenantID, err)
+		p.logger.Debug("failed to initialise governance store for tenant %s: %v", tenantID, err)
 		return nil
 	}
 	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
 	tracker := NewUsageTracker(p.ctx, store, resolver, configStore, p.logger)
 	engine, err := NewRoutingEngine(store, p.logger, p.routingChainMaxDepth)
 	if err != nil {
-		p.logger.Warn("failed to initialise routing engine for tenant %s: %v", tenantID, err)
+		p.logger.Debug("failed to initialise routing engine for tenant %s: %v", tenantID, err)
 		return nil
 	}
 
