@@ -475,10 +475,10 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	// Validate LogRetentionDays
-	if payload.ClientConfig.LogRetentionDays < 1 {
-		logger.Warn("log_retention_days must be at least 1")
-		SendError(ctx, fasthttp.StatusBadRequest, "log_retention_days must be at least 1")
+	// Validate LogRetentionDays (0 disables retention-based cleanup)
+	if payload.ClientConfig.LogRetentionDays < 0 {
+		logger.Warn("log_retention_days must be 0 or greater")
+		SendError(ctx, fasthttp.StatusBadRequest, "log_retention_days must be 0 or greater")
 		return
 	}
 	updatedConfig.LogRetentionDays = payload.ClientConfig.LogRetentionDays

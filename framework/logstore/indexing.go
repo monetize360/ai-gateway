@@ -67,13 +67,13 @@ func acquireIndexLock(ctx context.Context, db *gorm.DB) (*advisoryLock, error) {
 	return acquireAdvisoryLock(ctx, db, indexAdvisoryLockKey, "index-build")
 }
 
-// ensureMetadataGINIndex creates a GIN index on the logs.metadata column for
+// ensureMetadataGINIndex creates a GIN index on the finops_logs.metadata column for
 // efficient JSONB querying. Idempotent — uses CREATE INDEX IF NOT EXISTS.
 func ensureMetadataGINIndex(ctx context.Context, conn *sql.Conn) error {
-	_, err := conn.ExecContext(ctx, `
+	_, err := conn.ExecContext(ctx, fmt.Sprintf(`
 		CREATE INDEX IF NOT EXISTS idx_logs_metadata_gin
-		ON logs USING GIN (metadata)
-	`)
+		ON %s USING GIN (metadata)
+	`, LogTableName))
 	if err != nil {
 		return fmt.Errorf("create metadata GIN index: %w", err)
 	}
@@ -84,8 +84,8 @@ func ensureMetadataGINIndex(ctx context.Context, conn *sql.Conn) error {
 // query performance. Idempotent.
 func ensureDashboardEnhancements(ctx context.Context, conn *sql.Conn) error {
 	stmts := []string{
-		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp_provider ON logs (timestamp, provider)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp_model    ON logs (timestamp, model)`,
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp_provider ON %s (timestamp, provider)`, LogTableName),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_logs_timestamp_model    ON %s (timestamp, model)`, LogTableName),
 	}
 	for _, stmt := range stmts {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
@@ -99,9 +99,9 @@ func ensureDashboardEnhancements(ctx context.Context, conn *sql.Conn) error {
 // Idempotent.
 func ensurePerformanceIndexes(ctx context.Context, conn *sql.Conn) error {
 	stmts := []string{
-		`CREATE INDEX IF NOT EXISTS idx_logs_provider_timestamp ON logs (provider, timestamp DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_model_timestamp    ON logs (model, timestamp DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_status_timestamp   ON logs (status, timestamp DESC)`,
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_logs_provider_timestamp ON %s (provider, timestamp DESC)`, LogTableName),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_logs_model_timestamp    ON %s (model, timestamp DESC)`, LogTableName),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_logs_status_timestamp   ON %s (status, timestamp DESC)`, LogTableName),
 	}
 	for _, stmt := range stmts {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {

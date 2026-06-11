@@ -49,7 +49,7 @@ SELECT
     COALESCE(SUM(total_tokens), 0) AS total_tokens,
     COALESCE(SUM(cached_read_tokens), 0) AS total_cached_read_tokens,
     COALESCE(SUM(cost), 0) AS total_cost
-FROM logs
+FROM finops_logs
 WHERE status IN ('success', 'error')
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
 `
@@ -248,7 +248,8 @@ var filterMatViewKeyPairColumns = map[[2]string]string{
 
 func filterMatViewDDL(v filterMatViewDef) string {
 	return fmt.Sprintf(
-		"CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT DISTINCT %s FROM logs WHERE timestamp >= NOW() - INTERVAL '%s' AND (%s)",
+		"CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS SELECT DISTINCT %s FROM %s WHERE timestamp >= NOW() - INTERVAL '%s' AND (%s)",
+		v.name, v.selectExpr, LogTableName, filterDataMatViewWindow, v.whereExpr,
 		v.name, v.selectExpr, filterDataMatViewWindow, v.whereExpr,
 	)
 }
@@ -598,8 +599,8 @@ func logsActivityCounter(ctx context.Context, conn *sql.Conn) (int64, bool) {
 	err := conn.QueryRowContext(ctx, `
 		SELECT COALESCE(n_tup_ins, 0) + COALESCE(n_tup_upd, 0) + COALESCE(n_tup_del, 0)
 		FROM pg_stat_user_tables
-		WHERE relname = 'logs' AND schemaname = current_schema()
-	`).Scan(&activity)
+		WHERE relname = $1 AND schemaname = current_schema()
+	`, LogTableName).Scan(&activity)
 	if err != nil || !activity.Valid {
 		return 0, false
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/tenantstore"
 )
 
@@ -126,6 +127,82 @@ func postgresConfigFromFile(cfg *TenantStoreGlobalPostgresFile) *tenantstore.Pos
 		MaxIdleConns: cfg.MaxIdleConns,
 		MaxOpenConns: cfg.MaxOpenConns,
 	}
+}
+
+// LogStorePostgresConfigFromTenantStore builds a logs_store Postgres config from
+// tenant_store.global (and top-level tenant_store pool defaults when global omits them).
+func LogStorePostgresConfigFromTenantStore(cfg *TenantStoreFileConfig) (*logstore.PostgresConfig, error) {
+	if cfg == nil || cfg.Global == nil {
+		return nil, fmt.Errorf("tenant_store.global is required")
+	}
+	base := postgresConfigFromFile(cfg.Global)
+	maxIdle := cfg.Global.MaxIdleConns
+	maxOpen := cfg.Global.MaxOpenConns
+	if maxIdle == 0 {
+		maxIdle = cfg.MaxIdleConns
+	}
+	if maxOpen == 0 {
+		maxOpen = cfg.MaxOpenConns
+	}
+	return &logstore.PostgresConfig{
+		Host:         base.Host,
+		Port:         base.Port,
+		User:         base.User,
+		Password:     base.Password,
+		DBName:       base.DBName,
+		SSLMode:      base.SSLMode,
+		MaxIdleConns: maxIdle,
+		MaxOpenConns: maxOpen,
+	}, nil
+}
+
+// MergeLogsStorePostgresFromTenantStore fills unset logs_store postgres fields from
+// tenant_store.global. Explicit logs_store.config values take precedence.
+func MergeLogsStorePostgresFromTenantStore(pg *logstore.PostgresConfig, ts *TenantStoreFileConfig) error {
+	if pg == nil {
+		return fmt.Errorf("logs_store postgres config is nil")
+	}
+	defaults, err := LogStorePostgresConfigFromTenantStore(ts)
+	if err != nil {
+		if logsStorePostgresConfigComplete(pg) {
+			return nil
+		}
+		return fmt.Errorf("logs_store postgres config is incomplete and %w", err)
+	}
+	envOrDefault := func(current, fallback *schemas.EnvVar) *schemas.EnvVar {
+		if current != nil && current.GetValue() != "" {
+			return current
+		}
+		return fallback
+	}
+	pg.Host = envOrDefault(pg.Host, defaults.Host)
+	pg.Port = envOrDefault(pg.Port, defaults.Port)
+	pg.User = envOrDefault(pg.User, defaults.User)
+	pg.Password = envOrDefault(pg.Password, defaults.Password)
+	pg.DBName = envOrDefault(pg.DBName, defaults.DBName)
+	pg.SSLMode = envOrDefault(pg.SSLMode, defaults.SSLMode)
+	if pg.MaxIdleConns == 0 {
+		pg.MaxIdleConns = defaults.MaxIdleConns
+	}
+	if pg.MaxOpenConns == 0 {
+		pg.MaxOpenConns = defaults.MaxOpenConns
+	}
+	if !logsStorePostgresConfigComplete(pg) {
+		return fmt.Errorf("logs_store postgres config is incomplete after applying tenant_store.global defaults")
+	}
+	return nil
+}
+
+func logsStorePostgresConfigComplete(pg *logstore.PostgresConfig) bool {
+	if pg == nil {
+		return false
+	}
+	return pg.Host != nil && pg.Host.GetValue() != "" &&
+		pg.Port != nil && pg.Port.GetValue() != "" &&
+		pg.User != nil && pg.User.GetValue() != "" &&
+		pg.Password != nil && pg.Password.GetValue() != "" &&
+		pg.DBName != nil && pg.DBName.GetValue() != "" &&
+		pg.SSLMode != nil && pg.SSLMode.GetValue() != ""
 }
 
 func tenantPoolSettingsFromFile(cfg *TenantStoreFileConfig) configstore.PostgresPoolSettings {

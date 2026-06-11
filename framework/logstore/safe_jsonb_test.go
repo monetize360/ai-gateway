@@ -178,7 +178,7 @@ func insertMalformedLog(t *testing.T, db *gorm.DB, c malformedHistoryCase, ts ti
 		objType = "chat.completion"
 	}
 	err := db.Exec(`
-		INSERT INTO logs (id, timestamp, object_type, provider, model, status,
+		INSERT INTO finops_logs (id, timestamp, object_type, provider, model, status,
 			input_history, responses_input_history, created_at)
 		VALUES (?, ?, ?, 'openai', 'gpt-4', 'success', ?, ?, ?)
 	`, id, ts, objType, c.inputHistory, c.respHistory, ts).Error

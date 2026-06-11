@@ -60,12 +60,13 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		}
 		c.Config = &sqliteConfig
 	case LogStoreTypePostgres:
-		var postgresConfig PostgresConfig
-		var err error
-		if err = json.Unmarshal(temp.Config, &postgresConfig); err != nil {
-			return fmt.Errorf("failed to unmarshal postgres config: %w", err)
+		postgresConfig := &PostgresConfig{}
+		if len(temp.Config) > 0 && string(temp.Config) != "null" {
+			if err := json.Unmarshal(temp.Config, postgresConfig); err != nil {
+				return fmt.Errorf("failed to unmarshal postgres config: %w", err)
+			}
 		}
-		c.Config = &postgresConfig
+		c.Config = postgresConfig
 	default:
 		return fmt.Errorf("unknown log store type: %s", temp.Type)
 	}

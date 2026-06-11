@@ -11,6 +11,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// LogTableName is the physical table for LLM/inference audit log rows.
+const LogTableName = "finops_logs"
+
 // sanitizeJSONForJSONB removes JSON escape sequences that PostgreSQL's jsonb
 // type cannot represent. Specifically, jsonb rejects the NUL unicode escape
 // (\u0000) with errcode 22P05 even though plain TEXT and the json type can
@@ -272,7 +275,7 @@ func NewLogEntryFromMap(entry map[string]interface{}) *Log {
 
 // TableName sets the table name for GORM
 func (Log) TableName() string {
-	return "logs"
+	return LogTableName
 }
 
 // BeforeCreate GORM hook to set created_at and serialize JSON fields

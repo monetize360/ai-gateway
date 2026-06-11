@@ -239,7 +239,7 @@ def get_postgres_log_count_exact(
         user,
         password,
         db,
-        "SELECT COUNT(*) FROM logs;",
+        "SELECT COUNT(*) FROM finops_logs;",
     )
 
 

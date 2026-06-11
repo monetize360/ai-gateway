@@ -787,7 +787,7 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 		},
 		Fallbacks:       nil,
 		ParsedFallbacks: []string{"groq/mixtral-8x7b"},
-		OrgID:           &orgID,
+		ScopeOrgID:      &orgID,
 		Priority:        20,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -1009,7 +1009,7 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 		ID: "1", Name: "Global", Priority: 10, Enabled: bifrost.Ptr(true),
 	}
 	orgRule := &configstoreTables.TableRoutingRule{
-		ID: "2", Name: "Org", OrgID: &orgID, Priority: 20, Enabled: bifrost.Ptr(true),
+		ID: "2", Name: "Org", ScopeOrgID: &orgID, Priority: 20, Enabled: bifrost.Ptr(true),
 	}
 	vkRule := &configstoreTables.TableRoutingRule{
 		ID: "3", Name: "VirtualKey", VirtualKeyID: &vkID, Priority: 30, Enabled: bifrost.Ptr(true),

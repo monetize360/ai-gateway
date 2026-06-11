@@ -162,7 +162,7 @@ type CreateRoutingRuleRequest struct {
 	CelExpression string          `json:"cel_expression"`
 	Targets       []RoutingTarget `json:"targets"` // Required; weights must sum to 1
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
-	OrgID         *string         `json:"org_id,omitempty"`
+	ScopeOrgID    *string         `json:"scope_org_id,omitempty"`
 	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      int             `json:"priority,omitempty"` // Defaults to 0 if not provided
@@ -179,7 +179,7 @@ type UpdateRoutingRuleRequest struct {
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      *int            `json:"priority,omitempty"`
-	OrgID         *string         `json:"org_id,omitempty"`
+	ScopeOrgID    *string         `json:"scope_org_id,omitempty"`
 	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
 }
 
@@ -3044,7 +3044,7 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 	// Get query parameters for filtering
 	scope := string(ctx.QueryArgs().Peek("scope"))
 	scopeID := string(ctx.QueryArgs().Peek("scope_id"))
-	orgID := string(ctx.QueryArgs().Peek("org_id"))
+	scopeOrgID := string(ctx.QueryArgs().Peek("scope_org_id"))
 	virtualKeyID := string(ctx.QueryArgs().Peek("virtual_key_id"))
 
 	// Check if "from_memory" query parameter is set to true
@@ -3061,8 +3061,8 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		var rules []configstoreTables.TableRoutingRule
 		for _, rule := range inMemoryRules {
 			rule.HydrateAssociationFromLegacy()
-			if orgID != "" {
-				if rule.OrgID == nil || *rule.OrgID != orgID {
+			if scopeOrgID != "" {
+				if rule.RoutingScopeOrgID() != scopeOrgID {
 					continue
 				}
 			}
@@ -3071,16 +3071,14 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 					continue
 				}
 			}
-			if scope != "" && orgID == "" && virtualKeyID == "" {
+			if scope != "" && scopeOrgID == "" && virtualKeyID == "" {
 				if rule.RoutingScopeName() != scope {
 					continue
 				}
 			}
-			if scopeID != "" && orgID == "" && virtualKeyID == "" {
-				ruleScopeID := ""
-				if rule.OrgID != nil {
-					ruleScopeID = *rule.OrgID
-				} else if rule.VirtualKeyID != nil {
+			if scopeID != "" && scopeOrgID == "" && virtualKeyID == "" {
+				ruleScopeID := rule.RoutingScopeOrgID()
+				if rule.VirtualKeyID != nil {
 					ruleScopeID = *rule.VirtualKeyID
 				}
 				if ruleScopeID != scopeID {
@@ -3100,10 +3098,10 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// If org_id/virtual_key_id or legacy scope filters are specified, use scoped lookup.
-	if orgID != "" {
+	// If scope_org_id/virtual_key_id or legacy scope filters are specified, use scoped lookup.
+	if scopeOrgID != "" {
 		scope = "org"
-		scopeID = orgID
+		scopeID = scopeOrgID
 	} else if virtualKeyID != "" {
 		scope = "virtual_key"
 		scopeID = virtualKeyID
@@ -3271,7 +3269,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := validateRoutingAssociation(req.OrgID, req.VirtualKeyID); err != nil {
+	if err := validateRoutingAssociation(req.ScopeOrgID, req.VirtualKeyID); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
 	}
@@ -3306,7 +3304,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
 		Targets:         targets,
-		OrgID:           req.OrgID,
+		ScopeOrgID:      req.ScopeOrgID,
 		VirtualKeyID:    req.VirtualKeyID,
 		Priority:        req.Priority,
 		ParsedFallbacks: req.Fallbacks,
@@ -3406,11 +3404,19 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		}
 		rule.ParsedFallbacks = req.Fallbacks
 	}
-	if req.OrgID != nil {
-		rule.OrgID = req.OrgID
+	if req.ScopeOrgID != nil {
+		if strings.TrimSpace(*req.ScopeOrgID) == "" {
+			rule.ScopeOrgID = nil
+		} else {
+			rule.ScopeOrgID = req.ScopeOrgID
+		}
 	}
 	if req.VirtualKeyID != nil {
-		rule.VirtualKeyID = req.VirtualKeyID
+		if strings.TrimSpace(*req.VirtualKeyID) == "" {
+			rule.VirtualKeyID = nil
+		} else {
+			rule.VirtualKeyID = req.VirtualKeyID
+		}
 	}
 	if err := rule.NormalizeRoutingAssociation(); err != nil {
 		SendError(ctx, 400, err.Error())
@@ -3843,12 +3849,12 @@ var validRoutingScopes = map[string]bool{
 	"virtual_key": true,
 }
 
-// validateRoutingAssociation ensures org_id and virtual_key_id are not both set.
-func validateRoutingAssociation(orgID, virtualKeyID *string) error {
-	hasOrg := orgID != nil && strings.TrimSpace(*orgID) != ""
+// validateRoutingAssociation ensures scope_org_id and virtual_key_id are not both set.
+func validateRoutingAssociation(scopeOrgID, virtualKeyID *string) error {
+	hasOrg := scopeOrgID != nil && strings.TrimSpace(*scopeOrgID) != ""
 	hasVK := virtualKeyID != nil && strings.TrimSpace(*virtualKeyID) != ""
 	if hasOrg && hasVK {
-		return fmt.Errorf("org_id and virtual_key_id are mutually exclusive")
+		return fmt.Errorf("scope_org_id and virtual_key_id are mutually exclusive")
 	}
 	return nil
 }

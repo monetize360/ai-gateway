@@ -59,9 +59,9 @@ export default function LoggingView() {
 			return;
 		}
 
-		// Validate log retention days
-		if (localConfig.log_retention_days < 1) {
-			toast.error("Log retention days must be at least 1 day");
+		// Validate log retention days (0 = retain forever)
+		if (localConfig.log_retention_days < 0) {
+			toast.error("Log retention days must be 0 or greater");
 			return;
 		}
 
@@ -192,17 +192,17 @@ export default function LoggingView() {
 								Log Retention Days
 							</Label>
 							<p className="text-muted-foreground text-sm">
-								Number of days to retain logs in the database. Minimum is 1 day. Older logs will be automatically deleted.
+								Days to retain logs in the database. Set to 0 to keep logs forever. Values greater than 0 enable daily automatic cleanup.
 							</p>
 						</div>
 						<Input
 							id="log-retention-days"
 							type="number"
-							min="1"
+							min="0"
 							value={localConfig.log_retention_days}
 							onChange={(e) => {
-								const value = parseInt(e.target.value) || 1;
-								handleConfigChange("log_retention_days", Math.max(1, value));
+								const value = parseInt(e.target.value, 10);
+								handleConfigChange("log_retention_days", Number.isNaN(value) ? 0 : Math.max(0, value));
 							}}
 							className="w-24"
 						/>

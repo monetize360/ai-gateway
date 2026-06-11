@@ -38,7 +38,7 @@ type uploadWork struct {
 //   - Delegated directly (40+ methods): all analytics, search, histogram, ranking,
 //     distinct, MCP, async job methods
 //   - Intercepted: Create, CreateIfNotExists, BatchCreateIfNotExists, FindByID,
-//     Update, DeleteLog, DeleteLogs, DeleteLogsBatch, Close
+//     Update, DeleteLog, DeleteLogs, Close
 type HybridLogStore struct {
 	inner          LogStore
 	objects        objectstore.ObjectStore
@@ -473,15 +473,6 @@ func (h *HybridLogStore) DeleteLogs(ctx context.Context, ids []string) error {
 		}
 	}
 	return nil
-}
-
-// DeleteLogsBatch deletes old DB rows older than cutoff in batches of
-// batchSize. Object-store entries are intentionally NOT deleted here: the
-// expectation is that the bucket has a lifecycle policy configured to expire
-// objects on the same schedule, which is far cheaper than per-row DELETEs.
-func (h *HybridLogStore) DeleteLogsBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
-	// Delegate to inner — S3 objects will be cleaned up by lifecycle policies.
-	return h.inner.DeleteLogsBatch(ctx, cutoff, batchSize)
 }
 
 // Close shuts the store down cleanly: marks the store closed (so further

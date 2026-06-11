@@ -1929,12 +1929,20 @@
         "scope": {
           "type": "string",
           "enum": ["global", "team", "customer", "virtual_key"],
-          "description": "Rule scope level",
+          "description": "Legacy rule scope level (prefer scope_org_id / virtual_key_id)",
           "default": "global"
         },
         "scope_id": {
           "type": "string",
-          "description": "Entity ID for non-global scopes (required for non-global scope)"
+          "description": "Legacy entity ID for non-global scopes (prefer scope_org_id / virtual_key_id)"
+        },
+        "scope_org_id": {
+          "type": "string",
+          "description": "Organization this rule applies to at routing runtime (mutually exclusive with virtual_key_id)"
+        },
+        "virtual_key_id": {
+          "type": "string",
+          "description": "Virtual key this rule applies to (mutually exclusive with scope_org_id)"
         },
         "priority": {
           "type": "integer",

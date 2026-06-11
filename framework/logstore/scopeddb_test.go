@@ -37,7 +37,7 @@ func TestLogStoreScopedDB_AppliesScope(t *testing.T) {
 
 	got := s.ScopedDB(ctx)
 	assert.True(t, called, "ScopedDB should invoke the scope from ctx")
-	stmt := got.Session(&gorm.Session{DryRun: true}).Table("logs").Find(&struct{}{}).Statement
+	stmt := got.Session(&gorm.Session{DryRun: true}).Table(LogTableName).Find(&struct{}{}).Statement
 	assert.Contains(t, stmt.SQL.String(), "status = ?",
 		"the scope's WHERE clause should be on the returned query")
 }

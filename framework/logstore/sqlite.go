@@ -16,6 +16,7 @@ type SQLiteConfig struct {
 }
 
 // newSqliteLogStore creates a new SQLite log store.
+// Schema management is the caller's responsibility; Bifrost only opens a runtime pool.
 func newSqliteLogStore(ctx context.Context, config *SQLiteConfig, logger schemas.Logger) (*RDBLogStore, error) {
 	if _, err := os.Stat(config.Path); os.IsNotExist(err) {
 		// Create DB file
@@ -37,10 +38,5 @@ func newSqliteLogStore(ctx context.Context, config *SQLiteConfig, logger schemas
 	}
 	logger.Debug("db opened for logstore")
 
-	s := &RDBLogStore{db: db, logger: logger}
-	if err := db.AutoMigrate(&Log{}, &MCPToolLog{}, &AsyncJob{}); err != nil {
-		return nil, fmt.Errorf("failed to auto-migrate logstore tables: %w", err)
-	}
-
-	return s, nil
+	return &RDBLogStore{db: db, logger: logger}, nil
 }

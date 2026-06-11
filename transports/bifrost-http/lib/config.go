@@ -691,12 +691,30 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	return config, nil
 }
 
+// prepareLogsStoreConfig resolves logs_store postgres connection settings from
+// tenant_store.global when logs_store.config is omitted or partially set.
+func prepareLogsStoreConfig(configData *ConfigData) error {
+	ls := configData.LogsStoreConfig
+	if ls == nil || !ls.Enabled || ls.Type != logstore.LogStoreTypePostgres {
+		return nil
+	}
+	pg, ok := ls.Config.(*logstore.PostgresConfig)
+	if !ok || ls.Config == nil {
+		pg = &logstore.PostgresConfig{}
+		ls.Config = pg
+	}
+	return MergeLogsStorePostgresFromTenantStore(pg, configData.TenantStoreConfig)
+}
+
 // initStores initializes logs and vector stores.
 func initStores(ctx context.Context, config *Config, configData *ConfigData, logsDBPath string) error {
 	var err error
 
 	// Initialize log store
 	if configData.LogsStoreConfig != nil && configData.LogsStoreConfig.Enabled {
+		if err := prepareLogsStoreConfig(configData); err != nil {
+			return err
+		}
 		// Explicit logs store configuration from config.json
 		config.LogsStore, err = logstore.NewLogStore(ctx, configData.LogsStoreConfig, logger)
 		if err != nil {

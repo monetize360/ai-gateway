@@ -380,7 +380,7 @@ func TestBuildBulkUpdateCostPostgresSQL(t *testing.T) {
 	}
 
 	query, args := buildBulkUpdateCostPostgresSQL([]string{"log-a", "log-b"}, updates)
-	wantQuery := "UPDATE logs SET cost = v.cost FROM (VALUES ($1::text,$2::float8),($3::text,$4::float8)) AS v(id, cost) WHERE logs.id = v.id"
+	wantQuery := "UPDATE finops_logs SET cost = v.cost FROM (VALUES ($1::text,$2::float8),($3::text,$4::float8)) AS v(id, cost) WHERE finops_logs.id = v.id"
 	wantArgs := []interface{}{"log-a", 1.25, "log-b", 2.5}
 
 	if query != wantQuery {

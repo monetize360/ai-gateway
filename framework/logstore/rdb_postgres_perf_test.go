@@ -31,7 +31,7 @@ func setupPerfTestDB(t *testing.T) (*RDBLogStore, *gorm.DB) {
 	}
 	db.Exec("DROP TABLE IF EXISTS mcp_tool_logs CASCADE")
 	db.Exec("DROP TABLE IF EXISTS async_jobs CASCADE")
-	db.Exec("DROP TABLE IF EXISTS logs CASCADE")
+	db.Exec("DROP TABLE IF EXISTS finops_logs CASCADE")
 	db.Exec("CREATE TABLE IF NOT EXISTS migrations (id VARCHAR(255) PRIMARY KEY)")
 	db.Exec("DELETE FROM migrations")
 
@@ -56,7 +56,7 @@ func setupPerfTestDB(t *testing.T) (*RDBLogStore, *gorm.DB) {
 		}
 		db.Exec("DROP TABLE IF EXISTS mcp_tool_logs CASCADE")
 		db.Exec("DROP TABLE IF EXISTS async_jobs CASCADE")
-		db.Exec("DROP TABLE IF EXISTS logs CASCADE")
+		db.Exec("DROP TABLE IF EXISTS finops_logs CASCADE")
 		db.Exec("DELETE FROM migrations")
 	})
 
@@ -143,7 +143,7 @@ func insertPerfLog(t *testing.T, db *gorm.DB, opts logOpts) {
 	}
 	id := uuid.New().String()
 	err := db.Exec(`
-		INSERT INTO logs (id, timestamp, object_type, provider, model, status,
+		INSERT INTO finops_logs (id, timestamp, object_type, provider, model, status,
 			routing_engines_used, metadata, content_summary,
 			virtual_key_id, virtual_key_name, selected_key_id, selected_key_name,
 			routing_rule_id, routing_rule_name, stop_reason, created_at, latency, cost,
@@ -528,7 +528,7 @@ func TestEnsurePerformanceIndexes(t *testing.T) {
 
 	db.Exec("DROP TABLE IF EXISTS mcp_tool_logs CASCADE")
 	db.Exec("DROP TABLE IF EXISTS async_jobs CASCADE")
-	db.Exec("DROP TABLE IF EXISTS logs CASCADE")
+	db.Exec("DROP TABLE IF EXISTS finops_logs CASCADE")
 	db.Exec("CREATE TABLE IF NOT EXISTS migrations (id VARCHAR(255) PRIMARY KEY)")
 	db.Exec("DELETE FROM migrations")
 
@@ -542,7 +542,7 @@ func TestEnsurePerformanceIndexes(t *testing.T) {
 		}
 		db.Exec("DROP TABLE IF EXISTS mcp_tool_logs CASCADE")
 		db.Exec("DROP TABLE IF EXISTS async_jobs CASCADE")
-		db.Exec("DROP TABLE IF EXISTS logs CASCADE")
+		db.Exec("DROP TABLE IF EXISTS finops_logs CASCADE")
 		db.Exec("DELETE FROM migrations")
 	})
 

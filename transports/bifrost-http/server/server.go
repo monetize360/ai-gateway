@@ -138,7 +138,6 @@ type BifrostHTTPServer struct {
 
 	LogLevel        string
 	LogOutputStyle  string
-	LogsCleaner     *logstore.LogsCleaner
 	AsyncJobCleaner *logstore.AsyncJobCleaner
 
 	Client *bifrost.Bifrost
@@ -1435,27 +1434,6 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	s.Config.EventBroadcaster = s.WebSocketHandler.BroadcastEvent
 	// Initializing plugin loader
 	s.Config.PluginLoader = &dynamicPlugins.SharedObjectPluginLoader{}
-	// Initialize log retention cleaner if log store is configured
-	if s.Config.LogsStore != nil {
-		// If log retention days remains 0, then we wont be initializing the log retention cleaner
-		logRetentionDays := 0
-		if s.Config.ClientConfig != nil {
-			logRetentionDays = s.Config.ClientConfig.LogRetentionDays
-		}
-		logger.Info("log retention days: %d", logRetentionDays)
-		if logRetentionDays > 0 {
-			// Type assert to get RDBLogStore (which implements LogRetentionManager)
-			if rdbStore, ok := s.Config.LogsStore.(logstore.LogRetentionManager); ok {
-				cleanerConfig := logstore.CleanerConfig{
-					RetentionDays: logRetentionDays,
-				}
-				s.LogsCleaner = logstore.NewLogsCleaner(rdbStore, cleanerConfig, logger)
-				s.LogsCleaner.StartCleanupRoutine()
-				logger.Info("log retention cleaner initialized with %d days retention",
-					logRetentionDays)
-			}
-		}
-	}
 	// Initialize async job cleaner if log store is configured
 	if s.Config.LogsStore != nil {
 		s.AsyncJobCleaner = logstore.NewAsyncJobCleaner(s.Config.LogsStore, logger)
@@ -1749,10 +1727,6 @@ func (s *BifrostHTTPServer) Start() error {
 			logger.Info("bifrost client shutdown completed")
 			logger.Info("cleaning up storage engines...")
 			// Cleanup server-specific components
-			if s.LogsCleaner != nil {
-				logger.Info("stopping log retention cleaner...")
-				s.LogsCleaner.StopCleanupRoutine()
-			}
 			if s.AsyncJobCleaner != nil {
 				logger.Info("stopping async job cleaner...")
 				s.AsyncJobCleaner.StopCleanupRoutine()

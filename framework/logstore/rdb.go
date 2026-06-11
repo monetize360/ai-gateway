@@ -498,7 +498,7 @@ func buildBulkUpdateCostPostgresSQL(ids []string, updates map[string]float64) (s
 	var sqlBuilder strings.Builder
 	args := make([]interface{}, 0, len(ids)*2)
 
-	sqlBuilder.WriteString("UPDATE logs SET cost = v.cost FROM (VALUES ")
+	sqlBuilder.WriteString(fmt.Sprintf("UPDATE %s SET cost = v.cost FROM (VALUES ", LogTableName))
 	for i, id := range ids {
 		if i > 0 {
 			sqlBuilder.WriteString(",")
@@ -511,7 +511,7 @@ func buildBulkUpdateCostPostgresSQL(ids []string, updates map[string]float64) (s
 		sqlBuilder.WriteString("::float8)")
 		args = append(args, id, updates[id])
 	}
-	sqlBuilder.WriteString(") AS v(id, cost) WHERE logs.id = v.id")
+	sqlBuilder.WriteString(fmt.Sprintf(") AS v(id, cost) WHERE %s.id = v.id", LogTableName))
 
 	return sqlBuilder.String(), args
 }
@@ -927,10 +927,10 @@ func (s *RDBLogStore) GetStats(ctx context.Context, filters SearchFilters) (*Sea
 			// performance — an unbounded scan of the full logs table is too expensive.
 			// Known tradeoff: fallbacks that complete outside the time window boundary will be
 			// missed, slightly under-counting success at the edges.
-			innerJoin := `LEFT JOIN (
+			innerJoin := fmt.Sprintf(`LEFT JOIN (
 				SELECT DISTINCT parent_request_id
-				FROM logs
-				WHERE status = 'success' AND parent_request_id IS NOT NULL`
+				FROM %s
+				WHERE status = 'success' AND parent_request_id IS NOT NULL`, LogTableName)
 			var innerArgs []interface{}
 			if filters.StartTime != nil {
 				innerJoin += " AND timestamp >= ?"
@@ -940,15 +940,15 @@ func (s *RDBLogStore) GetStats(ctx context.Context, filters SearchFilters) (*Sea
 				innerJoin += " AND timestamp <= ?"
 				innerArgs = append(innerArgs, *filters.EndTime)
 			}
-			innerJoin += `) fallback_success ON fallback_success.parent_request_id = logs.id`
+			innerJoin += fmt.Sprintf(`) fallback_success ON fallback_success.parent_request_id = %s.id`, LogTableName)
 			userFacingQuery = userFacingQuery.Joins(innerJoin, innerArgs...)
-			if err := userFacingQuery.Select(`
-				COUNT(DISTINCT logs.id) as total_user_requests,
+			if err := userFacingQuery.Select(fmt.Sprintf(`
+				COUNT(DISTINCT %s.id) as total_user_requests,
 				COUNT(DISTINCT CASE
-					WHEN logs.status = 'success' OR fallback_success.parent_request_id IS NOT NULL THEN logs.id
+					WHEN %s.status = 'success' OR fallback_success.parent_request_id IS NOT NULL THEN %s.id
 					ELSE NULL
 				END) as successful_user_requests
-			`).Scan(&userFacingResult).Error; err != nil {
+			`, LogTableName, LogTableName, LogTableName)).Scan(&userFacingResult).Error; err != nil {
 				return nil, err
 			}
 			stats.UserFacingTotalRequests = userFacingResult.TotalUserRequests.Int64
@@ -3212,32 +3212,6 @@ func (s *RDBLogStore) FindAllDistinct(ctx context.Context, query any, fields ...
 		return nil, err
 	}
 	return logs, nil
-}
-
-// DeleteLogsBatch deletes logs older than the cutoff time in batches.
-func (s *RDBLogStore) DeleteLogsBatch(ctx context.Context, cutoff time.Time, batchSize int) (deletedCount int64, err error) {
-	// First, select the IDs of logs to delete with proper LIMIT
-	var ids []string
-	if err := s.db.WithContext(ctx).
-		Model(&Log{}).
-		Select("id").
-		Where("created_at < ?", cutoff).
-		Limit(batchSize).
-		Pluck("id", &ids).Error; err != nil {
-		return 0, err
-	}
-
-	// If no IDs found, return early
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	// Delete the selected IDs
-	result := s.db.WithContext(ctx).Where("id IN ?", ids).Delete(&Log{})
-	if result.Error != nil {
-		return 0, result.Error
-	}
-	return result.RowsAffected, nil
 }
 
 // Close closes the log store.

@@ -74,7 +74,7 @@ type ClientConfig struct {
 	AllowPerRequestContentStorageOverride bool                             `json:"allow_per_request_content_storage_override"` // Allow per-request override of content storage via x-bf-disable-content-logging header/context
 	AllowPerRequestRawOverride            bool                             `json:"allow_per_request_raw_override"`             // Allow per-request override of raw request/response visibility via x-bf-send-back-raw-request and x-bf-send-back-raw-response headers
 	DisableDBPingsInHealth                bool                             `json:"disable_db_pings_in_health"`
-	LogRetentionDays                      int                              `json:"log_retention_days" validate:"min=1"`  // Number of days to retain logs (minimum 1 day)
+	LogRetentionDays                      int                              `json:"log_retention_days"` // 0 = retain forever; >0 enables daily cleanup
 	EnforceAuthOnInference                bool                             `json:"enforce_auth_on_inference"`            // Require auth (VK, API key, or user token) on inference endpoints
 	EnforceGovernanceHeader               bool                             `json:"enforce_governance_header,omitempty"`  // Deprecated: use EnforceAuthOnInference
 	EnforceSCIMAuth                       bool                             `json:"enforce_scim_auth,omitempty"`          // Deprecated: use EnforceAuthOnInference
@@ -1210,8 +1210,8 @@ func GenerateRoutingRuleHash(r tables.TableRoutingRule) (string, error) {
 		hash.Write([]byte("chain_rule:false"))
 	}
 
-	// Hash OrgID / VirtualKeyID (nil = global)
-	hash.Write([]byte(derefStr(r.OrgID)))
+	// Hash ScopeOrgID / VirtualKeyID (nil = global). OrgID is visibility-only and excluded.
+	hash.Write([]byte(derefStr(r.ScopeOrgID)))
 	hash.Write([]byte(derefStr(r.VirtualKeyID)))
 
 	// Hash Priority
