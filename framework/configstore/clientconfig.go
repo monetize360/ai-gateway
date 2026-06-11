@@ -1095,9 +1095,11 @@ func writeHashField(hash hash.Hash, fieldID, value string) {
 // Used to ensure deterministic hashes regardless of slice order.
 // Fields use plain string (not *string) so nil and "" both marshal to "" and produce the same hash.
 type routingTargetHashPayload struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	KeyID    string `json:"key_id"`
+	ProviderID string `json:"provider_id"`
+	ModelID    string `json:"model_id"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	KeyID      string `json:"key_id"`
 }
 
 // derefStr returns the dereferenced value of s, or "" if s is nil.
@@ -1154,9 +1156,11 @@ func GenerateRoutingRuleHash(r tables.TableRoutingRule) (string, error) {
 
 	// Hash inline routing output fields.
 	payload := routingTargetHashPayload{
-		Provider: derefStr(r.Provider),
-		Model:    derefStr(r.Model),
-		KeyID:    derefStr(r.KeyID),
+		ProviderID: derefStr(r.ProviderID),
+		ModelID:    derefStr(r.ModelID),
+		Provider:   derefStr(r.Provider),
+		Model:      derefStr(r.Model),
+		KeyID:      derefStr(r.KeyID),
 	}
 	data, err := sonic.Marshal(payload)
 	if err != nil {

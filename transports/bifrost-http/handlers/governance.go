@@ -149,9 +149,11 @@ type CreateRoutingRuleRequest struct {
 	Enabled       *bool          `json:"enabled,omitempty"`    // nil = use DB default (true)
 	ChainRule     *bool          `json:"chain_rule,omitempty"` // nil = use DB default (false)
 	CelExpression string         `json:"cel_expression"`
-	Provider      *string        `json:"provider,omitempty"` // nil = use incoming provider
-	Model         *string        `json:"model,omitempty"`    // nil = use incoming model
-	KeyID         *string        `json:"key_id,omitempty"`   // nil = no key pin
+	ProviderID    *string        `json:"provider_id,omitempty"` // nil = use incoming provider
+	ModelID       *string        `json:"model_id,omitempty"`    // nil = use incoming model
+	Provider      *string        `json:"provider,omitempty"`    // config/UI alias; resolved to provider_id on save
+	Model         *string        `json:"model,omitempty"`       // config/UI alias; resolved to model_id on save
+	KeyID         *string        `json:"key_id,omitempty"`      // nil = no key pin
 	Fallbacks     []string       `json:"fallbacks,omitempty"`
 	ScopeOrgID    *string        `json:"scope_org_id,omitempty"`
 	VirtualKeyID  *string        `json:"virtual_key_id,omitempty"`
@@ -166,6 +168,8 @@ type UpdateRoutingRuleRequest struct {
 	Enabled       *bool          `json:"enabled,omitempty"`
 	ChainRule     *bool          `json:"chain_rule,omitempty"`
 	CelExpression *string        `json:"cel_expression,omitempty"`
+	ProviderID    *string        `json:"provider_id,omitempty"`
+	ModelID       *string        `json:"model_id,omitempty"`
 	Provider      *string        `json:"provider,omitempty"`
 	Model         *string        `json:"model,omitempty"`
 	KeyID         *string        `json:"key_id,omitempty"`
@@ -3248,7 +3252,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := validateRoutingOutput(req.Provider, req.Model, req.KeyID); err != nil {
+	if err := validateRoutingOutput(req.ProviderID, req.Provider, req.KeyID); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
 	}
@@ -3281,6 +3285,8 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		Enabled:         enabled,
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
+		ProviderID:      req.ProviderID,
+		ModelID:         req.ModelID,
 		Provider:        req.Provider,
 		Model:           req.Model,
 		KeyID:           req.KeyID,
@@ -3351,6 +3357,20 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.CelExpression != nil {
 		rule.CelExpression = *req.CelExpression
 	}
+	if req.ProviderID != nil {
+		if strings.TrimSpace(*req.ProviderID) == "" {
+			rule.ProviderID = nil
+		} else {
+			rule.ProviderID = req.ProviderID
+		}
+	}
+	if req.ModelID != nil {
+		if strings.TrimSpace(*req.ModelID) == "" {
+			rule.ModelID = nil
+		} else {
+			rule.ModelID = req.ModelID
+		}
+	}
 	if req.Provider != nil {
 		if strings.TrimSpace(*req.Provider) == "" {
 			rule.Provider = nil
@@ -3372,8 +3392,8 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 			rule.KeyID = req.KeyID
 		}
 	}
-	if req.Provider != nil || req.Model != nil || req.KeyID != nil {
-		if err := validateRoutingOutput(rule.Provider, rule.Model, rule.KeyID); err != nil {
+	if req.ProviderID != nil || req.ModelID != nil || req.Provider != nil || req.Model != nil || req.KeyID != nil {
+		if err := validateRoutingOutput(rule.ProviderID, rule.Provider, rule.KeyID); err != nil {
 			SendError(ctx, 400, err.Error())
 			return
 		}
@@ -3857,11 +3877,12 @@ func validateRoutingScope(scope string) error {
 	return nil
 }
 
-// validateRoutingOutput ensures key_id is only set when provider is set.
-func validateRoutingOutput(provider, model, keyID *string) error {
-	_ = model
-	if keyID != nil && strings.TrimSpace(*keyID) != "" && (provider == nil || strings.TrimSpace(*provider) == "") {
-		return fmt.Errorf("key_id requires provider to be set")
+// validateRoutingOutput ensures key_id is only set when a provider pin is set.
+func validateRoutingOutput(providerID, provider, keyID *string) error {
+	hasProvider := (providerID != nil && strings.TrimSpace(*providerID) != "") ||
+		(provider != nil && strings.TrimSpace(*provider) != "")
+	if keyID != nil && strings.TrimSpace(*keyID) != "" && !hasProvider {
+		return fmt.Errorf("key_id requires provider_id or provider to be set")
 	}
 	return nil
 }

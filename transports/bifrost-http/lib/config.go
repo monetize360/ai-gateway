@@ -1551,11 +1551,18 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 			if rule.KeyID != nil && strings.TrimSpace(*rule.KeyID) != "" {
 				return fmt.Errorf("routing rule %q cannot set key_id together with provider_key_name", rule.ID)
 			}
-			if rule.Provider == nil || strings.TrimSpace(*rule.Provider) == "" {
-				return fmt.Errorf("routing rule %q provider_key_name requires provider to be set", rule.ID)
+			if !rule.HasRoutingProviderPin() {
+				return fmt.Errorf("routing rule %q provider_key_name requires provider_id or provider to be set", rule.ID)
+			}
+			providerName := ""
+			if rule.Provider != nil {
+				providerName = strings.TrimSpace(*rule.Provider)
+			}
+			if providerName == "" {
+				return fmt.Errorf("routing rule %q provider_key_name requires provider name to be set", rule.ID)
 			}
 
-			keyID, err := resolveProviderKeyIDByProviderAndName(*rule.Provider, keyName)
+			keyID, err := resolveProviderKeyIDByProviderAndName(providerName, keyName)
 			if err != nil {
 				return fmt.Errorf("routing rule %q provider_key_name resolution failed: %w", rule.ID, err)
 			}

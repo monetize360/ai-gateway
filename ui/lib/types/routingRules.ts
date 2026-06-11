@@ -10,6 +10,8 @@ export interface RoutingRule {
 	name: string;
 	description: string;
 	cel_expression: string;
+	provider_id?: string;
+	model_id?: string;
 	provider?: string;
 	model?: string;
 	key_id?: string;
@@ -28,6 +30,8 @@ export interface CreateRoutingRuleRequest {
 	name: string;
 	description?: string;
 	cel_expression?: string;
+	provider_id?: string;
+	model_id?: string;
 	provider?: string;
 	model?: string;
 	key_id?: string;

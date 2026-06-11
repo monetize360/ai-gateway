@@ -1910,17 +1910,25 @@
           "description": "If true, re-evaluates routing chain after this rule matches"
         },
         "targets": false,
+        "provider_id": {
+          "type": "string",
+          "description": "Target config_providers.id. Omit to use the incoming request provider"
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Target config_models.id. Omit to use the incoming request model"
+        },
         "provider": {
           "type": "string",
-          "description": "Target provider name. Omit to use the incoming request provider"
+          "description": "Target provider name (config.json alias; resolved to provider_id on save). Omit to use the incoming request provider"
         },
         "model": {
           "type": "string",
-          "description": "Target model name. Omit to use the incoming request model"
+          "description": "Target model name (config.json alias; resolved to model_id on save). Omit to use the incoming request model"
         },
         "key_id": {
           "type": "string",
-          "description": "Optional provider key ID pin. Requires provider"
+          "description": "Optional provider key ID pin. Requires provider_id or provider"
         },
         "provider_key_name": {
           "type": "string",

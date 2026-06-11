@@ -24,6 +24,9 @@ type TableRoutingRule struct {
 	CelExpression string `gorm:"type:text;not null" json:"cel_expression"`
 
 	// Routing output — nil provider/model means use the incoming request value.
+	// provider_id/model_id are canonical FKs (MPilot); provider/model are denormalized names for runtime.
+	ProviderID      *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
+	ModelID         *string `gorm:"type:uuid;index" json:"model_id,omitempty"`
 	Provider        *string `gorm:"type:varchar(255)" json:"provider,omitempty"`
 	Model           *string `gorm:"type:varchar(255)" json:"model,omitempty"`
 	KeyID           *string `gorm:"type:varchar(255)" json:"key_id,omitempty"`
@@ -171,6 +174,8 @@ func isNonEmptyString(s *string) bool {
 }
 
 type legacyRoutingTarget struct {
+	ProviderID      *string `json:"provider_id"`
+	ModelID         *string `json:"model_id"`
 	Provider        *string `json:"provider"`
 	Model           *string `json:"model"`
 	KeyID           *string `json:"key_id"`
@@ -180,6 +185,12 @@ type legacyRoutingTarget struct {
 func applyLegacyRoutingTarget(rule *TableRoutingRule, target legacyRoutingTarget) {
 	if rule == nil {
 		return
+	}
+	if rule.ProviderID == nil && target.ProviderID != nil {
+		rule.ProviderID = target.ProviderID
+	}
+	if rule.ModelID == nil && target.ModelID != nil {
+		rule.ModelID = target.ModelID
 	}
 	if rule.Provider == nil && target.Provider != nil {
 		rule.Provider = target.Provider
@@ -193,6 +204,76 @@ func applyLegacyRoutingTarget(rule *TableRoutingRule, target legacyRoutingTarget
 	if rule.ProviderKeyName == nil && target.ProviderKeyName != nil {
 		rule.ProviderKeyName = target.ProviderKeyName
 	}
+}
+
+// SyncRoutingOutputAssociations resolves provider_id/model_id ↔ denormalized provider/model names.
+func (r *TableRoutingRule) SyncRoutingOutputAssociations(tx *gorm.DB) error {
+	if r == nil {
+		return nil
+	}
+	if tx == nil {
+		return nil
+	}
+
+	if isNonEmptyString(r.ProviderID) {
+		var name string
+		if err := tx.Model(&TableProvider{}).
+			Where("id = ? AND deleted = ?", strings.TrimSpace(*r.ProviderID), false).
+			Select("name").
+			Scan(&name).Error; err != nil {
+			return err
+		}
+		if strings.TrimSpace(name) != "" {
+			r.Provider = bifrost.Ptr(strings.TrimSpace(name))
+		}
+	} else if isNonEmptyString(r.Provider) {
+		var id string
+		if err := tx.Model(&TableProvider{}).
+			Where("name = ? AND deleted = ?", strings.TrimSpace(*r.Provider), false).
+			Select("id").
+			Scan(&id).Error; err != nil {
+			return err
+		}
+		if strings.TrimSpace(id) != "" {
+			r.ProviderID = bifrost.Ptr(strings.TrimSpace(id))
+		}
+	}
+
+	if isNonEmptyString(r.ModelID) {
+		var name string
+		if err := tx.Model(&TableModel{}).
+			Where("id = ? AND deleted = ?", strings.TrimSpace(*r.ModelID), false).
+			Select("name").
+			Scan(&name).Error; err != nil {
+			return err
+		}
+		if strings.TrimSpace(name) != "" {
+			r.Model = bifrost.Ptr(strings.TrimSpace(name))
+		}
+	} else if isNonEmptyString(r.Model) {
+		q := tx.Model(&TableModel{}).
+			Where("name = ? AND deleted = ?", strings.TrimSpace(*r.Model), false)
+		if isNonEmptyString(r.ProviderID) {
+			q = q.Where("provider_id = ?", strings.TrimSpace(*r.ProviderID))
+		}
+		var id string
+		if err := q.Select("id").Scan(&id).Error; err != nil {
+			return err
+		}
+		if strings.TrimSpace(id) != "" {
+			r.ModelID = bifrost.Ptr(strings.TrimSpace(id))
+		}
+	}
+
+	return nil
+}
+
+// HasRoutingProviderPin reports whether the rule pins a provider (by id or denormalized name).
+func (r *TableRoutingRule) HasRoutingProviderPin() bool {
+	if r == nil {
+		return false
+	}
+	return isNonEmptyString(r.ProviderID) || isNonEmptyString(r.Provider)
 }
 
 // UnmarshalJSON accepts inline provider/model/key_id, legacy targets[0], or scope/scope_id from config.json.
@@ -226,6 +307,9 @@ func (r *TableRoutingRule) UnmarshalJSON(data []byte) error {
 // BeforeSave hook for TableRoutingRule to serialize JSON fields
 func (r *TableRoutingRule) BeforeSave(tx *gorm.DB) error {
 	if err := r.NormalizeRoutingAssociation(); err != nil {
+		return err
+	}
+	if err := r.SyncRoutingOutputAssociations(tx); err != nil {
 		return err
 	}
 	if len(r.ParsedFallbacks) > 0 {
@@ -262,5 +346,8 @@ func (r *TableRoutingRule) AfterFind(tx *gorm.DB) error {
 		}
 	}
 	r.HydrateAssociationFromLegacy()
+	if err := r.SyncRoutingOutputAssociations(tx); err != nil {
+		return err
+	}
 	return nil
 }
