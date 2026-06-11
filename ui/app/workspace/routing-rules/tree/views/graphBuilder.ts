@@ -310,29 +310,20 @@ function collectDAGStructure(root: TrieNode): { lNodes: LNode[]; lEdges: LEdge[]
 		}
 
 		for (const { ruleId, rule, sc } of chainQueue) {
-			// Collect unique (provider, model) pairs across all targets
-			const seen = new Set<string>();
-			for (const t of rule.targets) {
-				const vars: Record<string, string> = {};
-				if (t.provider) vars.provider = t.provider;
-				if (t.model) vars.model = t.model;
-				if (!Object.keys(vars).length) {
-					// passthrough target — chain loops back to source (static: we know the input is unchanged)
-					addEdge(ruleId, "source", "↺", sc, { isChainBack: true, isChainWeak: false, sourceHandle: "chain-out" });
-					continue;
-				}
-				const key = JSON.stringify(vars);
-				if (seen.has(key)) continue;
-				seen.add(key);
+			const vars: Record<string, string> = {};
+			if (rule.provider) vars.provider = rule.provider;
+			if (rule.model) vars.model = rule.model;
+			if (!Object.keys(vars).length) {
+				addEdge(ruleId, "source", "↺", sc, { isChainBack: true, isChainWeak: false, sourceHandle: "chain-out" });
+				continue;
+			}
 
-				const entries = findEntries(childrenOf.get("source") ?? [], vars);
-				if (entries.length === 0) {
-					// resolved vars match no condition node — fall back to source
-					addEdge(ruleId, "source", "↺", sc, { isChainBack: true, isChainWeak: false, sourceHandle: "chain-out" });
-				}
-				for (const { id: condId, strong } of entries) {
-					addEdge(ruleId, condId, "↺", sc, { isChainBack: true, isChainWeak: !strong, sourceHandle: "chain-out" });
-				}
+			const entries = findEntries(childrenOf.get("source") ?? [], vars);
+			if (entries.length === 0) {
+				addEdge(ruleId, "source", "↺", sc, { isChainBack: true, isChainWeak: false, sourceHandle: "chain-out" });
+			}
+			for (const { id: condId, strong } of entries) {
+				addEdge(ruleId, condId, "↺", sc, { isChainBack: true, isChainWeak: !strong, sourceHandle: "chain-out" });
 			}
 		}
 	}

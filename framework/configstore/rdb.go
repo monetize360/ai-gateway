@@ -3605,16 +3605,10 @@ func (s *RDBConfigStore) UpdateRateLimitUsage(ctx context.Context, id string, to
 	return nil
 }
 
-// loadRoutingRulesOrdered loads routing rules with Targets preloaded, using consistent ordering:
-// rules by priority ASC, created_at DESC, id ASC; targets by weight DESC for deterministic ordering.
+// loadRoutingRulesOrdered loads routing rules using consistent ordering:
+// priority ASC, created_at DESC, id ASC.
 func (s *RDBConfigStore) loadRoutingRulesOrdered(ctx context.Context, dest *[]tables.TableRoutingRule, scopes ...func(*gorm.DB) *gorm.DB) error {
 	q := s.DB().WithContext(ctx).
-		Preload("Targets", func(db *gorm.DB) *gorm.DB {
-			return db.Order("weight DESC").
-				Order("COALESCE(provider, '') ASC").
-				Order("COALESCE(model, '') ASC").
-				Order("COALESCE(key_id, '') ASC")
-		}).
 		Order("priority ASC, created_at DESC, id ASC")
 	for _, scope := range scopes {
 		q = scope(q)
@@ -3763,22 +3757,7 @@ func (s *RDBConfigStore) CreateRoutingRule(ctx context.Context, rule *tables.Tab
 		return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
 	}
 
-	return s.parseGormError(database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		targets := rule.Targets
-		rule.Targets = nil
-		if err := tx.Omit("Targets").Create(rule).Error; err != nil {
-			return err
-		}
-		rule.Targets = targets
-
-		for i := range rule.Targets {
-			rule.Targets[i].RuleID = rule.ID
-			if err := tx.Create(&rule.Targets[i]).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	return s.parseGormError(database.WithContext(ctx).Create(rule).Error)
 }
 
 // UpdateRoutingRule updates an existing routing rule in the database.
@@ -3821,27 +3800,11 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 			return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
 		}
 
-		targets := rule.Targets
-		rule.Targets = nil
-		if err := tx.Omit("Targets").Save(rule).Error; err != nil {
-			return err
-		}
-		rule.Targets = targets
-
-		if err := tx.Where("rule_id = ?", rule.ID).Delete(&tables.TableRoutingTarget{}).Error; err != nil {
-			return err
-		}
-		for i := range rule.Targets {
-			rule.Targets[i].RuleID = rule.ID
-			if err := tx.Create(&rule.Targets[i]).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return tx.Save(rule).Error
 	}))
 }
 
-// DeleteRoutingRule deletes a routing rule and its targets from the database.
+// DeleteRoutingRule deletes a routing rule from the database.
 func (s *RDBConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error {
 	database := s.DB()
 	if len(tx) > 0 && tx[0] != nil {
@@ -3854,9 +3817,6 @@ func (s *RDBConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx ..
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
-			return err
-		}
-		if err := tx.Where("rule_id = ?", id).Delete(&tables.TableRoutingTarget{}).Error; err != nil {
 			return err
 		}
 		result := tx.Delete(&tables.TableRoutingRule{}, "id = ?", id)

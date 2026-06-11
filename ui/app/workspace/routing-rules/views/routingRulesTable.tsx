@@ -23,7 +23,7 @@ import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
 import { getProviderLabel } from "@/lib/constants/logs";
 import { getErrorMessage } from "@/lib/store";
 import { useDeleteRoutingRuleMutation, useUpdateRoutingRuleMutation } from "@/lib/store/apis/routingRulesApi";
-import { RoutingRule, RoutingTarget } from "@/lib/types/routingRules";
+import { RoutingRule } from "@/lib/types/routingRules";
 import { getPriorityBadgeClass, getScopeLabel, truncateCELExpression } from "@/lib/utils/routingRules";
 import { ChevronLeft, ChevronRight, Edit, MoreHorizontal, Search, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -220,7 +220,7 @@ export function RoutingRulesTable({
 										</div>
 									</TableCell>
 									<TableCell>
-										<TargetsSummary targets={rule.targets || []} />
+										<RoutingOutputSummary rule={rule} />
 									</TableCell>
 									<TableCell>
 										<Badge variant="secondary">{getScopeLabel(rule.scope)}</Badge>
@@ -320,25 +320,17 @@ export function RoutingRulesTable({
 	);
 }
 
-function TargetsSummary({ targets }: { targets: RoutingTarget[] }) {
-	if (!targets || targets.length === 0) {
-		return <span className="text-muted-foreground text-sm">-</span>;
+function RoutingOutputSummary({ rule }: { rule: RoutingRule }) {
+	if (!rule.provider && !rule.model) {
+		return <span className="text-muted-foreground text-sm">Incoming provider / model</span>;
 	}
 
-	const first = targets[0];
-	const label = [first.provider ? getProviderLabel(first.provider) : "Any", first.model || "Any model"].join(" / ");
+	const label = [rule.provider ? getProviderLabel(rule.provider) : "Any", rule.model || "Any model"].join(" / ");
 
 	return (
-		<div className="flex flex-col gap-1">
-			<div className="flex items-center gap-1.5">
-				{first.provider && <RenderProviderIcon provider={first.provider as ProviderIconType} size="sm" className="h-4 w-4 shrink-0" />}
-				<span className="max-w-[160px] truncate text-sm">{label}</span>
-			</div>
-			{targets.length > 1 && (
-				<span className="text-muted-foreground text-xs">
-					+{targets.length - 1} more target{targets.length > 2 ? "s" : ""}
-				</span>
-			)}
+		<div className="flex items-center gap-1.5">
+			{rule.provider && <RenderProviderIcon provider={rule.provider as ProviderIconType} size="sm" className="h-4 w-4 shrink-0" />}
+			<span className="max-w-[160px] truncate text-sm">{label}</span>
 		</div>
 	);
 }

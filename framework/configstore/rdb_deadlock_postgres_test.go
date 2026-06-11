@@ -223,9 +223,8 @@ func routingRuleFixture(id string, priority int, provider string) *tables.TableR
 		CelExpression: "true",
 		Scope:         "global",
 		Priority:      priority,
-		Targets: []tables.TableRoutingTarget{
-			{Provider: &provider, Model: &model, Weight: 1.0},
-		},
+		Provider: &provider,
+		Model:    &model,
 	}
 }
 

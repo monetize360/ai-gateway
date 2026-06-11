@@ -51,7 +51,6 @@ func main() {
 		&tables.TableVirtualKeyProviderConfigKey{},
 		&tables.TableModelConfig{},
 		&tables.TableRoutingRule{},
-		&tables.TableRoutingTarget{},
 		&tables.TableFolder{},
 		&tables.TablePrompt{},
 		&tables.TablePromptVersion{},

@@ -2,7 +2,6 @@ package governance
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"regexp"
 	"strings"
 	"sync"
@@ -159,7 +158,6 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 		var stepDecision *RoutingDecision
 		var matchedRule *configstoreTables.TableRoutingRule
-		var matchedTargetWeight float64
 
 	outerLoop:
 		for _, scope := range scopeChain {
@@ -206,26 +204,19 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 					continue
 				}
 
-				target, ok := selectWeightedTarget(rule.Targets)
-				if !ok {
-					re.logger.Debug("[RoutingEngine] Rule %s matched but has no valid targets (empty list or all-negative weights), skipping — note: all-zero weights use uniform selection and would not reach here", rule.Name)
-					ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelError, fmt.Sprintf("Rule '%s' [%s] → matched but no valid targets (empty or all-negative weights), skipping", rule.Name, rule.CelExpression))
-					continue
-				}
-
 				provider := string(currentProvider)
-				if target.Provider != nil && *target.Provider != "" {
-					provider = *target.Provider
+				if rule.Provider != nil && *rule.Provider != "" {
+					provider = *rule.Provider
 				}
 
 				model := currentModel
-				if target.Model != nil && *target.Model != "" {
-					model = *target.Model
+				if rule.Model != nil && *rule.Model != "" {
+					model = *rule.Model
 				}
 
 				keyID := ""
-				if target.KeyID != nil {
-					keyID = *target.KeyID
+				if rule.KeyID != nil {
+					keyID = *rule.KeyID
 				}
 
 				stepDecision = &RoutingDecision{
@@ -237,7 +228,6 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 					MatchedRuleName: rule.Name,
 				}
 				matchedRule = rule
-				matchedTargetWeight = target.Weight
 				break outerLoop
 			}
 		}
@@ -256,8 +246,8 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 		if matchedRule.ChainRule {
 			chainSuffix = " [chain_rule=true, continuing]"
 		}
-		re.logger.Debug("[RoutingEngine] Rule matched! Selected target (weight=%.2f): provider=%s, model=%s, fallbacks=%v%s", matchedTargetWeight, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
-		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target (weight=%.2f): provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, matchedTargetWeight, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
+		re.logger.Debug("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
+		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target: provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
 
 		// TERMINATION 2: Rule is terminal (chain_rule=false, the default).
 		if !matchedRule.ChainRule {
@@ -276,55 +266,6 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 		re.logger.Debug("[RoutingEngine] No routing rule matched, using default routing")
 	}
 	return finalDecision, nil
-}
-
-// selectWeightedTarget picks one target from the slice using weighted random selection.
-// Each target's Weight contributes proportionally to its probability of being chosen.
-// Weights do not need to be normalised to 100; the function normalises internally.
-// Returns ok=false only when len(targets)==0 or all targets have negative weights (filtered out).
-// When all valid targets have weight==0 the function falls back to uniform random selection
-// and still returns ok=true, so zero-weight targets are valid and handled.
-func selectWeightedTarget(targets []configstoreTables.TableRoutingTarget) (configstoreTables.TableRoutingTarget, bool) {
-	if len(targets) == 0 {
-		return configstoreTables.TableRoutingTarget{}, false
-	}
-
-	// Filter out negative weights as a precaution against malformed DB data.
-	// Negative weights are blocked at write time by validateRoutingTargets, but
-	// we guard here defensively so a bad row cannot corrupt the cumulative range.
-	valid := make([]configstoreTables.TableRoutingTarget, 0, len(targets))
-	for _, t := range targets {
-		if t.Weight >= 0 {
-			valid = append(valid, t)
-		}
-	}
-	if len(valid) == 0 {
-		return configstoreTables.TableRoutingTarget{}, false
-	}
-
-	total := 0.0
-	for _, t := range valid {
-		total += t.Weight
-	}
-
-	// All weights are 0 — select uniformly at random among valid targets.
-	if total == 0 {
-		return valid[rand.IntN(len(valid))], true
-	}
-
-	if len(valid) == 1 {
-		return valid[0], true
-	}
-
-	r := rand.Float64() * total
-	cumulative := 0.0
-	for _, t := range valid {
-		cumulative += t.Weight
-		if r < cumulative {
-			return t, true
-		}
-	}
-	return valid[len(valid)-1], true
 }
 
 // buildScopeChain builds the scope evaluation chain based on organizational hierarchy

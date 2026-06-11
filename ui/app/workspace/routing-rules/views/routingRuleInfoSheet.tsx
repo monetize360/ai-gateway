@@ -166,42 +166,28 @@ function ConditionGroup({ group, depth = 0 }: { group: RuleGroupType; depth?: nu
 
 // ─── target card ─────────────────────────────────────────────────────────────
 
-function TargetCard({ target, total }: { target: RoutingRule["targets"][0]; index: number; total: number }) {
-	const providerLabel = target.provider ? getProviderLabel(target.provider) : "Incoming provider";
-	const weightPercent = total > 0 ? Math.round(target.weight * 100) : 0;
+function RoutingOutputCard({ rule }: { rule: RoutingRule }) {
+	const providerLabel = rule.provider ? getProviderLabel(rule.provider) : "Incoming provider";
 
 	return (
 		<div className="space-y-2 rounded-lg border p-3">
-			<div className="flex items-center justify-between">
-				<div className="flex items-center gap-2.5">
-					{target.provider && <RenderProviderIcon provider={target.provider as ProviderIconType} size="sm" className="h-5 w-5 shrink-0" />}
-					<div className="flex flex-col">
-						<span className="text-sm font-medium">{providerLabel}</span>
-						{target.model ? (
-							<span className="text-muted-foreground font-mono text-xs">{target.model}</span>
-						) : (
-							<span className="text-muted-foreground text-xs">Incoming model</span>
-						)}
-					</div>
+			<div className="flex items-center gap-2.5">
+				{rule.provider && <RenderProviderIcon provider={rule.provider as ProviderIconType} size="sm" className="h-5 w-5 shrink-0" />}
+				<div className="flex flex-col">
+					<span className="text-sm font-medium">{providerLabel}</span>
+					{rule.model ? (
+						<span className="text-muted-foreground font-mono text-xs">{rule.model}</span>
+					) : (
+						<span className="text-muted-foreground text-xs">Incoming model</span>
+					)}
 				</div>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<div className="flex cursor-default items-center gap-1.5">
-							<div className="bg-muted h-1.5 w-16 overflow-hidden rounded-full">
-								<div className="bg-primary h-full rounded-full transition-all" style={{ width: `${weightPercent}%` }} />
-							</div>
-							<span className="text-muted-foreground w-8 text-right font-mono text-xs">{weightPercent}%</span>
-						</div>
-					</TooltipTrigger>
-					<TooltipContent>Weight: {target.weight} (raw)</TooltipContent>
-				</Tooltip>
 			</div>
-			{target.key_id && (
+			{rule.key_id && (
 				<div className="bg-muted/50 flex items-center gap-1.5 rounded-md px-2 py-1">
 					<Key className="text-muted-foreground h-3 w-3 shrink-0" />
 					<span className="text-muted-foreground text-xs">Pinned key:</span>
-					<code className="truncate font-mono text-xs">{target.key_id}</code>
-					<CopyButton value={target.key_id} label="key ID" testId="routing-rule-copy-key-id-btn" />
+					<code className="truncate font-mono text-xs">{rule.key_id}</code>
+					<CopyButton value={rule.key_id} label="key ID" testId="routing-rule-copy-key-id-btn" />
 				</div>
 			)}
 		</div>
@@ -235,7 +221,6 @@ function FallbackChain({ fallbacks }: { fallbacks: string[] }) {
 // ─── main sheet ──────────────────────────────────────────────────────────────
 
 export function RoutingRuleInfoSheet({ rule, open, onOpenChange }: Props) {
-	const targets = rule?.targets ?? [];
 	const fallbacks = rule?.fallbacks ?? [];
 	const hasQuery = rule?.query && (rule.query.rules?.length ?? 0) > 0;
 	const scopeName = useScopeName(rule?.scope ?? "global", rule?.scope_id);
@@ -310,17 +295,13 @@ export function RoutingRuleInfoSheet({ rule, open, onOpenChange }: Props) {
 
 							<DottedSeparator />
 
-							{/* Targets */}
+							{/* Routing Output */}
 							<div className="space-y-3">
-								<h3 className="text-sm font-semibold">Targets ({targets.length})</h3>
-								{targets.length > 0 ? (
-									<div className="space-y-2">
-										{targets.map((target, i) => (
-											<TargetCard key={i} target={target} index={i} total={targets.length} />
-										))}
-									</div>
+								<h3 className="text-sm font-semibold">Routing Output</h3>
+								{rule.provider || rule.model || rule.key_id ? (
+									<RoutingOutputCard rule={rule} />
 								) : (
-									<p className="text-muted-foreground text-sm">No targets configured</p>
+									<p className="text-muted-foreground text-sm">Uses incoming provider and model</p>
 								)}
 							</div>
 

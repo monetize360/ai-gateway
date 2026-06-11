@@ -84,7 +84,6 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.SessionsTable{},
 		&tables.TempToken{},
 		&tables.TableRoutingRule{},
-		&tables.TableRoutingTarget{},
 		&tables.TableFolder{},
 		&tables.TablePrompt{},
 		&tables.TablePromptVersion{},

@@ -23,8 +23,11 @@ type TableRoutingRule struct {
 	Enabled       *bool  `gorm:"not null;default:true" json:"enabled,omitempty"` // nil = DB default (true); use EnabledValue() to read
 	CelExpression string `gorm:"type:text;not null" json:"cel_expression"`
 
-	// Routing Targets (output) — 1:many relationship; weights must sum to 1
-	Targets []TableRoutingTarget `gorm:"foreignKey:RuleID;constraint:OnDelete:CASCADE" json:"targets"`
+	// Routing output — nil provider/model means use the incoming request value.
+	Provider        *string `gorm:"type:varchar(255)" json:"provider,omitempty"`
+	Model           *string `gorm:"type:varchar(255)" json:"model,omitempty"`
+	KeyID           *string `gorm:"type:varchar(255)" json:"key_id,omitempty"`
+	ProviderKeyName *string `gorm:"-" json:"provider_key_name,omitempty"` // config-only alias; resolved to key_id during load
 
 	Fallbacks       *string  `gorm:"type:text" json:"-"`           // JSON array of fallback chains
 	ParsedFallbacks []string `gorm:"-" json:"fallbacks,omitempty"` // Parsed fallbacks from JSON
@@ -167,13 +170,39 @@ func isNonEmptyString(s *string) bool {
 	return s != nil && strings.TrimSpace(*s) != ""
 }
 
-// UnmarshalJSON accepts scope_org_id/virtual_key_id or legacy scope/scope_id from config.json.
+type legacyRoutingTarget struct {
+	Provider        *string `json:"provider"`
+	Model           *string `json:"model"`
+	KeyID           *string `json:"key_id"`
+	ProviderKeyName *string `json:"provider_key_name"`
+}
+
+func applyLegacyRoutingTarget(rule *TableRoutingRule, target legacyRoutingTarget) {
+	if rule == nil {
+		return
+	}
+	if rule.Provider == nil && target.Provider != nil {
+		rule.Provider = target.Provider
+	}
+	if rule.Model == nil && target.Model != nil {
+		rule.Model = target.Model
+	}
+	if rule.KeyID == nil && target.KeyID != nil {
+		rule.KeyID = target.KeyID
+	}
+	if rule.ProviderKeyName == nil && target.ProviderKeyName != nil {
+		rule.ProviderKeyName = target.ProviderKeyName
+	}
+}
+
+// UnmarshalJSON accepts inline provider/model/key_id, legacy targets[0], or scope/scope_id from config.json.
 func (r *TableRoutingRule) UnmarshalJSON(data []byte) error {
 	type Alias TableRoutingRule
 	type legacyRoutingRule struct {
 		Alias
-		Scope   string  `json:"scope"`
-		ScopeID *string `json:"scope_id"`
+		Scope   string                `json:"scope"`
+		ScopeID *string               `json:"scope_id"`
+		Targets []legacyRoutingTarget `json:"targets"`
 	}
 	var temp legacyRoutingRule
 	if err := json.Unmarshal(data, &temp); err != nil {
@@ -185,6 +214,9 @@ func (r *TableRoutingRule) UnmarshalJSON(data []byte) error {
 	}
 	if temp.ScopeID != nil {
 		r.ScopeID = temp.ScopeID
+	}
+	if len(temp.Targets) > 0 {
+		applyLegacyRoutingTarget(r, temp.Targets[0])
 	}
 	r.HydrateAssociationFromLegacy()
 	r.SyncLegacyScopeFields()
@@ -232,19 +264,3 @@ func (r *TableRoutingRule) AfterFind(tx *gorm.DB) error {
 	r.HydrateAssociationFromLegacy()
 	return nil
 }
-
-// TableRoutingTarget represents a weighted routing target for probabilistic routing.
-// Multiple targets can be associated with a single routing rule; weights determine
-// the probability of each target being selected and must sum to 1 across all targets in a rule.
-// The composite (RuleID, Provider, Model, KeyID) is unique to prevent duplicate target configs.
-type TableRoutingTarget struct {
-	RuleID          string  `gorm:"type:varchar(255);not null;index;uniqueIndex:idx_routing_target_config" json:"-"`
-	Provider        *string `gorm:"type:varchar(255);uniqueIndex:idx_routing_target_config" json:"provider,omitempty"` // nil = use incoming provider
-	Model           *string `gorm:"type:varchar(255);uniqueIndex:idx_routing_target_config" json:"model,omitempty"`    // nil = use incoming model
-	KeyID           *string `gorm:"type:varchar(255);uniqueIndex:idx_routing_target_config" json:"key_id,omitempty"`   // persisted key pin
-	ProviderKeyName *string `gorm:"-" json:"provider_key_name,omitempty"`                                              // config-only alias; resolved to key_id during load
-	Weight          float64 `gorm:"not null;default:1" json:"weight"`                                                  // must sum to 1 across all targets in a rule
-}
-
-// TableName for TableRoutingTarget
-func (TableRoutingTarget) TableName() string { return "routing_targets" }

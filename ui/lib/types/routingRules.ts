@@ -5,19 +5,14 @@
 
 import { RuleGroupType } from "react-querybuilder";
 
-export interface RoutingTarget {
-	provider?: string;
-	model?: string;
-	key_id?: string;
-	weight: number;
-}
-
 export interface RoutingRule {
 	id: string;
 	name: string;
 	description: string;
 	cel_expression: string;
-	targets: RoutingTarget[];
+	provider?: string;
+	model?: string;
+	key_id?: string;
 	fallbacks?: string[];
 	scope: "global" | "team" | "customer" | "virtual_key";
 	scope_id?: string;
@@ -33,7 +28,9 @@ export interface CreateRoutingRuleRequest {
 	name: string;
 	description?: string;
 	cel_expression?: string;
-	targets: RoutingTarget[];
+	provider?: string;
+	model?: string;
+	key_id?: string;
 	fallbacks?: string[];
 	scope: string;
 	scope_id?: string;
@@ -64,19 +61,14 @@ export interface GetRoutingRuleResponse {
 	rule: RoutingRule;
 }
 
-export interface RoutingTargetFormData {
-	provider: string;
-	model: string;
-	key_id: string;
-	weight: number;
-}
-
 export interface RoutingRuleFormData {
 	id?: string;
 	name: string;
 	description: string;
 	cel_expression: string;
-	targets: RoutingTargetFormData[];
+	provider: string;
+	model: string;
+	key_id: string;
 	fallbacks: string[];
 	scope: string;
 	scope_id: string;
@@ -101,18 +93,13 @@ export const ROUTING_RULE_SCOPES = [
 	{ value: RoutingRuleScope.VirtualKey, label: "Virtual Key" },
 ];
 
-export const DEFAULT_ROUTING_TARGET: RoutingTargetFormData = {
-	provider: "",
-	model: "",
-	key_id: "",
-	weight: 1,
-};
-
 export const DEFAULT_ROUTING_RULE_FORM_DATA: RoutingRuleFormData = {
 	name: "",
 	description: "",
 	cel_expression: "",
-	targets: [DEFAULT_ROUTING_TARGET],
+	provider: "",
+	model: "",
+	key_id: "",
 	fallbacks: [],
 	scope: RoutingRuleScope.Global,
 	scope_id: "",

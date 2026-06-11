@@ -1483,14 +1483,9 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 
 	usesNameRefs := false
 	for i := range governanceConfig.RoutingRules {
-		for j := range governanceConfig.RoutingRules[i].Targets {
-			target := &governanceConfig.RoutingRules[i].Targets[j]
-			if target.ProviderKeyName != nil && strings.TrimSpace(*target.ProviderKeyName) != "" {
-				usesNameRefs = true
-				break
-			}
-		}
-		if usesNameRefs {
+		rule := &governanceConfig.RoutingRules[i]
+		if rule.ProviderKeyName != nil && strings.TrimSpace(*rule.ProviderKeyName) != "" {
+			usesNameRefs = true
 			break
 		}
 	}
@@ -1544,30 +1539,28 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 		}
 
 		for i := range governanceConfig.RoutingRules {
-			for j := range governanceConfig.RoutingRules[i].Targets {
-				target := &governanceConfig.RoutingRules[i].Targets[j]
-				keyName := ""
-				if target.ProviderKeyName != nil {
-					keyName = strings.TrimSpace(*target.ProviderKeyName)
-				}
-				if keyName == "" {
-					target.ProviderKeyName = nil
-					continue
-				}
-				if target.KeyID != nil && strings.TrimSpace(*target.KeyID) != "" {
-					return fmt.Errorf("routing rule %q target cannot set key_id together with provider_key_name", governanceConfig.RoutingRules[i].ID)
-				}
-				if target.Provider == nil || strings.TrimSpace(*target.Provider) == "" {
-					return fmt.Errorf("routing rule %q target provider_key_name requires provider to be set", governanceConfig.RoutingRules[i].ID)
-				}
-
-				keyID, err := resolveProviderKeyIDByProviderAndName(*target.Provider, keyName)
-				if err != nil {
-					return fmt.Errorf("routing rule %q target provider_key_name resolution failed: %w", governanceConfig.RoutingRules[i].ID, err)
-				}
-				target.KeyID = bifrost.Ptr(keyID)
-				target.ProviderKeyName = nil
+			rule := &governanceConfig.RoutingRules[i]
+			keyName := ""
+			if rule.ProviderKeyName != nil {
+				keyName = strings.TrimSpace(*rule.ProviderKeyName)
 			}
+			if keyName == "" {
+				rule.ProviderKeyName = nil
+				continue
+			}
+			if rule.KeyID != nil && strings.TrimSpace(*rule.KeyID) != "" {
+				return fmt.Errorf("routing rule %q cannot set key_id together with provider_key_name", rule.ID)
+			}
+			if rule.Provider == nil || strings.TrimSpace(*rule.Provider) == "" {
+				return fmt.Errorf("routing rule %q provider_key_name requires provider to be set", rule.ID)
+			}
+
+			keyID, err := resolveProviderKeyIDByProviderAndName(*rule.Provider, keyName)
+			if err != nil {
+				return fmt.Errorf("routing rule %q provider_key_name resolution failed: %w", rule.ID, err)
+			}
+			rule.KeyID = bifrost.Ptr(keyID)
+			rule.ProviderKeyName = nil
 		}
 
 		for i := range governanceConfig.PricingOverrides {

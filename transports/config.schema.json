@@ -1909,16 +1909,23 @@
           "default": false,
           "description": "If true, re-evaluates routing chain after this rule matches"
         },
-        "targets": {
-          "type": "array",
-          "minItems": 1,
-          "description": "Weighted routing targets. Weights must sum to 1. Omit provider or model to use the incoming request value.",
-          "items": {
-            "$ref": "#/$defs/routing_target"
-          }
+        "targets": false,
+        "provider": {
+          "type": "string",
+          "description": "Target provider name. Omit to use the incoming request provider"
         },
-        "provider": false,
-        "model": false,
+        "model": {
+          "type": "string",
+          "description": "Target model name. Omit to use the incoming request model"
+        },
+        "key_id": {
+          "type": "string",
+          "description": "Optional provider key ID pin. Requires provider"
+        },
+        "provider_key_name": {
+          "type": "string",
+          "description": "Optional provider key name. Resolved to key_id at config load time. Requires provider"
+        },
         "fallbacks": {
           "type": "array",
           "description": "Fallback provider chain in order",
@@ -1976,7 +1983,7 @@
           ]
         }
       },
-      "required": ["id", "name", "targets"],
+      "required": ["id", "name"],
       "additionalProperties": false,
       "if": {
         "properties": {

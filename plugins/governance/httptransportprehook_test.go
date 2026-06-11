@@ -76,14 +76,10 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget(t *testing.T) {
 		Name:          "genai-repro-rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-genai-model" && provider == ""`,
-		Targets: []configstoreTables.TableRoutingTarget{
-			{
-				RuleID:   "rule-genai-1",
-				Provider: bifrost.Ptr("repro-openai-a"),
-				Model:    bifrost.Ptr("error-test"),
-				Weight:   1.0,
-			},
-		},
+		
+		Provider: bifrost.Ptr("repro-openai-a"),
+		Model:    bifrost.Ptr("error-test"),
+
 		Scope:    "global",
 		Priority: 1,
 	}
@@ -143,14 +139,10 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget_WithStore(t *testi
 		Name:          "genai-repro-rule-with-store",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-genai-model" && provider == ""`,
-		Targets: []configstoreTables.TableRoutingTarget{
-			{
-				RuleID:   "rule-genai-ws-1",
-				Provider: bifrost.Ptr("repro-openai-a"),
-				Model:    bifrost.Ptr("error-test"),
-				Weight:   1.0,
-			},
-		},
+		
+		Provider: bifrost.Ptr("repro-openai-a"),
+		Model:    bifrost.Ptr("error-test"),
+
 		Scope:    "global",
 		Priority: 1,
 	}
@@ -266,14 +258,10 @@ func TestHTTPTransportPreHook_BedrockRoutingRulePreservesTarget(t *testing.T) {
 		Name:          "bedrock-repro-rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-bedrock-model" && provider == ""`,
-		Targets: []configstoreTables.TableRoutingTarget{
-			{
-				RuleID:   "rule-bedrock-1",
-				Provider: bifrost.Ptr("repro-openai-a"),
-				Model:    bifrost.Ptr("error-test"),
-				Weight:   1.0,
-			},
-		},
+		
+		Provider: bifrost.Ptr("repro-openai-a"),
+		Model:    bifrost.Ptr("error-test"),
+
 		Scope:    "global",
 		Priority: 1,
 	}

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,44 +142,38 @@ type UpdateBudgetRequest struct {
 	ResetDuration *string  `json:"reset_duration,omitempty"`
 }
 
-// RoutingTarget represents a single weighted routing target within a rule.
-// All fields except Weight are optional; nil means "use the incoming request's value".
-// Weights across all targets in a rule must sum to 1 (e.g. 0.7 + 0.3 = 1.0).
-type RoutingTarget struct {
-	Provider *string `json:"provider,omitempty"` // nil = use incoming provider
-	Model    *string `json:"model,omitempty"`    // nil = use incoming model
-	KeyID    *string `json:"key_id,omitempty"`   // nil = no key pin
-	Weight   float64 `json:"weight"`             // must be > 0; all weights must sum to 1
-}
-
 // CreateRoutingRuleRequest represents the request body for creating a routing rule
 type CreateRoutingRuleRequest struct {
-	Name          string          `json:"name" validate:"required"`
-	Description   string          `json:"description,omitempty"`
-	Enabled       *bool           `json:"enabled,omitempty"`    // nil = use DB default (true)
-	ChainRule     *bool           `json:"chain_rule,omitempty"` // nil = use DB default (false)
-	CelExpression string          `json:"cel_expression"`
-	Targets       []RoutingTarget `json:"targets"` // Required; weights must sum to 1
-	Fallbacks     []string        `json:"fallbacks,omitempty"`
-	ScopeOrgID    *string         `json:"scope_org_id,omitempty"`
-	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
-	Query         map[string]any  `json:"query,omitempty"`
-	Priority      int             `json:"priority,omitempty"` // Defaults to 0 if not provided
+	Name          string         `json:"name" validate:"required"`
+	Description   string         `json:"description,omitempty"`
+	Enabled       *bool          `json:"enabled,omitempty"`    // nil = use DB default (true)
+	ChainRule     *bool          `json:"chain_rule,omitempty"` // nil = use DB default (false)
+	CelExpression string         `json:"cel_expression"`
+	Provider      *string        `json:"provider,omitempty"` // nil = use incoming provider
+	Model         *string        `json:"model,omitempty"`    // nil = use incoming model
+	KeyID         *string        `json:"key_id,omitempty"`   // nil = no key pin
+	Fallbacks     []string       `json:"fallbacks,omitempty"`
+	ScopeOrgID    *string        `json:"scope_org_id,omitempty"`
+	VirtualKeyID  *string        `json:"virtual_key_id,omitempty"`
+	Query         map[string]any `json:"query,omitempty"`
+	Priority      int            `json:"priority,omitempty"` // Defaults to 0 if not provided
 }
 
 // UpdateRoutingRuleRequest represents the request body for updating a routing rule
 type UpdateRoutingRuleRequest struct {
-	Name          *string         `json:"name,omitempty"`
-	Description   *string         `json:"description,omitempty"`
-	Enabled       *bool           `json:"enabled,omitempty"`
-	ChainRule     *bool           `json:"chain_rule,omitempty"`
-	CelExpression *string         `json:"cel_expression,omitempty"`
-	Targets       []RoutingTarget `json:"targets,omitempty"` // If provided, replaces all existing targets; weights must sum to 1
-	Fallbacks     []string        `json:"fallbacks,omitempty"`
-	Query         map[string]any  `json:"query,omitempty"`
-	Priority      *int            `json:"priority,omitempty"`
-	ScopeOrgID    *string         `json:"scope_org_id,omitempty"`
-	VirtualKeyID  *string         `json:"virtual_key_id,omitempty"`
+	Name          *string        `json:"name,omitempty"`
+	Description   *string        `json:"description,omitempty"`
+	Enabled       *bool          `json:"enabled,omitempty"`
+	ChainRule     *bool          `json:"chain_rule,omitempty"`
+	CelExpression *string        `json:"cel_expression,omitempty"`
+	Provider      *string        `json:"provider,omitempty"`
+	Model         *string        `json:"model,omitempty"`
+	KeyID         *string        `json:"key_id,omitempty"`
+	Fallbacks     []string       `json:"fallbacks,omitempty"`
+	Query         map[string]any `json:"query,omitempty"`
+	Priority      *int           `json:"priority,omitempty"`
+	ScopeOrgID    *string        `json:"scope_org_id,omitempty"`
+	VirtualKeyID  *string        `json:"virtual_key_id,omitempty"`
 }
 
 // CreateRateLimitRequest represents the request body for creating a rate limit using flexible approach
@@ -3255,12 +3248,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Validate targets
-	if len(req.Targets) == 0 {
-		SendError(ctx, 400, "at least one target is required")
-		return
-	}
-	if err := validateRoutingTargets(req.Targets); err != nil {
+	if err := validateRoutingOutput(req.Provider, req.Model, req.KeyID); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
 	}
@@ -3274,17 +3262,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Build targets
 	ruleID := uuid.NewString()
-	targets := make([]configstoreTables.TableRoutingTarget, 0, len(req.Targets))
-	for _, t := range req.Targets {
-		targets = append(targets, configstoreTables.TableRoutingTarget{
-			Provider: t.Provider,
-			Model:    t.Model,
-			KeyID:    t.KeyID,
-			Weight:   t.Weight,
-		})
-	}
 
 	// Create routing rule
 	// Handle Enabled/ChainRule: nil means use DB default (true/false), otherwise use provided value
@@ -3303,7 +3281,9 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		Enabled:         enabled,
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
-		Targets:         targets,
+		Provider:        req.Provider,
+		Model:           req.Model,
+		KeyID:           req.KeyID,
 		ScopeOrgID:      req.ScopeOrgID,
 		VirtualKeyID:    req.VirtualKeyID,
 		Priority:        req.Priority,
@@ -3371,25 +3351,32 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.CelExpression != nil {
 		rule.CelExpression = *req.CelExpression
 	}
-	if req.Targets != nil {
-		if len(req.Targets) == 0 {
-			SendError(ctx, 400, "at least one routing target is required")
-			return
+	if req.Provider != nil {
+		if strings.TrimSpace(*req.Provider) == "" {
+			rule.Provider = nil
+		} else {
+			rule.Provider = req.Provider
 		}
-		if err := validateRoutingTargets(req.Targets); err != nil {
+	}
+	if req.Model != nil {
+		if strings.TrimSpace(*req.Model) == "" {
+			rule.Model = nil
+		} else {
+			rule.Model = req.Model
+		}
+	}
+	if req.KeyID != nil {
+		if strings.TrimSpace(*req.KeyID) == "" {
+			rule.KeyID = nil
+		} else {
+			rule.KeyID = req.KeyID
+		}
+	}
+	if req.Provider != nil || req.Model != nil || req.KeyID != nil {
+		if err := validateRoutingOutput(rule.Provider, rule.Model, rule.KeyID); err != nil {
 			SendError(ctx, 400, err.Error())
 			return
 		}
-		newTargets := make([]configstoreTables.TableRoutingTarget, 0, len(req.Targets))
-		for _, t := range req.Targets {
-			newTargets = append(newTargets, configstoreTables.TableRoutingTarget{
-				Provider: t.Provider,
-				Model:    t.Model,
-				KeyID:    t.KeyID,
-				Weight:   t.Weight,
-			})
-		}
-		rule.Targets = newTargets
 	}
 	if req.Priority != nil {
 		rule.Priority = *req.Priority
@@ -3870,43 +3857,11 @@ func validateRoutingScope(scope string) error {
 	return nil
 }
 
-// validateRoutingTargets checks that all weights are positive, that no two
-// targets share the same (provider, model, key_id) identity, and that all
-// weights sum to 1.
-func validateRoutingTargets(targets []RoutingTarget) error {
-	seen := make(map[string]struct{}, len(targets))
-	total := 0.0
-	for _, t := range targets {
-		if t.Weight < 0 {
-			return fmt.Errorf("each target weight must be positive")
-		}
-		if t.KeyID != nil && *t.KeyID != "" && (t.Provider == nil || *t.Provider == "") {
-			return fmt.Errorf("key_id requires provider to be set")
-		}
-
-		// Canonicalise identity: lowercase provider/model, treat nil == "".
-		provider := ""
-		if t.Provider != nil {
-			provider = strings.ToLower(*t.Provider)
-		}
-		model := ""
-		if t.Model != nil {
-			model = strings.ToLower(*t.Model)
-		}
-		keyID := ""
-		if t.KeyID != nil {
-			keyID = *t.KeyID
-		}
-		key := provider + "|" + model + "|" + keyID
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("duplicate target entry: provider=%q model=%q key_id=%q", provider, model, keyID)
-		}
-		seen[key] = struct{}{}
-
-		total += t.Weight
-	}
-	if math.Abs(total-1.0) > 0.001 {
-		return fmt.Errorf("target weights must sum to 1, got %.4f", total)
+// validateRoutingOutput ensures key_id is only set when provider is set.
+func validateRoutingOutput(provider, model, keyID *string) error {
+	_ = model
+	if keyID != nil && strings.TrimSpace(*keyID) != "" && (provider == nil || strings.TrimSpace(*provider) == "") {
+		return fmt.Errorf("key_id requires provider to be set")
 	}
 	return nil
 }

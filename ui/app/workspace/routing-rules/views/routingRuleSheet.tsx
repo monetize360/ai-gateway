@@ -19,14 +19,7 @@ import { getErrorMessage } from "@/lib/store";
 import { useGetCustomersQuery, useGetTeamsQuery, useGetVirtualKeysQuery } from "@/lib/store/apis/governanceApi";
 import { useGetAllKeysQuery, useGetProvidersQuery } from "@/lib/store/apis/providersApi";
 import { useCreateRoutingRuleMutation, useGetRoutingRulesQuery, useUpdateRoutingRuleMutation } from "@/lib/store/apis/routingRulesApi";
-import {
-	DEFAULT_ROUTING_RULE_FORM_DATA,
-	DEFAULT_ROUTING_TARGET,
-	ROUTING_RULE_SCOPES,
-	RoutingRule,
-	RoutingRuleFormData,
-	RoutingTargetFormData,
-} from "@/lib/types/routingRules";
+import { DEFAULT_ROUTING_RULE_FORM_DATA, ROUTING_RULE_SCOPES, RoutingRule, RoutingRuleFormData } from "@/lib/types/routingRules";
 import { validateRateLimitAndBudgetRules, validateRoutingRules } from "@/lib/utils/celConverterRouting";
 import { normalizeRoutingRuleGroupQuery } from "@/lib/utils/routingRuleGroupQuery";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
@@ -71,8 +64,6 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 	const [createRoutingRule, { isLoading: isCreating }] = useCreateRoutingRuleMutation();
 	const [updateRoutingRule, { isLoading: isUpdating }] = useUpdateRoutingRuleMutation();
 
-	// State for targets and query (managed outside react-hook-form for complex nested structures)
-	const [targets, setTargets] = useState<RoutingTargetFormData[]>([{ ...DEFAULT_ROUTING_TARGET }]);
 	const [query, setQuery] = useState<RuleGroupType>(defaultQuery);
 	const [builderKey, setBuilderKey] = useState(0);
 
@@ -97,15 +88,15 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 	const scope = watch("scope");
 	const scopeId = watch("scope_id");
 	const fallbacks = watch("fallbacks");
+	const provider = watch("provider");
+	const model = watch("model");
+	const keyId = watch("key_id");
 
-	// Get available providers from configured providers, plus any provider already
-	// referenced by the current targets, existing rules' targets, or rules' fallbacks
-	// so edited/removed providers are still visible in the dropdown.
 	const availableProviders = Array.from(
 		new Set([
 			...providersData.map((p) => p.name),
-			...(targets.map((t) => t.provider).filter(Boolean) as string[]),
-			...(rules.flatMap((r) => r.targets?.map((t) => t.provider).filter(Boolean) ?? []) as string[]),
+			...(provider ? [provider] : []),
+			...(rules.map((r) => r.provider).filter(Boolean) as string[]),
 			...rules.flatMap((r) => (r.fallbacks ?? []).map((f) => f.split("/")[0]?.trim()).filter(Boolean)),
 		]),
 	);
@@ -123,25 +114,14 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 			setValue("priority", editingRule.priority);
 			setValue("enabled", editingRule.enabled);
 			setValue("chain_rule", editingRule.chain_rule ?? false);
-			if (editingRule.targets && editingRule.targets.length > 0) {
-				setTargets(
-					editingRule.targets.map((t) => ({
-						...DEFAULT_ROUTING_TARGET,
-						provider: t.provider || "",
-						model: t.model || "",
-						key_id: t.key_id || "",
-						weight: t.weight,
-					})),
-				);
-			} else {
-				setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
-			}
+			setValue("provider", editingRule.provider || "");
+			setValue("model", editingRule.model || "");
+			setValue("key_id", editingRule.key_id || "");
 			// Only react-querybuilder-shaped queries are valid; config may store other JSON under `query`.
 			setQuery(normalizeRoutingRuleGroupQuery(editingRule.query));
 			setBuilderKey((prev) => prev + 1);
 		} else {
 			reset();
-			setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 			setQuery(defaultQuery);
 			setBuilderKey((prev) => prev + 1);
 		}
@@ -155,21 +135,6 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 		[setValue],
 	);
 
-	const addTarget = () => {
-		const remaining = 1 - targets.reduce((sum, t) => sum + (t.weight || 0), 0);
-		setTargets((prev) => [...prev, { ...DEFAULT_ROUTING_TARGET, weight: Math.max(0, parseFloat(remaining.toFixed(4))) }]);
-	};
-
-	const removeTarget = (index: number) => {
-		setTargets((prev) => prev.filter((_, i) => i !== index));
-	};
-
-	const updateTarget = (index: number, field: keyof RoutingTargetFormData, value: string | number) => {
-		setTargets((prev) => prev.map((t, i) => (i === index ? { ...t, [field]: value } : t)));
-	};
-
-	const totalWeight = targets.reduce((sum, t) => sum + (t.weight || 0), 0);
-
 	const onSubmit = (data: RoutingRuleFormData) => {
 		// Validate scope_id is required when scope is not global
 		if (data.scope !== "global" && !data.scope_id?.trim()) {
@@ -177,19 +142,8 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 			return;
 		}
 
-		// Validate targets
-		if (targets.length === 0) {
-			toast.error("At least one routing target is required");
-			return;
-		}
-		for (const t of targets) {
-			if (t.weight <= 0) {
-				toast.error("Each target weight must be greater than 0");
-				return;
-			}
-		}
-		if (Math.abs(totalWeight - 1) > 0.001) {
-			toast.error(`Target weights must sum to 1, current total: ${totalWeight.toFixed(4)}`);
+		if (data.key_id?.trim() && !data.provider?.trim()) {
+			toast.error("Provider is required when pinning a key");
 			return;
 		}
 
@@ -217,12 +171,9 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 			name: data.name,
 			description: data.description,
 			cel_expression: data.cel_expression,
-			targets: targets.map(({ provider, model, key_id, weight }) => ({
-				provider: provider || undefined,
-				model: model || undefined,
-				key_id: key_id || undefined,
-				weight,
-			})),
+			provider: data.provider?.trim() || undefined,
+			model: data.model?.trim() || undefined,
+			key_id: data.key_id?.trim() || undefined,
 			fallbacks: validFallbacks,
 			scope: data.scope,
 			scope_id: data.scope === "global" ? undefined : data.scope_id || undefined,
@@ -244,7 +195,6 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 			.then(() => {
 				toast.success(isEditing ? "Routing rule updated successfully" : "Routing rule created successfully");
 				reset();
-				setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 				setQuery(defaultQuery);
 				setBuilderKey((prev) => prev + 1);
 				onOpenChange(false);
@@ -257,7 +207,6 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 
 	const handleCancel = () => {
 		reset();
-		setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 		setQuery(defaultQuery);
 		setBuilderKey((prev) => prev + 1);
 		onOpenChange(false);
@@ -436,50 +385,28 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 
 						<Separator />
 
-						{/* Routing Targets */}
+						{/* Routing Output */}
 						<div className="space-y-3">
-							<div className="flex items-center justify-between">
-								<div>
-									<Label>Routing Targets</Label>
-									<p className="text-muted-foreground mt-0.5 text-xs">
-										Weights must sum to 1. Leave provider or model empty to use the incoming request value.
-									</p>
-								</div>
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onClick={addTarget}
-									className="shrink-0 gap-2"
-									data-testid="routing-rule-target-add"
-								>
-									<Plus className="h-4 w-4" />
-									Add Target
-								</Button>
+							<div>
+								<Label>Routing Output</Label>
+								<p className="text-muted-foreground mt-0.5 text-xs">
+									Leave provider or model empty to use the incoming request value.
+								</p>
 							</div>
-
-							<div className="space-y-3">
-								{targets.map((target, index) => (
-									<TargetRow
-										key={index}
-										target={target}
-										index={index}
-										availableProviders={availableProviders}
-										allKeys={allKeysData}
-										showRemove={targets.length > 1}
-										onUpdate={updateTarget}
-										onRemove={removeTarget}
-									/>
-								))}
-							</div>
-
-							{/* Weight sum indicator */}
-							<div
-								className={`flex items-center justify-end gap-2 text-xs font-medium ${Math.abs(totalWeight - 1) > 0.001 ? "text-destructive" : "text-muted-foreground"}`}
-							>
-								Total weight: {totalWeight.toFixed(4)}
-								{Math.abs(totalWeight - 1) > 0.001 && <span className="text-destructive">(must equal 1)</span>}
-							</div>
+							<RoutingOutputFields
+								provider={provider}
+								model={model}
+								keyId={keyId}
+								availableProviders={availableProviders}
+								allKeys={allKeysData}
+								onProviderChange={(value) => {
+									setValue("provider", value);
+									setValue("model", "");
+									setValue("key_id", "");
+								}}
+								onModelChange={(value) => setValue("model", value)}
+								onKeyIdChange={(value) => setValue("key_id", value)}
+							/>
 						</div>
 
 						{/* Fallbacks */}
@@ -596,77 +523,43 @@ export function RoutingRuleSheet({ open, onOpenChange, editingRule, onSuccess }:
 	);
 }
 
-interface TargetRowProps {
-	target: RoutingTargetFormData;
-	index: number;
+interface RoutingOutputFieldsProps {
+	provider: string;
+	model: string;
+	keyId: string;
 	availableProviders: string[];
 	allKeys: Array<{ key_id: string; name: string; provider: string }>;
-	showRemove: boolean;
-	onUpdate: (index: number, field: keyof RoutingTargetFormData, value: string | number) => void;
-	onRemove: (index: number) => void;
+	onProviderChange: (value: string) => void;
+	onModelChange: (value: string) => void;
+	onKeyIdChange: (value: string) => void;
 }
 
-function TargetRow({ target, index, availableProviders, allKeys, showRemove, onUpdate, onRemove }: TargetRowProps) {
-	const availableKeys = target.provider
-		? allKeys.filter((k) => k.provider === target.provider).map((k) => ({ id: k.key_id, name: k.name }))
-		: [];
+function RoutingOutputFields({
+	provider,
+	model,
+	keyId,
+	availableProviders,
+	allKeys,
+	onProviderChange,
+	onModelChange,
+	onKeyIdChange,
+}: RoutingOutputFieldsProps) {
+	const availableKeys = provider ? allKeys.filter((k) => k.provider === provider).map((k) => ({ id: k.key_id, name: k.name })) : [];
 
 	return (
-		<div className="space-y-3 rounded-lg border p-3" data-testid={`routing-target-${index}`}>
-			<div className="flex items-center justify-between">
-				<span className="text-muted-foreground text-sm font-medium">Target {index + 1}</span>
-				<div className="flex items-center gap-2">
-					<div className="flex items-center gap-1.5">
-						<Label htmlFor={`routing-target-${index}-weight-input`} className="text-muted-foreground shrink-0 text-xs">
-							Weight
-						</Label>
-						<Input
-							id={`routing-target-${index}-weight-input`}
-							type="number"
-							min={0.001}
-							max={1}
-							step={0.001}
-							value={target.weight}
-							onChange={(e) => onUpdate(index, "weight", parseFloat(e.target.value) || 0)}
-							className="h-8 w-24 text-sm"
-							data-testid={`routing-target-${index}-weight-input`}
-						/>
-					</div>
-					{showRemove && (
-						<Button
-							type="button"
-							variant="ghost"
-							size="sm"
-							onClick={() => onRemove(index)}
-							className="h-8 w-8 p-0"
-							aria-label={`Remove target ${index + 1}`}
-							data-testid={`routing-target-${index}-remove-button`}
-						>
-							<Trash2 className="h-3.5 w-3.5" />
-						</Button>
-					)}
-				</div>
-			</div>
-
+		<div className="space-y-3 rounded-lg border p-3" data-testid="routing-output-fields">
 			<div className="grid grid-cols-2 gap-3">
 				<div className="space-y-1.5">
-					<Label id={`routing-target-${index}-provider-label`} className="text-xs">
+					<Label id="routing-output-provider-label" className="text-xs">
 						Provider
 					</Label>
 					<div className="flex gap-1.5">
-						<Select
-							value={target.provider}
-							onValueChange={(value) => {
-								onUpdate(index, "provider", value);
-								onUpdate(index, "model", "");
-								onUpdate(index, "key_id", "");
-							}}
-						>
+						<Select value={provider} onValueChange={onProviderChange}>
 							<SelectTrigger
-								id={`routing-target-${index}-provider-select`}
-								aria-labelledby={`routing-target-${index}-provider-label`}
+								id="routing-output-provider-select"
+								aria-labelledby="routing-output-provider-label"
 								className="h-9 flex-1 text-sm"
-								data-testid={`routing-target-${index}-provider-select`}
+								data-testid="routing-output-provider-select"
 							>
 								<SelectValue placeholder="Incoming (optional)" />
 							</SelectTrigger>
@@ -681,19 +574,15 @@ function TargetRow({ target, index, availableProviders, allKeys, showRemove, onU
 								))}
 							</SelectContent>
 						</Select>
-						{target.provider && (
+						{provider && (
 							<Button
 								type="button"
 								variant="outline"
 								size="sm"
-								onClick={() => {
-									onUpdate(index, "provider", "");
-									onUpdate(index, "model", "");
-									onUpdate(index, "key_id", "");
-								}}
+								onClick={() => onProviderChange("")}
 								className="h-9 w-9 p-0"
-								aria-label={`Clear provider for target ${index + 1}`}
-								data-testid={`routing-target-${index}-provider-clear`}
+								aria-label="Clear provider"
+								data-testid="routing-output-provider-clear"
 							>
 								<X className="h-3.5 w-3.5" />
 							</Button>
@@ -702,32 +591,32 @@ function TargetRow({ target, index, availableProviders, allKeys, showRemove, onU
 				</div>
 
 				<div className="space-y-1.5">
-					<Label id={`routing-target-${index}-model-label`} className="text-xs">
+					<Label id="routing-output-model-label" className="text-xs">
 						Model
 					</Label>
 					<div className="flex gap-1.5">
-						<div className="flex-1" data-testid={`routing-target-${index}-model-select`}>
+						<div className="flex-1" data-testid="routing-output-model-select">
 							<ModelMultiselect
-								provider={target.provider || undefined}
-								value={target.model}
-								onChange={(value) => onUpdate(index, "model", value)}
+								provider={provider || undefined}
+								value={model}
+								onChange={onModelChange}
 								placeholder="Incoming (optional)"
 								isSingleSelect
 								loadModelsOnEmptyProvider
 								className="!h-9 !min-h-9"
-								inputId={`routing-target-${index}-model-input`}
-								ariaLabelledBy={`routing-target-${index}-model-label`}
+								inputId="routing-output-model-input"
+								ariaLabelledBy="routing-output-model-label"
 							/>
 						</div>
-						{target.model && (
+						{model && (
 							<Button
 								type="button"
 								variant="outline"
 								size="sm"
-								onClick={() => onUpdate(index, "model", "")}
+								onClick={() => onModelChange("")}
 								className="h-9 w-9 p-0"
-								aria-label={`Clear model for target ${index + 1}`}
-								data-testid={`routing-target-${index}-model-clear`}
+								aria-label="Clear model"
+								data-testid="routing-output-model-clear"
 							>
 								<X className="h-3.5 w-3.5" />
 							</Button>
@@ -736,18 +625,18 @@ function TargetRow({ target, index, availableProviders, allKeys, showRemove, onU
 				</div>
 			</div>
 
-			{target.provider && (availableKeys.length > 0 || target.key_id) && (
+			{provider && (availableKeys.length > 0 || keyId) && (
 				<div className="space-y-1.5">
-					<Label id={`routing-target-${index}-apikey-label`} className="text-xs">
+					<Label id="routing-output-apikey-label" className="text-xs">
 						API Key <span className="text-muted-foreground">(optional — leave unset for load-balanced selection)</span>
 					</Label>
 					<div className="flex gap-1.5">
-						<Select value={target.key_id || ""} onValueChange={(value) => onUpdate(index, "key_id", value)}>
+						<Select value={keyId || ""} onValueChange={onKeyIdChange}>
 							<SelectTrigger
-								id={`routing-target-${index}-apikey-select`}
-								aria-labelledby={`routing-target-${index}-apikey-label`}
+								id="routing-output-apikey-select"
+								aria-labelledby="routing-output-apikey-label"
 								className="h-9 flex-1 text-sm"
-								data-testid={`routing-target-${index}-apikey-select`}
+								data-testid="routing-output-apikey-select"
 							>
 								<SelectValue placeholder="Select key (optional)" />
 							</SelectTrigger>
@@ -757,22 +646,22 @@ function TargetRow({ target, index, availableProviders, allKeys, showRemove, onU
 										{key.name}
 									</SelectItem>
 								))}
-								{target.key_id && !availableKeys.some((k) => k.id === target.key_id) && (
-									<SelectItem key={`pinned-${target.key_id}`} value={target.key_id}>
-										(pinned) {target.key_id}
+								{keyId && !availableKeys.some((k) => k.id === keyId) && (
+									<SelectItem key={`pinned-${keyId}`} value={keyId}>
+										(pinned) {keyId}
 									</SelectItem>
 								)}
 							</SelectContent>
 						</Select>
-						{target.key_id && (
+						{keyId && (
 							<Button
 								type="button"
 								variant="outline"
 								size="sm"
-								onClick={() => onUpdate(index, "key_id", "")}
+								onClick={() => onKeyIdChange("")}
 								className="h-9 w-9 p-0"
-								aria-label={`Clear API key for target ${index + 1}`}
-								data-testid={`routing-target-${index}-apikey-clear`}
+								aria-label="Clear API key"
+								data-testid="routing-output-apikey-clear"
 							>
 								<X className="h-3.5 w-3.5" />
 							</Button>
