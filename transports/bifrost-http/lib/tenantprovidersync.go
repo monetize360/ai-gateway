@@ -90,14 +90,12 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 	for _, tenantID := range tenantIDs {
 		store := registry.GetStoreForTenant(ctx, tenantID)
 		if store == nil {
-			logger.Debug("tenant provider sync: no config store for tenant %s", tenantID)
 			continue
 		}
 		if err := syncTenantProviders(ctx, cfg, client, tenantID, store); err != nil {
 			logger.Debug("tenant provider sync failed for tenant %s: %v", tenantID, err)
 			continue
 		}
-		logger.Info("tenant provider sync succeeded for tenant %s", tenantID)
 	}
 }
 

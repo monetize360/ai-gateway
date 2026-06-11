@@ -53,14 +53,13 @@ func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context) {
 	for _, tenantID := range tenantIDs {
 		configStore := p.registry.GetStoreForTenant(ctx, tenantID)
 		if configStore == nil {
-			p.logger.Debug("tenant governance sync: no config store for tenant %s", tenantID)
 			continue
 		}
 		if err := p.syncTenantGovernanceStore(ctx, tenantID, configStore); err != nil {
 			p.logger.Debug("tenant governance sync failed for tenant %s: %v", tenantID, err)
 			continue
 		}
-		p.logger.Info("tenant governance sync succeeded for tenant %s", tenantID)
+
 	}
 }
 
