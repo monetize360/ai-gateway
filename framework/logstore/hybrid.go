@@ -644,12 +644,6 @@ func (h *HybridLogStore) GetModelRankings(ctx context.Context, filters SearchFil
 	return h.inner.GetModelRankings(ctx, filters)
 }
 
-// GetUserRankings delegates to the inner store and returns ranked usage
-// aggregates per user for the matching log rows.
-func (h *HybridLogStore) GetUserRankings(ctx context.Context, filters SearchFilters) (*UserRankingResult, error) {
-	return h.inner.GetUserRankings(ctx, filters)
-}
-
 // GetDimensionCostHistogram delegates to the inner store and returns a cost
 // histogram bucketed by bucketSizeSeconds and grouped by the given dimension.
 func (h *HybridLogStore) GetDimensionCostHistogram(ctx context.Context, filters SearchFilters, bucketSizeSeconds int64, dimension HistogramDimension) (*DimensionCostHistogramResult, error) {

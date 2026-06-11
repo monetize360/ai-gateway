@@ -1066,45 +1066,6 @@ func (p *LoggerPlugin) GetAvailableRoutingRules(ctx context.Context, limit int, 
 	return keyPairResultsToKeyPairs(results), nil
 }
 
-// GetAvailableTeams returns all unique team ID-Name pairs from logs.
-// Uses DISTINCT to avoid loading all rows when only unique values are needed.
-func (p *LoggerPlugin) GetAvailableTeams(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "team_id", "team_name", limit, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get available teams: %w", err)
-	}
-	return keyPairResultsToKeyPairs(results), nil
-}
-
-// GetAvailableCustomers returns all unique customer ID-Name pairs from logs.
-// Uses DISTINCT to avoid loading all rows when only unique values are needed.
-func (p *LoggerPlugin) GetAvailableCustomers(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "customer_id", "customer_name", limit, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get available customers: %w", err)
-	}
-	return keyPairResultsToKeyPairs(results), nil
-}
-
-// GetAvailableUsers returns all unique user ID-Name pairs from logs.
-func (p *LoggerPlugin) GetAvailableUsers(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "user_id", "user_name", limit, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get available users: %w", err)
-	}
-	return keyPairResultsToKeyPairs(results), nil
-}
-
-// GetAvailableBusinessUnits returns all unique business unit ID-Name pairs from logs.
-// Uses DISTINCT to avoid loading all rows when only unique values are needed.
-func (p *LoggerPlugin) GetAvailableBusinessUnits(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "business_unit_id", "business_unit_name", limit, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get available business units: %w", err)
-	}
-	return keyPairResultsToKeyPairs(results), nil
-}
-
 // GetDimensionCostHistogram returns time-bucketed cost data grouped by the specified dimension.
 // Delegates to the underlying log store which uses materialized views on PostgreSQL for performance.
 func (p *LoggerPlugin) GetDimensionCostHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionCostHistogramResult, error) {

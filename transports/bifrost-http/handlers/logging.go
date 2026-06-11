@@ -59,10 +59,6 @@ const (
 	filterDimRoutingRules   = "routing_rules"
 	filterDimRoutingEngines = "routing_engines"
 	filterDimStopReasons    = "stop_reasons"
-	filterDimTeams          = "teams"
-	filterDimCustomers      = "customers"
-	filterDimUsers          = "users"
-	filterDimBusinessUnits  = "business_units"
 	filterDimMetadataKeys   = "metadata_keys"
 )
 
@@ -76,7 +72,6 @@ const (
 var allFilterDimensions = []string{
 	filterDimModels, filterDimAliases, filterDimSelectedKeys, filterDimVirtualKeys,
 	filterDimRoutingRules, filterDimRoutingEngines, filterDimStopReasons,
-	filterDimTeams, filterDimCustomers, filterDimUsers, filterDimBusinessUnits,
 	filterDimMetadataKeys,
 }
 
@@ -403,18 +398,6 @@ func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
 	if routingRuleIDs := string(ctx.QueryArgs().Peek("routing_rule_ids")); routingRuleIDs != "" {
 		filters.RoutingRuleIDs = parseCommaSeparated(routingRuleIDs)
 	}
-	if teamIDs := string(ctx.QueryArgs().Peek("team_ids")); teamIDs != "" {
-		filters.TeamIDs = parseCommaSeparated(teamIDs)
-	}
-	if customerIDs := string(ctx.QueryArgs().Peek("customer_ids")); customerIDs != "" {
-		filters.CustomerIDs = parseCommaSeparated(customerIDs)
-	}
-	if userIDs := string(ctx.QueryArgs().Peek("user_ids")); userIDs != "" {
-		filters.UserIDs = parseCommaSeparated(userIDs)
-	}
-	if businessUnitIDs := string(ctx.QueryArgs().Peek("business_unit_ids")); businessUnitIDs != "" {
-		filters.BusinessUnitIDs = parseCommaSeparated(businessUnitIDs)
-	}
 	if routingEngines := string(ctx.QueryArgs().Peek("routing_engine_used")); routingEngines != "" {
 		filters.RoutingEngineUsed = parseCommaSeparated(routingEngines)
 	}
@@ -644,18 +627,6 @@ func (h *LoggingHandler) getLogsStats(ctx *fasthttp.RequestCtx) {
 	if routingRuleIDs := string(ctx.QueryArgs().Peek("routing_rule_ids")); routingRuleIDs != "" {
 		filters.RoutingRuleIDs = parseCommaSeparated(routingRuleIDs)
 	}
-	if teamIDs := string(ctx.QueryArgs().Peek("team_ids")); teamIDs != "" {
-		filters.TeamIDs = parseCommaSeparated(teamIDs)
-	}
-	if customerIDs := string(ctx.QueryArgs().Peek("customer_ids")); customerIDs != "" {
-		filters.CustomerIDs = parseCommaSeparated(customerIDs)
-	}
-	if userIDs := string(ctx.QueryArgs().Peek("user_ids")); userIDs != "" {
-		filters.UserIDs = parseCommaSeparated(userIDs)
-	}
-	if businessUnitIDs := string(ctx.QueryArgs().Peek("business_unit_ids")); businessUnitIDs != "" {
-		filters.BusinessUnitIDs = parseCommaSeparated(businessUnitIDs)
-	}
 	if routingEngines := string(ctx.QueryArgs().Peek("routing_engine_used")); routingEngines != "" {
 		filters.RoutingEngineUsed = parseCommaSeparated(routingEngines)
 	}
@@ -802,18 +773,6 @@ func parseHistogramFilters(ctx *fasthttp.RequestCtx) *logstore.SearchFilters {
 	}
 	if routingRuleIDs := string(ctx.QueryArgs().Peek("routing_rule_ids")); routingRuleIDs != "" {
 		filters.RoutingRuleIDs = parseCommaSeparated(routingRuleIDs)
-	}
-	if teamIDs := string(ctx.QueryArgs().Peek("team_ids")); teamIDs != "" {
-		filters.TeamIDs = parseCommaSeparated(teamIDs)
-	}
-	if customerIDs := string(ctx.QueryArgs().Peek("customer_ids")); customerIDs != "" {
-		filters.CustomerIDs = parseCommaSeparated(customerIDs)
-	}
-	if userIDs := string(ctx.QueryArgs().Peek("user_ids")); userIDs != "" {
-		filters.UserIDs = parseCommaSeparated(userIDs)
-	}
-	if businessUnitIDs := string(ctx.QueryArgs().Peek("business_unit_ids")); businessUnitIDs != "" {
-		filters.BusinessUnitIDs = parseCommaSeparated(businessUnitIDs)
 	}
 	if routingEngines := string(ctx.QueryArgs().Peek("routing_engine_used")); routingEngines != "" {
 		filters.RoutingEngineUsed = parseCommaSeparated(routingEngines)
@@ -993,11 +952,11 @@ func (h *LoggingHandler) getLogsProviderLatencyHistogram(ctx *fasthttp.RequestCt
 func parseDimension(ctx *fasthttp.RequestCtx) (logstore.HistogramDimension, bool) {
 	dim := logstore.HistogramDimension(string(ctx.QueryArgs().Peek("dimension")))
 	if dim == "" {
-		SendError(ctx, fasthttp.StatusBadRequest, "Missing required query parameter: dimension. Valid values: provider, team_id, customer_id, user_id, business_unit_id")
+		SendError(ctx, fasthttp.StatusBadRequest, "Missing required query parameter: dimension. Valid values: provider")
 		return "", false
 	}
 	if !logstore.ValidHistogramDimensions[dim] {
-		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid dimension: %s. Valid values: provider, team_id, customer_id, user_id, business_unit_id", dim))
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid dimension: %s. Valid values: provider", dim))
 		return "", false
 	}
 	return dim, true
@@ -1115,10 +1074,6 @@ func (h *LoggingHandler) getAvailableFilterData(ctx *fasthttp.RequestCtx) {
 		routingRules   []logging.KeyPair
 		routingEngines []string
 		stopReasons    []string
-		teams          []logging.KeyPair
-		customers      []logging.KeyPair
-		users          []logging.KeyPair
-		businessUnits  []logging.KeyPair
 		metadataKeys   map[string][]string
 		mu             sync.Mutex
 	)
@@ -1208,54 +1163,6 @@ func (h *LoggingHandler) getAvailableFilterData(ctx *fasthttp.RequestCtx) {
 			}
 			mu.Lock()
 			stopReasons = result
-			mu.Unlock()
-			return nil
-		})
-	}
-	if _, ok := want[filterDimTeams]; ok {
-		g.Go(func() error {
-			result, err := h.logManager.GetAvailableTeams(gCtx, defaultFilterDataLimit, query)
-			if err != nil {
-				return err
-			}
-			mu.Lock()
-			teams = result
-			mu.Unlock()
-			return nil
-		})
-	}
-	if _, ok := want[filterDimCustomers]; ok {
-		g.Go(func() error {
-			result, err := h.logManager.GetAvailableCustomers(gCtx, defaultFilterDataLimit, query)
-			if err != nil {
-				return err
-			}
-			mu.Lock()
-			customers = result
-			mu.Unlock()
-			return nil
-		})
-	}
-	if _, ok := want[filterDimUsers]; ok {
-		g.Go(func() error {
-			result, err := h.logManager.GetAvailableUsers(gCtx, defaultFilterDataLimit, query)
-			if err != nil {
-				return err
-			}
-			mu.Lock()
-			users = result
-			mu.Unlock()
-			return nil
-		})
-	}
-	if _, ok := want[filterDimBusinessUnits]; ok {
-		g.Go(func() error {
-			result, err := h.logManager.GetAvailableBusinessUnits(gCtx, defaultFilterDataLimit, query)
-			if err != nil {
-				return err
-			}
-			mu.Lock()
-			businessUnits = result
 			mu.Unlock()
 			return nil
 		})
@@ -1385,18 +1292,6 @@ func (h *LoggingHandler) getAvailableFilterData(ctx *fasthttp.RequestCtx) {
 	}
 	if _, ok := want[filterDimStopReasons]; ok {
 		payload[filterDimStopReasons] = stopReasons
-	}
-	if _, ok := want[filterDimTeams]; ok {
-		payload[filterDimTeams] = teams
-	}
-	if _, ok := want[filterDimCustomers]; ok {
-		payload[filterDimCustomers] = customers
-	}
-	if _, ok := want[filterDimUsers]; ok {
-		payload[filterDimUsers] = users
-	}
-	if _, ok := want[filterDimBusinessUnits]; ok {
-		payload[filterDimBusinessUnits] = businessUnits
 	}
 	if _, ok := want[filterDimMetadataKeys]; ok {
 		if metadataKeys == nil {

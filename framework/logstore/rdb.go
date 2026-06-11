@@ -120,18 +120,6 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 	if len(filters.RoutingRuleIDs) > 0 {
 		baseQuery = baseQuery.Where("routing_rule_id IN ?", filters.RoutingRuleIDs)
 	}
-	if len(filters.TeamIDs) > 0 {
-		baseQuery = baseQuery.Where("team_id IN ?", filters.TeamIDs)
-	}
-	if len(filters.CustomerIDs) > 0 {
-		baseQuery = baseQuery.Where("customer_id IN ?", filters.CustomerIDs)
-	}
-	if len(filters.UserIDs) > 0 {
-		baseQuery = baseQuery.Where("user_id IN ?", filters.UserIDs)
-	}
-	if len(filters.BusinessUnitIDs) > 0 {
-		baseQuery = baseQuery.Where("business_unit_id IN ?", filters.BusinessUnitIDs)
-	}
 	if len(filters.RoutingEngineUsed) > 0 {
 		// Query routing engines (comma-separated values) - find logs containing ANY of the specified engines
 		dialect := s.db.Dialector.Name()
@@ -793,8 +781,6 @@ func (s *RDBLogStore) listSelectColumns() string {
 		"selected_key_id", "selected_key_name",
 		"virtual_key_id", "virtual_key_name",
 		"routing_engines_used", "routing_rule_id", "routing_rule_name",
-		"user_id", "team_id", "team_name", "customer_id", "customer_name",
-		"business_unit_id", "business_unit_name",
 		"speech_input", "transcription_input", "image_generation_input", "video_generation_input",
 		"latency", "token_usage", "cost", "status", "error_details", "stream",
 		"content_summary", "metadata", "cache_debug",
@@ -1887,115 +1873,6 @@ func (s *RDBLogStore) GetModelRankings(ctx context.Context, filters SearchFilter
 	return &ModelRankingResult{Rankings: rankings}, nil
 }
 
-// GetUserRankings returns users ranked by usage with trend comparison to the previous period.
-func (s *RDBLogStore) GetUserRankings(ctx context.Context, filters SearchFilters) (*UserRankingResult, error) {
-	if s.db.Dialector.Name() == "postgres" && s.canUseMatView(filters) {
-		return s.getUserRankingsFromMatView(ctx, filters)
-	}
-	selectClause := `
-		user_id,
-		COUNT(*) as total_requests,
-		SUM(total_tokens) as total_tokens,
-		COALESCE(SUM(cost), 0) as total_cost
-	`
-
-	// Query current period
-	currentQuery := s.ScopedDB(ctx).Model(&Log{})
-	currentQuery = s.applyFilters(currentQuery, filters)
-	currentQuery = currentQuery.Where("status IN ?", []string{"success", "error"})
-	currentQuery = currentQuery.Where("user_id IS NOT NULL AND user_id != ''")
-
-	var currentResults []struct {
-		UserID        string          `gorm:"column:user_id"`
-		TotalRequests int64           `gorm:"column:total_requests"`
-		TotalTokens   sql.NullInt64   `gorm:"column:total_tokens"`
-		TotalCost     sql.NullFloat64 `gorm:"column:total_cost"`
-	}
-
-	if err := currentQuery.
-		Select(selectClause).
-		Group("user_id").
-		Order("total_requests DESC").
-		Limit(defaultMaxRankingsLimit).
-		Find(&currentResults).Error; err != nil {
-		return nil, fmt.Errorf("failed to get user rankings: %w", err)
-	}
-
-	// Query previous period for trend comparison
-	prevMap := make(map[string]UserRankingEntry)
-	if filters.StartTime != nil && filters.EndTime != nil {
-		duration := filters.EndTime.Sub(*filters.StartTime)
-		prevStart := filters.StartTime.Add(-duration)
-		prevEnd := filters.StartTime.Add(-time.Nanosecond)
-
-		prevFilters := filters
-		prevFilters.StartTime = &prevStart
-		prevFilters.EndTime = &prevEnd
-
-		prevQuery := s.ScopedDB(ctx).Model(&Log{})
-		prevQuery = s.applyFilters(prevQuery, prevFilters)
-		prevQuery = prevQuery.Where("status IN ?", []string{"success", "error"})
-		prevQuery = prevQuery.Where("user_id IS NOT NULL AND user_id != ''")
-
-		if len(currentResults) > 0 {
-			userIDs := make([]string, len(currentResults))
-			for i, r := range currentResults {
-				userIDs[i] = r.UserID
-			}
-			prevQuery = prevQuery.Where("user_id IN ?", userIDs)
-		}
-
-		var prevResults []struct {
-			UserID        string          `gorm:"column:user_id"`
-			TotalRequests int64           `gorm:"column:total_requests"`
-			TotalTokens   sql.NullInt64   `gorm:"column:total_tokens"`
-			TotalCost     sql.NullFloat64 `gorm:"column:total_cost"`
-		}
-
-		if err := prevQuery.
-			Select(selectClause).
-			Group("user_id").
-			Find(&prevResults).Error; err != nil {
-			return nil, fmt.Errorf("failed to get previous period user rankings: %w", err)
-		}
-
-		for _, r := range prevResults {
-			prevMap[r.UserID] = UserRankingEntry{
-				UserID:        r.UserID,
-				TotalRequests: r.TotalRequests,
-				TotalTokens:   r.TotalTokens.Int64,
-				TotalCost:     r.TotalCost.Float64,
-			}
-		}
-	}
-
-	// Build results with trends
-	rankings := make([]UserRankingWithTrend, len(currentResults))
-	for i, r := range currentResults {
-		entry := UserRankingEntry{
-			UserID:        r.UserID,
-			TotalRequests: r.TotalRequests,
-			TotalTokens:   r.TotalTokens.Int64,
-			TotalCost:     r.TotalCost.Float64,
-		}
-
-		var trend UserRankingTrend
-		if prev, ok := prevMap[r.UserID]; ok && prev.TotalRequests > 0 {
-			trend.HasPreviousPeriod = true
-			trend.RequestsTrend = pctChange(float64(prev.TotalRequests), float64(r.TotalRequests))
-			trend.TokensTrend = pctChange(float64(prev.TotalTokens), float64(r.TotalTokens.Int64))
-			trend.CostTrend = pctChange(prev.TotalCost, r.TotalCost.Float64)
-		}
-
-		rankings[i] = UserRankingWithTrend{
-			UserRankingEntry: entry,
-			Trend:            trend,
-		}
-	}
-
-	return &UserRankingResult{Rankings: rankings}, nil
-}
-
 // pctChange computes the percentage change from old to new.
 func pctChange(old, new float64) float64 {
 	if old == 0 {
@@ -2944,20 +2821,13 @@ var allowedKeyPairColumns = map[string]struct{}{
 	"virtual_key_name":   {},
 	"routing_rule_id":    {},
 	"routing_rule_name":  {},
-	"team_id":            {},
-	"team_name":          {},
-	"customer_id":        {},
-	"customer_name":      {},
-	"user_id":            {},
-	"business_unit_id":   {},
-	"business_unit_name": {},
 }
 
 // GetDistinctKeyPairs returns unique non-empty ID-Name pairs for the given columns using SELECT DISTINCT.
 // idCol and nameCol must be valid column names (e.g., "selected_key_id", "selected_key_name").
 //
 // Matview path is DAC-aware: each per-dimension matview carries the
-// visibility columns (user_id, team_id, virtual_key_id), so a
+// visibility column (virtual_key_id), so a
 // QueryScope on ctx applies on the matview directly. Until
 // matViewsReady the raw-table fallback (also ScopedDB-aware) serves
 // requests.

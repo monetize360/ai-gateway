@@ -57,10 +57,6 @@ type SearchFilters struct {
 	SelectedKeyIDs    []string          `json:"selected_key_ids,omitempty"`
 	VirtualKeyIDs     []string          `json:"virtual_key_ids,omitempty"`
 	RoutingRuleIDs    []string          `json:"routing_rule_ids,omitempty"`
-	TeamIDs           []string          `json:"team_ids,omitempty"`
-	CustomerIDs       []string          `json:"customer_ids,omitempty"`
-	UserIDs           []string          `json:"user_ids,omitempty"`
-	BusinessUnitIDs   []string          `json:"business_unit_ids,omitempty"`
 	RoutingEngineUsed []string          `json:"routing_engine_used,omitempty"` // For filtering by routing engine (routing-rule, governance, loadbalancing)
 	StartTime         *time.Time        `json:"start_time,omitempty"`
 	EndTime           *time.Time        `json:"end_time,omitempty"`
@@ -149,14 +145,6 @@ type Log struct {
 	SelectedPromptName      *string   `gorm:"type:varchar(255)" json:"selected_prompt_name"`
 	SelectedPromptVersion   *string   `gorm:"type:varchar(64)" json:"selected_prompt_version"`
 	SelectedPromptID        *string   `gorm:"type:varchar(36)" json:"selected_prompt_id"`
-	UserID                  *string   `gorm:"type:varchar(255);index:idx_logs_user_id" json:"user_id"`
-	UserName                *string   `gorm:"type:varchar(255)" json:"user_name"`
-	TeamID                  *string   `gorm:"type:varchar(255);index:idx_logs_team_id" json:"team_id"`
-	TeamName                *string   `gorm:"type:varchar(255)" json:"team_name"`
-	CustomerID              *string   `gorm:"type:varchar(255);index:idx_logs_customer_id" json:"customer_id"`
-	CustomerName            *string   `gorm:"type:varchar(255)" json:"customer_name"`
-	BusinessUnitID          *string   `gorm:"type:varchar(255);index:idx_logs_business_unit_id" json:"business_unit_id"`
-	BusinessUnitName        *string   `gorm:"type:varchar(255)" json:"business_unit_name"`
 	InputHistory            string    `gorm:"type:text" json:"-"` // JSON serialized []schemas.ChatMessage
 	ResponsesInputHistory   string    `gorm:"type:text" json:"-"` // JSON serialized []schemas.ResponsesMessage
 	OutputMessage           string    `gorm:"type:text" json:"-"` // JSON serialized *schemas.ChatMessage
@@ -837,10 +825,6 @@ type MCPToolLog struct {
 	ServerLabel    string    `gorm:"type:varchar(255);index:idx_mcp_logs_server_label" json:"server_label,omitempty"` // MCP server that provided the tool
 	VirtualKeyID   *string   `gorm:"type:varchar(255);index:idx_mcp_logs_virtual_key_id" json:"virtual_key_id"`
 	VirtualKeyName *string   `gorm:"type:varchar(255)" json:"virtual_key_name"`
-	UserID         *string   `gorm:"type:varchar(255);index:idx_mcp_logs_user_id" json:"user_id"`
-	TeamID         *string   `gorm:"type:varchar(255);index:idx_mcp_logs_team_id" json:"team_id"`
-	CustomerID     *string   `gorm:"type:varchar(255);index:idx_mcp_logs_customer_id" json:"customer_id"`
-	BusinessUnitID *string   `gorm:"type:varchar(255);index:idx_mcp_logs_business_unit_id" json:"business_unit_id"`
 	Arguments      string    `gorm:"type:text" json:"-"`                                                // JSON serialized tool arguments
 	Result         string    `gorm:"type:text" json:"-"`                                                // JSON serialized tool result
 	ErrorDetails   string    `gorm:"type:text" json:"-"`                                                // JSON serialized *schemas.BifrostError
@@ -1373,20 +1357,12 @@ type ProviderLatencyHistogramResult struct {
 type HistogramDimension string
 
 const (
-	DimensionProvider     HistogramDimension = "provider"
-	DimensionTeam         HistogramDimension = "team_id"
-	DimensionCustomer     HistogramDimension = "customer_id"
-	DimensionUser         HistogramDimension = "user_id"
-	DimensionBusinessUnit HistogramDimension = "business_unit_id"
+	DimensionProvider HistogramDimension = "provider"
 )
 
 // ValidHistogramDimensions is the set of allowed dimension values
 var ValidHistogramDimensions = map[HistogramDimension]bool{
-	DimensionProvider:     true,
-	DimensionTeam:         true,
-	DimensionCustomer:     true,
-	DimensionUser:         true,
-	DimensionBusinessUnit: true,
+	DimensionProvider: true,
 }
 
 // Dimension-level histogram types (generic version of Provider histograms)
@@ -1518,33 +1494,6 @@ type ModelRankingWithTrend struct {
 // ModelRankingResult is the response for the model rankings endpoint.
 type ModelRankingResult struct {
 	Rankings []ModelRankingWithTrend `json:"rankings"`
-}
-
-// UserRankingEntry represents a single user's usage statistics.
-type UserRankingEntry struct {
-	UserID        string  `json:"user_id"`
-	TotalRequests int64   `json:"total_requests"`
-	TotalTokens   int64   `json:"total_tokens"`
-	TotalCost     float64 `json:"total_cost"`
-}
-
-// UserRankingTrend represents the percentage change compared to the previous period.
-type UserRankingTrend struct {
-	HasPreviousPeriod bool    `json:"has_previous_period"`
-	RequestsTrend     float64 `json:"requests_trend"`
-	TokensTrend       float64 `json:"tokens_trend"`
-	CostTrend         float64 `json:"cost_trend"`
-}
-
-// UserRankingWithTrend combines ranking entry with trend data.
-type UserRankingWithTrend struct {
-	UserRankingEntry
-	Trend UserRankingTrend `json:"trend"`
-}
-
-// UserRankingResult is the response for the user rankings endpoint.
-type UserRankingResult struct {
-	Rankings []UserRankingWithTrend `json:"rankings"`
 }
 
 // NodeUsageCursor identifies the last log row included in a node usage scan.

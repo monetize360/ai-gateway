@@ -88,18 +88,6 @@ type LogManager interface {
 	// GetAvailableStopReasons returns all unique stop reason values from logs
 	GetAvailableStopReasons(ctx context.Context, limit int, query string) ([]string, error)
 
-	// GetAvailableTeams returns all unique team ID-Name pairs from logs
-	GetAvailableTeams(ctx context.Context, limit int, query string) ([]KeyPair, error)
-
-	// GetAvailableCustomers returns all unique customer ID-Name pairs from logs
-	GetAvailableCustomers(ctx context.Context, limit int, query string) ([]KeyPair, error)
-
-	// GetAvailableUsers returns all unique user IDs from logs
-	GetAvailableUsers(ctx context.Context, limit int, query string) ([]KeyPair, error)
-
-	// GetAvailableBusinessUnits returns all unique business unit ID-Name pairs from logs
-	GetAvailableBusinessUnits(ctx context.Context, limit int, query string) ([]KeyPair, error)
-
 	// GetAvailableMetadataKeys returns distinct metadata keys and their values from recent logs
 	GetAvailableMetadataKeys(ctx context.Context, limit int, query string) (map[string][]string, error)
 
@@ -287,22 +275,6 @@ func (p *PluginLogManager) GetAvailableRoutingEngines(ctx context.Context, limit
 
 func (p *PluginLogManager) GetAvailableStopReasons(ctx context.Context, limit int, query string) ([]string, error) {
 	return p.plugin.GetAvailableStopReasons(ctx, limit, query)
-}
-
-func (p *PluginLogManager) GetAvailableTeams(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	return p.plugin.GetAvailableTeams(ctx, limit, query)
-}
-
-func (p *PluginLogManager) GetAvailableCustomers(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	return p.plugin.GetAvailableCustomers(ctx, limit, query)
-}
-
-func (p *PluginLogManager) GetAvailableUsers(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	return p.plugin.GetAvailableUsers(ctx, limit, query)
-}
-
-func (p *PluginLogManager) GetAvailableBusinessUnits(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	return p.plugin.GetAvailableBusinessUnits(ctx, limit, query)
 }
 
 // GetDimensionCostHistogram returns time-bucketed cost data grouped by the specified dimension.

@@ -476,10 +476,6 @@ func applyOutputFieldsToEntry(
 	virtualKeyID, virtualKeyName string,
 	routingRuleID, routingRuleName string,
 	selectedPromptID, selectedPromptName, selectedPromptVersion string,
-	teamID, teamName string,
-	customerID, customerName string,
-	userID, userName string,
-	businessUnitID, businessUnitName string,
 	numberOfRetries int,
 	latency int64,
 	attemptTrail []schemas.KeyAttemptRecord,
@@ -506,30 +502,6 @@ func applyOutputFieldsToEntry(
 	}
 	if selectedPromptVersion != "" {
 		entry.SelectedPromptVersion = &selectedPromptVersion
-	}
-	if teamID != "" {
-		entry.TeamID = &teamID
-	}
-	if teamName != "" {
-		entry.TeamName = &teamName
-	}
-	if customerID != "" {
-		entry.CustomerID = &customerID
-	}
-	if customerName != "" {
-		entry.CustomerName = &customerName
-	}
-	if userID != "" {
-		entry.UserID = &userID
-	}
-	if userName != "" {
-		entry.UserName = &userName
-	}
-	if businessUnitID != "" {
-		entry.BusinessUnitID = &businessUnitID
-	}
-	if businessUnitName != "" {
-		entry.BusinessUnitName = &businessUnitName
 	}
 	if numberOfRetries != 0 {
 		entry.NumberOfRetries = numberOfRetries
