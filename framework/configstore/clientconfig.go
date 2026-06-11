@@ -1072,6 +1072,7 @@ func GenerateModelConfigHash(m tables.TableModelConfig) (string, error) {
 // It intentionally excludes provider runtime/config fields and keys.
 func GenerateProviderGovernanceHash(p tables.TableProvider) (string, error) {
 	hash := sha256.New()
+	writeHashField(hash, "provider_type", derefStr(p.ProviderType))
 	writeHashField(hash, "name", p.Name)
 	writeHashField(hash, "budget_ids", tables.JoinBudgetRefIDs(p.Budgets))
 	writeHashField(hash, "rate_limit_ids", tables.JoinRateLimitRefIDs(p.RateLimits))

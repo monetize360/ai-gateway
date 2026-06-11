@@ -14,7 +14,8 @@ import (
 // That helps us detect changes between config file and database config
 type TableProvider struct {
 	ID                       string    `gorm:"primaryKey;type:uuid" json:"id"`
-	Name                     string    `gorm:"type:varchar(50);uniqueIndex;not null" json:"name"` // ModelProvider as string
+	ProviderType             *string   `gorm:"type:uuid;index" json:"provider_type,omitempty"` // MPilot picklist item ID (canonical for standard providers)
+	Name                     string    `gorm:"type:varchar(50);uniqueIndex;not null" json:"name"` // Runtime key; derived from provider_type for standard providers
 	NetworkConfigJSON        string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.NetworkConfig
 	ConcurrencyBufferJSON    string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.ConcurrencyAndBufferSize
 	ProxyConfigJSON          string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.ProxyConfig
@@ -62,6 +63,9 @@ func (TableProvider) TableName() string { return "config_providers" }
 // validates governance fields, and encrypts the proxy configuration before writing
 // to the database.
 func (p *TableProvider) BeforeSave(tx *gorm.DB) error {
+	if err := p.SyncProviderTypeAssociations(); err != nil {
+		return err
+	}
 	if p.NetworkConfig != nil {
 		data, err := json.Marshal(p.NetworkConfig)
 		if err != nil {
@@ -164,6 +168,10 @@ func (p *TableProvider) AfterFind(tx *gorm.DB) error {
 			return err
 		}
 		p.OpenAIConfig = &openaiConfig
+	}
+
+	if err := p.SyncProviderTypeAssociations(); err != nil {
+		return err
 	}
 
 	return nil

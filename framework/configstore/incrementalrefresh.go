@@ -195,57 +195,60 @@ func (s *RDBConfigStore) GetProviderConfigRefreshDelta(ctx context.Context, sinc
 		Changed: make(map[schemas.ModelProvider]ProviderConfig),
 	}
 
-	type nameRow struct {
-		Name string
+	type providerIdentityRow struct {
+		ProviderType *string
+		Name         string
 	}
-	var activeNames []nameRow
+	var activeProviders []providerIdentityRow
 	if err := db.Model(&tables.TableProvider{}).
 		Where("updated_at >= ? AND deleted = ?", since, false).
-		Select("name").
-		Find(&activeNames).Error; err != nil {
+		Select("provider_type", "name").
+		Find(&activeProviders).Error; err != nil {
 		return nil, fmt.Errorf("changed providers: %w", err)
 	}
-	var keyProviderNames []nameRow
+	var keyProviderRows []providerIdentityRow
 	if err := db.Table("config_keys").
-		Select("DISTINCT config_providers.name AS name").
+		Select("config_providers.provider_type AS provider_type", "config_providers.name AS name").
 		Joins("JOIN config_providers ON config_providers.id = config_keys.provider_id").
 		Where("config_keys.updated_at >= ? AND config_keys.deleted = ? AND config_providers.deleted = ?", since, false, false).
-		Scan(&keyProviderNames).Error; err != nil {
+		Scan(&keyProviderRows).Error; err != nil {
 		return nil, fmt.Errorf("changed provider keys: %w", err)
 	}
 
 	seen := make(map[string]struct{})
-	for _, row := range append(activeNames, keyProviderNames...) {
-		if row.Name == "" {
+	for _, row := range append(activeProviders, keyProviderRows...) {
+		runtimeKey, err := (&tables.TableProvider{ProviderType: row.ProviderType, Name: row.Name}).RuntimeProviderKey()
+		if err != nil || runtimeKey == "" {
 			continue
 		}
-		if _, ok := seen[row.Name]; ok {
+		if _, ok := seen[runtimeKey]; ok {
 			continue
 		}
-		seen[row.Name] = struct{}{}
-		cfg, err := s.GetProviderConfig(ctx, schemas.ModelProvider(row.Name))
+		seen[runtimeKey] = struct{}{}
+		cfg, err := s.GetProviderConfig(ctx, schemas.ModelProvider(runtimeKey))
 		if err != nil {
 			if IsNotFound(err) {
-				delta.Removed = append(delta.Removed, schemas.ModelProvider(row.Name))
+				delta.Removed = append(delta.Removed, schemas.ModelProvider(runtimeKey))
 				continue
 			}
-			return nil, fmt.Errorf("reload provider %s: %w", row.Name, err)
+			return nil, fmt.Errorf("reload provider %s: %w", runtimeKey, err)
 		}
-		delta.Changed[schemas.ModelProvider(row.Name)] = *cfg
+		delta.Changed[schemas.ModelProvider(runtimeKey)] = *cfg
 	}
 
-	var removed []nameRow
+	var removed []providerIdentityRow
 	if err := db.Model(&tables.TableProvider{}).
 		Where("updated_at >= ? AND deleted = ?", since, true).
-		Select("name").
+		Select("provider_type", "name").
 		Find(&removed).Error; err != nil {
 		return nil, fmt.Errorf("removed providers: %w", err)
 	}
 	for _, row := range removed {
-		if row.Name == "" {
+		runtimeKey, err := (&tables.TableProvider{ProviderType: row.ProviderType, Name: row.Name}).RuntimeProviderKey()
+		if err != nil || runtimeKey == "" {
 			continue
 		}
-		delta.Removed = append(delta.Removed, schemas.ModelProvider(row.Name))
+		delta.Removed = append(delta.Removed, schemas.ModelProvider(runtimeKey))
 	}
 
 	return delta, nil

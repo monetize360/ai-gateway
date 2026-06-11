@@ -227,11 +227,15 @@ func (r *TableRoutingRule) SyncRoutingOutputAssociations(tx *gorm.DB) error {
 			r.Provider = bifrost.Ptr(strings.TrimSpace(name))
 		}
 	} else if isNonEmptyString(r.Provider) {
+		providerKey := strings.TrimSpace(*r.Provider)
+		q := tx.Model(&TableProvider{}).Where("deleted = ?", false)
+		if picklistID, ok := PicklistItemIDForProviderName(providerKey); ok {
+			q = q.Where("provider_type = ?", picklistID)
+		} else {
+			q = q.Where("provider_type = ? AND name = ?", CustomProviderPicklistItemID, providerKey)
+		}
 		var id string
-		if err := tx.Model(&TableProvider{}).
-			Where("name = ? AND deleted = ?", strings.TrimSpace(*r.Provider), false).
-			Select("id").
-			Scan(&id).Error; err != nil {
+		if err := q.Select("id").Scan(&id).Error; err != nil {
 			return err
 		}
 		if strings.TrimSpace(id) != "" {

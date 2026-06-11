@@ -605,10 +605,15 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 			Status:                   providerConfig.Status,
 			Description:              providerConfig.Description,
 		}
+		if providerConfig.CustomProviderConfig != nil {
+			dbProvider.ProviderType = bifrost.Ptr(tables.CustomProviderPicklistItemID)
+		} else if picklistID, ok := tables.PicklistItemIDForProviderName(string(providerName)); ok {
+			dbProvider.ProviderType = bifrost.Ptr(picklistID)
+		}
 
 		// Upsert provider (create or update if exists).
 		var existingProvider tables.TableProvider
-		providerLookup := ActiveRows(txDB.WithContext(ctx)).Where("name = ?", dbProvider.Name).First(&existingProvider)
+		providerLookup := scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), providerName).First(&existingProvider)
 		if providerLookup.Error == nil {
 			dbProvider.ID = existingProvider.ID
 			dbProvider.SystemColumns = existingProvider.SystemColumns
@@ -619,9 +624,13 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 		} else {
 			return providerLookup.Error
 		}
+		onConflictColumn := "name"
+		if dbProvider.ProviderType != nil && !tables.IsCustomProviderPicklistItem(*dbProvider.ProviderType) {
+			onConflictColumn = "provider_type"
+		}
 		if err := txDB.WithContext(ctx).Clauses(
 			clause.OnConflict{
-				Columns:   []clause.Column{{Name: "name"}},
+				Columns:   []clause.Column{{Name: onConflictColumn}},
 				UpdateAll: true,
 			},
 			clause.Returning{Columns: []clause.Column{{Name: "id"}}},
@@ -812,7 +821,7 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 	txDB = tx[0]
 	// Find the existing provider
 	var dbProvider tables.TableProvider
-	if err := dbForUpdate(ActiveRows(txDB.WithContext(ctx))).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+	if err := dbForUpdate(scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), provider)).First(&dbProvider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
@@ -1007,6 +1016,11 @@ func (s *RDBConfigStore) AddProvider(ctx context.Context, provider schemas.Model
 		OpenAIConfig:             configCopy.OpenAIConfig,
 		ConfigHash:               configCopy.ConfigHash,
 	}
+	if configCopy.CustomProviderConfig != nil {
+		dbProvider.ProviderType = bifrost.Ptr(tables.CustomProviderPicklistItemID)
+	} else if picklistID, ok := tables.PicklistItemIDForProviderName(string(provider)); ok {
+		dbProvider.ProviderType = bifrost.Ptr(picklistID)
+	}
 	EnsureGovernanceRowID(&dbProvider.ID)
 	ApplyAuditOnCreate(ctx, &dbProvider.SystemColumns)
 	// Create the provider
@@ -1094,7 +1108,7 @@ func (s *RDBConfigStore) DeleteProvider(ctx context.Context, provider schemas.Mo
 	txDB = tx[0]
 	// Find the existing provider
 	var dbProvider tables.TableProvider
-	if err := dbForUpdate(ActiveRows(txDB.WithContext(ctx))).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+	if err := dbForUpdate(scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), provider)).First(&dbProvider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
@@ -1141,7 +1155,11 @@ func (s *RDBConfigStore) GetProvidersConfig(ctx context.Context) (map[schemas.Mo
 	}
 	processedProviders := make(map[schemas.ModelProvider]ProviderConfig)
 	for _, dbProvider := range dbProviders {
-		provider := schemas.ModelProvider(dbProvider.Name)
+		runtimeKey, err := dbProvider.RuntimeProviderKey()
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: %w", dbProvider.ID, err)
+		}
+		provider := schemas.ModelProvider(runtimeKey)
 		// Convert database keys to schemas.Key
 		keys := make([]schemas.Key, len(dbProvider.Keys))
 		for i, dbKey := range dbProvider.Keys {
@@ -1171,7 +1189,9 @@ func (s *RDBConfigStore) GetProviderConfig(ctx context.Context, provider schemas
 	var dbProvider tables.TableProvider
 	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Keys", func(db *gorm.DB) *gorm.DB {
 		return ActiveRows(db)
-	}).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+	}).Scopes(func(db *gorm.DB) *gorm.DB {
+		return scopeProviderByRuntimeKey(db, provider)
+	}).First(&dbProvider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -1205,7 +1225,9 @@ func (s *RDBConfigStore) GetProviderKeys(ctx context.Context, provider schemas.M
 		Table("config_providers").
 		Select("config_keys.*").
 		Joins("LEFT JOIN config_keys ON config_keys.provider_id = config_providers.id AND config_keys.deleted = ?", false).
-		Where("config_providers.deleted = ? AND config_providers.name = ?", false, string(provider)).
+		Scopes(func(db *gorm.DB) *gorm.DB {
+			return scopeJoinedProviderByRuntimeKey(db, provider)
+		}).
 		Order("config_keys.created_at ASC").
 		Scan(&dbKeys)
 	if result.Error != nil {
@@ -1238,8 +1260,10 @@ func (s *RDBConfigStore) getProviderKeyByName(ctx context.Context, txDB *gorm.DB
 		Table("config_keys").
 		Select("config_keys.*").
 		Joins("JOIN config_providers ON config_providers.id = config_keys.provider_id").
-		Where("config_providers.deleted = ? AND config_keys.deleted = ? AND config_providers.name = ? AND config_keys.key_id = ?",
-			false, false, string(provider), keyID).
+		Where("config_keys.deleted = ? AND config_keys.key_id = ?", false, keyID).
+		Scopes(func(db *gorm.DB) *gorm.DB {
+			return scopeJoinedProviderByRuntimeKey(db, provider)
+		}).
 		First(&dbKey).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -1271,7 +1295,7 @@ func (s *RDBConfigStore) CreateProviderKey(ctx context.Context, provider schemas
 	var txDB *gorm.DB
 	txDB = tx[0]
 	var dbProvider tables.TableProvider
-	if err := dbForUpdate(ActiveRows(txDB.WithContext(ctx))).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+	if err := dbForUpdate(scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), provider)).First(&dbProvider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
@@ -1340,7 +1364,7 @@ func (s *RDBConfigStore) DeleteProviderKey(ctx context.Context, provider schemas
 	txDB = tx[0]
 
 	var dbProvider tables.TableProvider
-	if err := dbForUpdate(ActiveRows(txDB.WithContext(ctx))).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+	if err := dbForUpdate(scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), provider)).First(&dbProvider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
@@ -1378,7 +1402,7 @@ func (s *RDBConfigStore) GetProviders(ctx context.Context) ([]tables.TableProvid
 // GetProvider retrieves a provider by name from the database with governance relationships.
 func (s *RDBConfigStore) GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error) {
 	var providerInfo tables.TableProvider
-	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits").Where("name = ?", string(provider)).First(&providerInfo).Error; err != nil {
+	if err := scopeProviderByRuntimeKey(ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits"), provider).First(&providerInfo).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -1387,10 +1411,10 @@ func (s *RDBConfigStore) GetProvider(ctx context.Context, provider schemas.Model
 	return &providerInfo, nil
 }
 
-// GetProviderByName retrieves a provider by name from the database with governance relationships.
+// GetProviderByName retrieves a provider by runtime key from the database with governance relationships.
 func (s *RDBConfigStore) GetProviderByName(ctx context.Context, name string) (*tables.TableProvider, error) {
 	var provider tables.TableProvider
-	if err := ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits").Where("name = ?", name).First(&provider).Error; err != nil {
+	if err := scopeProviderByRuntimeKey(ActiveRows(s.DB().WithContext(ctx)).Preload("Budgets").Preload("RateLimits"), schemas.ModelProvider(name)).First(&provider).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -1424,9 +1448,7 @@ func (s *RDBConfigStore) UpdateStatus(ctx context.Context, provider schemas.Mode
 
 	// Update provider-level status (for keyless providers)
 	if provider != "" {
-		result := ActiveRows(s.DB().WithContext(ctx)).
-			Model(&tables.TableProvider{}).
-			Where("name = ?", string(provider)).
+		result := scopeProviderByRuntimeKey(ActiveRows(s.DB().WithContext(ctx)).Model(&tables.TableProvider{}), provider).
 			Updates(map[string]interface{}{
 				"status":      status,
 				"description": description,
@@ -2554,9 +2576,7 @@ func (s *RDBConfigStore) GetKeysByProviderID(ctx context.Context, providerID str
 
 func (s *RDBConfigStore) getProviderIDByName(ctx context.Context, txDB *gorm.DB, providerName string) (string, error) {
 	var providerID string
-	err := ActiveRows(txDB.WithContext(ctx)).
-		Model(&tables.TableProvider{}).
-		Where("name = ?", providerName).
+	err := scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)).Model(&tables.TableProvider{}), schemas.ModelProvider(providerName)).
 		Select("id").
 		Scan(&providerID).Error
 	if err != nil {

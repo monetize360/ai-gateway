@@ -45,7 +45,7 @@ func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schema
 		}
 
 		var dbProvider tables.TableProvider
-		if err := ActiveRows(txDB.WithContext(ctx)).Where("name = ?", string(provider)).First(&dbProvider).Error; err != nil {
+		if err := scopeProviderByRuntimeKey(ActiveRows(txDB.WithContext(ctx)), provider).First(&dbProvider).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
