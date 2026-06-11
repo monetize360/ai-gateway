@@ -1,3 +1,6 @@
+{{- /* When bifrost.existingConfigSecret is set, config.json is mounted from that
+       (Sealed)Secret instead, so skip rendering this ConfigMap entirely. */ -}}
+{{- if not .Values.bifrost.existingConfigSecret }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,3 +15,4 @@ data:
     {{- else }}
     {{- include "bifrost.config" . | nindent 4 }}
     {{- end }}
+{{- end }}

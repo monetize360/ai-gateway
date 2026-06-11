@@ -212,6 +212,10 @@
       "type": "object",
       "description": "Bifrost application configuration",
       "properties": {
+        "existingConfigSecret": {
+          "type": "string",
+          "description": "Name of an existing Secret (e.g. a SealedSecret) holding a verbatim config.json under the key 'config.json'. When set, the config volume is sourced from this Secret and the chart-generated ConfigMap is skipped. Use to keep sensitive config (DB passwords, JWT keys) encrypted in Git."
+        },
         "rawConfigJson": {
           "type": "string",
           "description": "Verbatim config.json content. When set, the chart writes this string to config.json instead of generating it from the bifrost.* values (e.g. for multi-tenant tenant_store mode not modeled by the chart)."

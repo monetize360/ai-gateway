@@ -161,6 +161,18 @@ lifecycle:
 # Bifrost specific configuration
 # You can find entire schema at https://getbifrost.ai/schema
 bifrost:
+  # Verbatim config.json from an existing Kubernetes Secret (e.g. a SealedSecret).
+  # When set, the config volume is sourced from this Secret (key: config.json) and
+  # the chart-generated ConfigMap is NOT rendered. Use this to keep secrets (DB
+  # passwords, JWT keys, tenant_store config) encrypted in Git instead of plaintext
+  # in HelmRelease values. The Secret must contain a `config.json` key.
+  existingConfigSecret: ""
+
+  # Verbatim config.json content inlined into the generated ConfigMap. When set (and
+  # existingConfigSecret is empty), the chart writes this string instead of generating
+  # config from the bifrost.* values. Prefer existingConfigSecret for anything sensitive.
+  rawConfigJson: ""
+
   # Application settings
   appDir: /app/data
   port: 8080

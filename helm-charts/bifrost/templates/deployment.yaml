@@ -279,8 +279,13 @@ spec:
             {{- end }}
       volumes:
         - name: config
+          {{- if .Values.bifrost.existingConfigSecret }}
+          secret:
+            secretName: {{ .Values.bifrost.existingConfigSecret }}
+          {{- else }}
           configMap:
             name: {{ include "bifrost.fullname" . }}-config
+          {{- end }}
         {{- if eq .Values.storage.mode "sqlite" }}
         - name: data
           {{- if .Values.storage.persistence.enabled }}

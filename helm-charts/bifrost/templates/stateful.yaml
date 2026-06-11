@@ -277,8 +277,13 @@ spec:
             {{- end }}
       volumes:
         - name: config
+          {{- if .Values.bifrost.existingConfigSecret }}
+          secret:
+            secretName: {{ .Values.bifrost.existingConfigSecret }}
+          {{- else }}
           configMap:
             name: {{ include "bifrost.fullname" . }}-config
+          {{- end }}
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
