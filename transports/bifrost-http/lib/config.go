@@ -314,6 +314,7 @@ type Config struct {
 	// Stores (config data lives in per-tenant Postgres via TenantStore)
 	VectorStore vectorstore.VectorStore
 	LogsStore   logstore.LogStore
+	LogsStoreConfig *logstore.Config
 
 	// Multi-tenant (nil when tenant_store.enabled is false)
 	TenantStoreConfig *TenantStoreFileConfig
@@ -688,14 +689,18 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 		config.WebSocketConfig = wsConfig
 	}
 	config.TenantStoreConfig = configData.TenantStoreConfig
+	config.LogsStoreConfig = configData.LogsStoreConfig
 	return config, nil
 }
 
-// prepareLogsStoreConfig resolves logs_store postgres connection settings from
-// tenant_store.global when logs_store.config is omitted or partially set.
+// prepareLogsStoreConfig resolves optional logs_store postgres connection settings.
+// When tenant_store is enabled, logs are routed per tenant DB — global db_name is not used.
 func prepareLogsStoreConfig(configData *ConfigData) error {
 	ls := configData.LogsStoreConfig
 	if ls == nil || !ls.Enabled || ls.Type != logstore.LogStoreTypePostgres {
+		return nil
+	}
+	if configData.TenantStoreConfig != nil && configData.TenantStoreConfig.Enabled {
 		return nil
 	}
 	pg, ok := ls.Config.(*logstore.PostgresConfig)
@@ -712,15 +717,21 @@ func initStores(ctx context.Context, config *Config, configData *ConfigData, log
 
 	// Initialize log store
 	if configData.LogsStoreConfig != nil && configData.LogsStoreConfig.Enabled {
-		if err := prepareLogsStoreConfig(configData); err != nil {
-			return err
+		tenantLogsRouting := configData.TenantStoreConfig != nil &&
+			configData.TenantStoreConfig.Enabled &&
+			configData.LogsStoreConfig.Type == logstore.LogStoreTypePostgres
+		if tenantLogsRouting {
+			logger.Info("logs store configured for per-tenant DB routing")
+		} else {
+			if err := prepareLogsStoreConfig(configData); err != nil {
+				return err
+			}
+			config.LogsStore, err = logstore.NewLogStore(ctx, configData.LogsStoreConfig, logger)
+			if err != nil {
+				return err
+			}
+			logger.Info("logs store initialized")
 		}
-		// Explicit logs store configuration from config.json
-		config.LogsStore, err = logstore.NewLogStore(ctx, configData.LogsStoreConfig, logger)
-		if err != nil {
-			return err
-		}
-		logger.Info("logs store initialized")
 	} else if configData.LogsStoreConfig == nil {
 		logStoreConfig := &logstore.Config{
 				Enabled: true,

@@ -46,6 +46,7 @@ type PendingLogData struct {
 // pendingInjectEntries wraps a slice of log entries so it can be used with sync.Map.
 // The mutex protects concurrent appends to the entries slice within the same traceID.
 type pendingInjectEntries struct {
+	tenantID  string
 	mu        sync.Mutex
 	entries   []*logstore.Log
 	createdAt time.Time
@@ -53,6 +54,7 @@ type pendingInjectEntries struct {
 
 // writeQueueEntry is an entry pushed to the batch write queue.
 type writeQueueEntry struct {
+	tenantID    string
 	log         *logstore.Log
 	mcpLog      *logstore.MCPToolLog
 	callback    func(entry *logstore.Log)
@@ -138,37 +140,52 @@ func (p *LoggerPlugin) processBatch(batch []*writeQueueEntry) {
 		return
 	}
 
-	// Collect all log entries for batch insert
-	logs := make([]*logstore.Log, 0, len(batch))
-	mcpLogs := make([]*logstore.MCPToolLog, 0, len(batch))
+	type tenantBatch struct {
+		logs    []*logstore.Log
+		mcpLogs []*logstore.MCPToolLog
+	}
+	byTenant := make(map[string]*tenantBatch)
 	for _, entry := range batch {
+		tenantID := entry.tenantID
+		group, ok := byTenant[tenantID]
+		if !ok {
+			group = &tenantBatch{}
+			byTenant[tenantID] = group
+		}
 		if entry.log != nil {
-			logs = append(logs, entry.log)
+			group.logs = append(group.logs, entry.log)
 		}
 		if entry.mcpLog != nil {
-			mcpLogs = append(mcpLogs, entry.mcpLog)
+			group.mcpLogs = append(group.mcpLogs, entry.mcpLog)
 		}
 	}
 
-	if len(logs) > 0 {
-		if err := p.store.BatchCreateIfNotExists(p.ctx, logs); err != nil {
-			p.logger.Warn("batch insert failed for %d entries, falling back to individual inserts: %v", len(logs), err)
-			// Individual fallback — isolate the bad entry instead of losing the whole batch
-			for _, log := range logs {
-				if err := p.store.BatchCreateIfNotExists(p.ctx, []*logstore.Log{log}); err != nil {
-					p.logger.Warn("individual insert failed for log %s: %v", log.ID, err)
-					p.droppedRequests.Add(1)
+	for tenantID, group := range byTenant {
+		store := p.logStoreForTenant(tenantID)
+		if store == nil {
+			p.logger.Warn("log store not available for tenant %q; dropping %d entries", tenantID, len(group.logs)+len(group.mcpLogs))
+			p.droppedRequests.Add(int64(len(group.logs) + len(group.mcpLogs)))
+			continue
+		}
+		if len(group.logs) > 0 {
+			if err := store.BatchCreateIfNotExists(p.ctx, group.logs); err != nil {
+				p.logger.Warn("batch insert failed for %d entries (tenant=%s), falling back to individual inserts: %v", len(group.logs), tenantID, err)
+				for _, log := range group.logs {
+					if err := store.BatchCreateIfNotExists(p.ctx, []*logstore.Log{log}); err != nil {
+						p.logger.Warn("individual insert failed for log %s (tenant=%s): %v", log.ID, tenantID, err)
+						p.droppedRequests.Add(1)
+					}
 				}
 			}
 		}
-	}
-	if len(mcpLogs) > 0 {
-		if err := p.store.BatchCreateMCPToolLogsIfNotExists(p.ctx, mcpLogs); err != nil {
-			p.logger.Warn("batch insert failed for %d MCP tool logs, falling back to individual inserts: %v", len(mcpLogs), err)
-			for _, log := range mcpLogs {
-				if err := p.store.BatchCreateMCPToolLogsIfNotExists(p.ctx, []*logstore.MCPToolLog{log}); err != nil {
-					p.logger.Warn("individual insert failed for MCP tool log %s: %v", log.ID, err)
-					p.droppedRequests.Add(1)
+		if len(group.mcpLogs) > 0 {
+			if err := store.BatchCreateMCPToolLogsIfNotExists(p.ctx, group.mcpLogs); err != nil {
+				p.logger.Warn("batch insert failed for %d MCP tool logs (tenant=%s), falling back to individual inserts: %v", len(group.mcpLogs), tenantID, err)
+				for _, log := range group.mcpLogs {
+					if err := store.BatchCreateMCPToolLogsIfNotExists(p.ctx, []*logstore.MCPToolLog{log}); err != nil {
+						p.logger.Warn("individual insert failed for MCP tool log %s (tenant=%s): %v", log.ID, tenantID, err)
+						p.droppedRequests.Add(1)
+					}
 				}
 			}
 		}
@@ -250,7 +267,7 @@ func (p *LoggerPlugin) cleanupStalePendingLogs() {
 				p.mu.Lock()
 				callback := p.mcpToolLogCallback
 				p.mu.Unlock()
-				p.enqueueMCPToolLogEntry(buildStaleMCPToolLogEntry(stalePending), callback)
+				p.enqueueMCPToolLogEntry("", buildStaleMCPToolLogEntry(stalePending), callback)
 			}
 		}
 		return true
@@ -260,7 +277,7 @@ func (p *LoggerPlugin) cleanupStalePendingLogs() {
 // enqueueLogEntry pushes a complete log entry to the write queue.
 // If the queue is full, the entry is dropped to prevent Postgres slowness
 // from cascading into request handling goroutines.
-func (p *LoggerPlugin) enqueueLogEntry(entry *logstore.Log, callback func(entry *logstore.Log)) {
+func (p *LoggerPlugin) enqueueLogEntry(tenantID string, entry *logstore.Log, callback func(entry *logstore.Log)) {
 	if p.closed.Load() {
 		return
 	}
@@ -271,7 +288,7 @@ func (p *LoggerPlugin) enqueueLogEntry(entry *logstore.Log, callback func(entry 
 		}
 	}()
 	select {
-	case p.writeQueue <- &writeQueueEntry{log: entry, callback: callback}:
+	case p.writeQueue <- &writeQueueEntry{tenantID: tenantID, log: entry, callback: callback}:
 		// enqueued successfully
 	default:
 		p.droppedRequests.Add(1)
@@ -282,7 +299,7 @@ func (p *LoggerPlugin) enqueueLogEntry(entry *logstore.Log, callback func(entry 
 // enqueueMCPToolLogEntry pushes a complete MCP tool log entry to the write queue.
 // If the queue is full, the entry is dropped to prevent store slowness from
 // cascading into request handling goroutines.
-func (p *LoggerPlugin) enqueueMCPToolLogEntry(entry *logstore.MCPToolLog, callback func(entry *logstore.MCPToolLog)) {
+func (p *LoggerPlugin) enqueueMCPToolLogEntry(tenantID string, entry *logstore.MCPToolLog, callback func(entry *logstore.MCPToolLog)) {
 	if p.closed.Load() {
 		return
 	}
@@ -292,7 +309,7 @@ func (p *LoggerPlugin) enqueueMCPToolLogEntry(entry *logstore.MCPToolLog, callba
 		}
 	}()
 	select {
-	case p.writeQueue <- &writeQueueEntry{mcpLog: entry, mcpCallback: callback}:
+	case p.writeQueue <- &writeQueueEntry{tenantID: tenantID, mcpLog: entry, mcpCallback: callback}:
 	default:
 		p.droppedRequests.Add(1)
 		p.logger.Warn("log write queue full, dropping MCP tool log entry %s", entry.ID)

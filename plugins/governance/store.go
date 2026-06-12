@@ -1745,7 +1745,6 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 
 	for i := range routingRules {
 		rule := &routingRules[i]
-		rule.HydrateAssociationFromLegacy()
 		key := rule.RoutingRulesCacheKey()
 
 		// Group rules by key

@@ -30,7 +30,7 @@ services:
     container_name: fake-llm
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${FAKE_LLM_PORT:-18000}:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 5s

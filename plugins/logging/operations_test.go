@@ -45,7 +45,7 @@ func newTestStore(t *testing.T) logstore.LogStore {
 // memory after PreMCPHook and persisted by the batch writer after PostMCPHook.
 func TestMCPHooksDeferDBWriteUntilPostHookBatch(t *testing.T) {
 	store := newTestStore(t)
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestMCPHooksDeferDBWriteUntilPostHookBatch(t *testing.T) {
 // MCP logs are committed as terminal errors instead of being silently dropped.
 func TestCleanupStalePendingMCPLogsPersistsErrorFallback(t *testing.T) {
 	store := newTestStore(t)
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}

@@ -38,10 +38,11 @@ type TenantStoreGlobalPostgresFile struct {
 // TenantStoreHolder wires the per-tenant ConfigStore registry and JWT verification
 // key into the HTTP transport layer.
 type TenantStoreHolder struct {
-	Registry tenantstore.Resolver
-	Manager  *tenantstore.TenantDBManager
-	GlobalDB *tenantstore.GlobalDB
-	JWTKey   []byte
+	Registry         tenantstore.Resolver
+	Manager          *tenantstore.TenantDBManager
+	LogStoreManager  tenantstore.LogStoreResolver
+	GlobalDB         *tenantstore.GlobalDB
+	JWTKey           []byte
 }
 
 // Close releases global DB and per-tenant connection pools.
@@ -51,6 +52,9 @@ func (h *TenantStoreHolder) Close(ctx context.Context) {
 	}
 	if h.Manager != nil {
 		h.Manager.Close(ctx)
+	}
+	if h.LogStoreManager != nil {
+		h.LogStoreManager.Close(ctx)
 	}
 	if h.GlobalDB != nil {
 		_ = h.GlobalDB.Close()
@@ -235,6 +239,31 @@ func GetVirtualKeyFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(schemas.BifrostContextKeyVirtualKey).(string)
 	return v
+}
+
+// InitTenantLogStores opens per-tenant postgres log stores when logs_store is enabled.
+func InitTenantLogStores(ctx context.Context, holder *TenantStoreHolder, logsConfig *logstore.Config) error {
+	if holder == nil || holder.GlobalDB == nil || logsConfig == nil || !logsConfig.Enabled {
+		return nil
+	}
+	if logsConfig.Type != logstore.LogStoreTypePostgres {
+		return nil
+	}
+	pool := tenantstore.LogStorePoolSettings{MaxIdleConns: 5, MaxOpenConns: 50}
+	if pg, ok := logsConfig.Config.(*logstore.PostgresConfig); ok && pg != nil {
+		if pg.MaxIdleConns > 0 {
+			pool.MaxIdleConns = pg.MaxIdleConns
+		}
+		if pg.MaxOpenConns > 0 {
+			pool.MaxOpenConns = pg.MaxOpenConns
+		}
+	}
+	manager := tenantstore.NewTenantLogStoreManager(holder.GlobalDB, pool, logger)
+	if err := manager.LoadAll(ctx); err != nil {
+		return err
+	}
+	holder.LogStoreManager = manager
+	return nil
 }
 
 // TenantGovernanceSyncInterval returns how often per-tenant governance stores

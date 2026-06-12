@@ -1230,7 +1230,14 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// Short-circuits with VirtualKeyBlocked / ProviderBlocked / ModelBlocked before
 	// we touch Customer / Team / User.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
-		skipVKBudgetLimit := evaluationRequest.UserID != "" || skipBudgetsAndRateLimits
+		// Enterprise user auth (user id without tenant context) skips VK budget/rate-limit
+		// so user-level governance owns limits. Tenant JWT auth never sets user id on context.
+		skipVKBudgetLimit := skipBudgetsAndRateLimits
+		if !skipVKBudgetLimit && evaluationRequest.UserID != "" {
+			if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
+				skipVKBudgetLimit = true
+			}
+		}
 		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
 	}
 
@@ -1467,11 +1474,13 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 	// Build pricing scopes from context using the governance VK ID (not the raw VK token)
 	pricingScopes := modelcatalog.PricingLookupScopesFromContext(ctx, string(provider))
 
-	// Always process usage tracking (with or without virtual key)
-	// When user auth is present, skip VK usage tracking to avoid double-counting
+	// Always process usage tracking (with or without virtual key).
+	// Enterprise user auth skips VK usage tracking so user-level governance owns limits.
 	effectiveVK := virtualKey
 	if userID != "" {
-		effectiveVK = ""
+		if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
+			effectiveVK = ""
+		}
 	}
 	// If effectiveVK is empty, it will be passed as empty string to postHookWorker
 	// The tracker will handle empty virtual keys gracefully by only updating provider-level and model-level usage

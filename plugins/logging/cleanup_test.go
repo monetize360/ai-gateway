@@ -64,14 +64,14 @@ func makeTestLog(id string) *logstore.Log {
 // recover and persist all of them.
 func TestCleanupDrainsRecoveredBatchNoDrops(t *testing.T) {
 	rec := &recordingStore{LogStore: newTestStore(t)}
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
 	const N = 500 // well under maxBatchSize (1000); batchWriter will not auto-flush
 	for i := 0; i < N; i++ {
-		plugin.enqueueLogEntry(makeTestLog(fmt.Sprintf("recovered-%d", i)), nil)
+		plugin.enqueueLogEntry("", makeTestLog(fmt.Sprintf("recovered-%d", i)), nil)
 	}
 
 	// Let batchWriter dequeue everything into its local batch. 100ms is far
@@ -106,14 +106,14 @@ func TestCleanupDrainsCombinedQueueAndBatchNoDrops(t *testing.T) {
 		LogStore: newTestStore(t),
 		delay:    25 * time.Millisecond, // slow store keeps batchWriter busy so the channel buffer fills
 	}
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
 	const N = 2500 // > maxBatchSize so batchWriter triggers at least two intermediate flushes
 	for i := 0; i < N; i++ {
-		plugin.enqueueLogEntry(makeTestLog(fmt.Sprintf("combined-%d", i)), nil)
+		plugin.enqueueLogEntry("", makeTestLog(fmt.Sprintf("combined-%d", i)), nil)
 	}
 
 	// Call Cleanup while batchWriter is likely mid-processBatch (the 25ms
@@ -141,12 +141,12 @@ func TestCleanupDrainsCombinedQueueAndBatchNoDrops(t *testing.T) {
 // subsequent enqueues are dropped at the source and do not panic.
 func TestCleanupRejectsNewSendsAfterClosed(t *testing.T) {
 	rec := &recordingStore{LogStore: newTestStore(t)}
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, rec, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	plugin.enqueueLogEntry(makeTestLog("pre-cleanup"), nil)
+	plugin.enqueueLogEntry("", makeTestLog("pre-cleanup"), nil)
 
 	if err := plugin.Cleanup(); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
@@ -155,7 +155,7 @@ func TestCleanupRejectsNewSendsAfterClosed(t *testing.T) {
 	// After Cleanup, the channel is closed and p.closed is true. Producers
 	// must short-circuit via the closed check (no panic, no enqueue).
 	dropsBefore := plugin.droppedRequests.Load()
-	plugin.enqueueLogEntry(makeTestLog("post-cleanup"), nil)
+	plugin.enqueueLogEntry("", makeTestLog("post-cleanup"), nil)
 	dropsAfter := plugin.droppedRequests.Load()
 
 	// The closed-check path returns silently without incrementing
@@ -178,7 +178,7 @@ func TestCleanupRejectsNewSendsAfterClosed(t *testing.T) {
 // call must be a no-op rather than re-cancelling, re-closing channels, or
 // panicking.
 func TestCleanupIsIdempotent(t *testing.T) {
-	plugin, err := Init(context.Background(), &Config{}, testLogger{}, newTestStore(t), nil, nil)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, newTestStore(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}

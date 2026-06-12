@@ -65,6 +65,16 @@ func (h *HealthHandler) getHealth(ctx *fasthttp.RequestCtx) {
 				mu.Unlock()
 			}
 		}()
+	} else if h.config.TenantStore != nil && h.config.TenantStore.LogStoreManager != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := h.config.TenantStore.LogStoreManager.Ping(reqCtx); err != nil {
+				mu.Lock()
+				errors = append(errors, "log store not available")
+				mu.Unlock()
+			}
+		}()
 	}
 
 	// Pinging vector store

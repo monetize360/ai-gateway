@@ -85,6 +85,11 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 	if err := registry.SyncTenants(ctx); err != nil {
 		logger.Warn("tenant provider sync: failed to refresh tenant registry: %v", err)
 	}
+	if cfg.TenantStore.LogStoreManager != nil {
+		if err := cfg.TenantStore.LogStoreManager.SyncTenantsFromGlobalDB(ctx); err != nil {
+			logger.Warn("tenant log store sync: failed to refresh tenant log stores: %v", err)
+		}
+	}
 
 	tenantIDs := registry.ListTenantIDs(ctx)
 	for _, tenantID := range tenantIDs {

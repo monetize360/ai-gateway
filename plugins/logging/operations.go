@@ -55,7 +55,7 @@ func (p *LoggerPlugin) insertInitialLogEntry(
 	if parentRequestID != "" {
 		entry.ParentRequestID = &parentRequestID
 	}
-	return p.store.CreateIfNotExists(ctx, entry)
+	return p.logStore(ctx).CreateIfNotExists(ctx, entry)
 }
 
 // applySerializedLogUpdates copies serialized fields from a temporary log entry
@@ -307,7 +307,7 @@ func (p *LoggerPlugin) updateLogEntry(
 			updates["raw_response"] = string(rawResponseBytes)
 		}
 	}
-	return p.store.Update(ctx, requestID, updates)
+	return p.logStore(ctx).Update(ctx, requestID, updates)
 }
 
 // makePostWriteCallback creates a callback function for use after the batch writer commits.
@@ -942,7 +942,7 @@ func (p *LoggerPlugin) SearchLogs(ctx context.Context, filters logstore.SearchFi
 		pagination.Order = "desc"
 	}
 	// Build base query with all filters applied
-	return p.store.SearchLogs(ctx, filters, pagination)
+	return p.logStore(ctx).SearchLogs(ctx, filters, pagination)
 }
 
 // GetSessionLogs returns paginated logs for a single parent_request_id session.
@@ -956,77 +956,77 @@ func (p *LoggerPlugin) GetSessionLogs(ctx context.Context, sessionID string, pag
 	if pagination.Order == "" {
 		pagination.Order = "asc"
 	}
-	return p.store.GetSessionLogs(ctx, sessionID, pagination)
+	return p.logStore(ctx).GetSessionLogs(ctx, sessionID, pagination)
 }
 
 // GetSessionSummary returns aggregate totals for a single parent_request_id session.
 func (p *LoggerPlugin) GetSessionSummary(ctx context.Context, sessionID string) (*logstore.SessionSummaryResult, error) {
-	return p.store.GetSessionSummary(ctx, sessionID)
+	return p.logStore(ctx).GetSessionSummary(ctx, sessionID)
 }
 
 // GetLog retrieves a single log entry by ID including all fields (raw_request, raw_response).
 func (p *LoggerPlugin) GetLog(ctx context.Context, id string) (*logstore.Log, error) {
-	return p.store.FindByID(ctx, id)
+	return p.logStore(ctx).FindByID(ctx, id)
 }
 
 // GetMCPToolLog retrieves a single MCP tool log entry by ID.
 func (p *LoggerPlugin) GetMCPToolLog(ctx context.Context, id string) (*logstore.MCPToolLog, error) {
-	return p.store.FindMCPToolLog(ctx, id)
+	return p.logStore(ctx).FindMCPToolLog(ctx, id)
 }
 
 // GetStats calculates statistics for logs matching the given filters
 func (p *LoggerPlugin) GetStats(ctx context.Context, filters logstore.SearchFilters) (*logstore.SearchStats, error) {
-	return p.store.GetStats(ctx, filters)
+	return p.logStore(ctx).GetStats(ctx, filters)
 }
 
 // GetHistogram returns time-bucketed request counts for the given filters
 func (p *LoggerPlugin) GetHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.HistogramResult, error) {
-	return p.store.GetHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetTokenHistogram returns time-bucketed token usage for the given filters
 func (p *LoggerPlugin) GetTokenHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.TokenHistogramResult, error) {
-	return p.store.GetTokenHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetTokenHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetCostHistogram returns time-bucketed cost data with model breakdown for the given filters
 func (p *LoggerPlugin) GetCostHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.CostHistogramResult, error) {
-	return p.store.GetCostHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetCostHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetModelHistogram returns time-bucketed model usage with success/error breakdown for the given filters
 func (p *LoggerPlugin) GetModelHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ModelHistogramResult, error) {
-	return p.store.GetModelHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetModelHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetLatencyHistogram returns time-bucketed latency percentiles for the given filters
 func (p *LoggerPlugin) GetLatencyHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.LatencyHistogramResult, error) {
-	return p.store.GetLatencyHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetLatencyHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetProviderCostHistogram returns time-bucketed cost data with provider breakdown for the given filters
 func (p *LoggerPlugin) GetProviderCostHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderCostHistogramResult, error) {
-	return p.store.GetProviderCostHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetProviderCostHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetProviderTokenHistogram returns time-bucketed token usage with provider breakdown for the given filters
 func (p *LoggerPlugin) GetProviderTokenHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderTokenHistogramResult, error) {
-	return p.store.GetProviderTokenHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetProviderTokenHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 // GetProviderLatencyHistogram returns time-bucketed latency percentiles with provider breakdown for the given filters
 func (p *LoggerPlugin) GetProviderLatencyHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderLatencyHistogramResult, error) {
-	return p.store.GetProviderLatencyHistogram(ctx, filters, bucketSizeSeconds)
+	return p.logStore(ctx).GetProviderLatencyHistogram(ctx, filters, bucketSizeSeconds)
 }
 
 func (p *LoggerPlugin) GetModelRankings(ctx context.Context, filters logstore.SearchFilters) (*logstore.ModelRankingResult, error) {
-	return p.store.GetModelRankings(ctx, filters)
+	return p.logStore(ctx).GetModelRankings(ctx, filters)
 }
 
 // GetAvailableModels returns all unique models from logs.
 // Uses DISTINCT to avoid loading all rows (28K+) when only unique values are needed.
 func (p *LoggerPlugin) GetAvailableModels(ctx context.Context, limit int, query string) ([]string, error) {
-	models, err := p.store.GetDistinctModels(ctx, limit, query)
+	models, err := p.logStore(ctx).GetDistinctModels(ctx, limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available models: %w", err)
 	}
@@ -1035,7 +1035,7 @@ func (p *LoggerPlugin) GetAvailableModels(ctx context.Context, limit int, query 
 
 // GetAvailableAliases returns all unique alias values from logs.
 func (p *LoggerPlugin) GetAvailableAliases(ctx context.Context, limit int, query string) ([]string, error) {
-	aliases, err := p.store.GetDistinctAliases(ctx, limit, query)
+	aliases, err := p.logStore(ctx).GetDistinctAliases(ctx, limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available aliases: %w", err)
 	}
@@ -1043,7 +1043,7 @@ func (p *LoggerPlugin) GetAvailableAliases(ctx context.Context, limit int, query
 }
 
 func (p *LoggerPlugin) GetAvailableSelectedKeys(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "selected_key_id", "selected_key_name", limit, query)
+	results, err := p.logStore(ctx).GetDistinctKeyPairs(ctx, "selected_key_id", "selected_key_name", limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available selected keys: %w", err)
 	}
@@ -1051,7 +1051,7 @@ func (p *LoggerPlugin) GetAvailableSelectedKeys(ctx context.Context, limit int, 
 }
 
 func (p *LoggerPlugin) GetAvailableVirtualKeys(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "virtual_key_id", "virtual_key_name", limit, query)
+	results, err := p.logStore(ctx).GetDistinctKeyPairs(ctx, "virtual_key_id", "virtual_key_name", limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available virtual keys: %w", err)
 	}
@@ -1059,7 +1059,7 @@ func (p *LoggerPlugin) GetAvailableVirtualKeys(ctx context.Context, limit int, q
 }
 
 func (p *LoggerPlugin) GetAvailableRoutingRules(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	results, err := p.store.GetDistinctKeyPairs(ctx, "routing_rule_id", "routing_rule_name", limit, query)
+	results, err := p.logStore(ctx).GetDistinctKeyPairs(ctx, "routing_rule_id", "routing_rule_name", limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available routing rules: %w", err)
 	}
@@ -1069,25 +1069,25 @@ func (p *LoggerPlugin) GetAvailableRoutingRules(ctx context.Context, limit int, 
 // GetDimensionCostHistogram returns time-bucketed cost data grouped by the specified dimension.
 // Delegates to the underlying log store which uses materialized views on PostgreSQL for performance.
 func (p *LoggerPlugin) GetDimensionCostHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionCostHistogramResult, error) {
-	return p.store.GetDimensionCostHistogram(ctx, filters, bucketSizeSeconds, dimension)
+	return p.logStore(ctx).GetDimensionCostHistogram(ctx, filters, bucketSizeSeconds, dimension)
 }
 
 // GetDimensionTokenHistogram returns time-bucketed token usage grouped by the specified dimension.
 // Delegates to the underlying log store which uses materialized views on PostgreSQL for performance.
 func (p *LoggerPlugin) GetDimensionTokenHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionTokenHistogramResult, error) {
-	return p.store.GetDimensionTokenHistogram(ctx, filters, bucketSizeSeconds, dimension)
+	return p.logStore(ctx).GetDimensionTokenHistogram(ctx, filters, bucketSizeSeconds, dimension)
 }
 
 // GetDimensionLatencyHistogram returns time-bucketed latency percentiles grouped by the specified dimension.
 // Delegates to the underlying log store which uses materialized views on PostgreSQL for performance.
 func (p *LoggerPlugin) GetDimensionLatencyHistogram(ctx context.Context, filters logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionLatencyHistogramResult, error) {
-	return p.store.GetDimensionLatencyHistogram(ctx, filters, bucketSizeSeconds, dimension)
+	return p.logStore(ctx).GetDimensionLatencyHistogram(ctx, filters, bucketSizeSeconds, dimension)
 }
 
 // GetAvailableRoutingEngines returns all unique routing engine types used in logs.
 // Uses DISTINCT to avoid loading all rows when only unique values are needed.
 func (p *LoggerPlugin) GetAvailableRoutingEngines(ctx context.Context, limit int, query string) ([]string, error) {
-	engines, err := p.store.GetDistinctRoutingEngines(ctx, limit, query)
+	engines, err := p.logStore(ctx).GetDistinctRoutingEngines(ctx, limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available routing engines: %w", err)
 	}
@@ -1097,7 +1097,7 @@ func (p *LoggerPlugin) GetAvailableRoutingEngines(ctx context.Context, limit int
 // GetAvailableStopReasons returns all unique stop reason values from logs.
 // Uses DISTINCT to avoid loading all rows when only unique values are needed.
 func (p *LoggerPlugin) GetAvailableStopReasons(ctx context.Context, limit int, query string) ([]string, error) {
-	stopReasons, err := p.store.GetDistinctStopReasons(ctx, limit, query)
+	stopReasons, err := p.logStore(ctx).GetDistinctStopReasons(ctx, limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available stop reasons: %w", err)
 	}
@@ -1115,7 +1115,7 @@ func keyPairResultsToKeyPairs(results []logstore.KeyPairResult) []KeyPair {
 
 // GetAvailableMCPVirtualKeys returns all unique virtual key ID-Name pairs from MCP tool logs
 func (p *LoggerPlugin) GetAvailableMCPVirtualKeys(ctx context.Context, limit int, query string) ([]KeyPair, error) {
-	result, err := p.store.GetAvailableMCPVirtualKeys(ctx, limit, query)
+	result, err := p.logStore(ctx).GetAvailableMCPVirtualKeys(ctx, limit, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available virtual keys from MCP logs: %w", err)
 	}
@@ -1169,7 +1169,7 @@ func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.Se
 		Order:  "asc",
 	}
 
-	searchResult, err := p.store.SearchLogs(ctx, filters, pagination)
+	searchResult, err := p.logStore(ctx).SearchLogs(ctx, filters, pagination)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search logs for cost recalculation: %w", err)
 	}
@@ -1191,14 +1191,14 @@ func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.Se
 	}
 
 	if len(costUpdates) > 0 {
-		if err := p.store.BulkUpdateCost(ctx, costUpdates); err != nil {
+		if err := p.logStore(ctx).BulkUpdateCost(ctx, costUpdates); err != nil {
 			return nil, fmt.Errorf("failed to bulk update costs: %w", err)
 		}
 		result.Updated = len(costUpdates)
 	}
 
 	// Re-count how many logs still match the missing-cost filter after updates
-	remainingResult, err := p.store.SearchLogs(ctx, filters, logstore.PaginationOptions{
+	remainingResult, err := p.logStore(ctx).SearchLogs(ctx, filters, logstore.PaginationOptions{
 		Limit:  1, // we only need stats.TotalRequests for the count
 		Offset: 0,
 		SortBy: "timestamp",

@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# run.sh — Full load test orchestrator:
-#   1. Start Postgres + Kafka + fake-llm via Docker Compose
-#   2. Start dev Bifrost in the background (APP_DIR=../dev-config)
-#   3. Configure the Kafka observability connector and fake-llm provider
-#   4. Run the load test
-#   Docker services are kept running after the test completes.
+# run.sh — Tenant-store load test orchestrator:
+#   1. Start fake-llm (+ optional Kafka) via Docker Compose
+#   2. Start Bifrost with repo-root config.json (tenant_store.enabled=true)
+#   3. Seed the first MPilot tenant (global DB → tenant DB)
+#   4. Run governance tests (routing, rate limit, budget)
+#   5. Run the throughput load test with tenant JWT auth
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${COMPOSE_DIR}/.." && pwd)"
-DEV_CONFIG_DIR="${COMPOSE_DIR}/dev-config"
 
-BIFROST_URL="${BIFROST_URL:-http://localhost:8080}"
+BIFROST_PORT="${BIFROST_PORT:-8091}"
+BIFROST_URL="${BIFROST_URL:-http://localhost:${BIFROST_PORT}}"
+FAKE_LLM_PORT="${FAKE_LLM_PORT:-18000}"
 KAFKA_UI_URL="${KAFKA_UI_URL:-http://localhost:8090}"
 KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:29092}"
 KAFKA_TOPIC="${KAFKA_TOPIC:-bifrost-traces}"
-TOTAL_REQUESTS="${TOTAL_REQUESTS:-500000}"
-CONCURRENCY="${CONCURRENCY:-200}"
-POSTGRES_PORT="${POSTGRES_PORT:-5433}"
+TOTAL_REQUESTS="${TOTAL_REQUESTS:-5000}"
+CONCURRENCY="${CONCURRENCY:-50}"
+FAKE_LLM_URL="${FAKE_LLM_URL:-http://localhost:${FAKE_LLM_PORT}/}"
+RUN_LOAD_TEST="${RUN_LOAD_TEST:-1}"
+RUN_GOVERNANCE_TEST="${RUN_GOVERNANCE_TEST:-1}"
+START_KAFKA="${START_KAFKA:-0}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -31,92 +35,12 @@ log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Pre-flight checks
-# ─────────────────────────────────────────────────────────────────────────────
-log_info "Checking dependencies…"
-
-if ! command -v docker &>/dev/null; then
-    log_error "docker not found. Please install Docker Desktop or Docker Engine."
-    exit 1
-fi
-if ! docker compose version &>/dev/null 2>&1; then
-    log_error "docker compose (v2) not found. Please upgrade Docker."
-    exit 1
-fi
-if ! command -v python3 &>/dev/null; then
-    log_error "python3 not found. Please install Python 3.10+."
-    exit 1
-fi
-if ! python3 -c "import aiohttp" &>/dev/null 2>&1; then
-    log_warn "aiohttp not found — installing…"
-    pip3 install --quiet aiohttp
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Remove any conflicting containers from a previous run
-# ─────────────────────────────────────────────────────────────────────────────
-cleanup_conflicting_containers() {
-    local name
-    # Do not remove bifrost-postgres-fw — framework dev Postgres often owns :5432.
-    for name in bifrost-postgres kafka fake-llm kafka-ui; do
-        if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-            log_warn "Removing stale container '${name}'…"
-            docker rm -f "${name}" >/dev/null 2>&1 || {
-                log_error "Could not remove container '${name}'."
-                exit 1
-            }
-        fi
-    done
+ensure_python_deps() {
+    if ! python3 -c "import aiohttp, jwt, psycopg2" &>/dev/null 2>&1; then
+        log_warn "Installing Python deps from scripts/requirements.txt…"
+        pip3 install --quiet -r "${SCRIPT_DIR}/requirements.txt"
+    fi
 }
-
-# Returns 0 only when a known Bifrost Postgres container accepts bifrost/bifrost.
-postgres_is_ready() {
-    POSTGRES_EXEC_CONTAINER=""
-    local container
-    for container in bifrost-postgres bifrost-postgres-fw; do
-        if docker ps --format '{{.Names}}' | grep -qx "${container}"; then
-            if docker exec "${container}" pg_isready -U bifrost -d bifrost >/dev/null 2>&1; then
-                POSTGRES_EXEC_CONTAINER="${container}"
-                return 0
-            fi
-        fi
-    done
-    return 1
-}
-
-wait_for_postgres() {
-    local attempt=0
-    local max_attempts=30
-    log_info "Waiting for Postgres (localhost:${POSTGRES_PORT})…"
-    until postgres_is_ready; do
-        attempt=$(( attempt + 1 ))
-        if [[ ${attempt} -ge ${max_attempts} ]]; then
-            log_error "Postgres did not become healthy."
-            exit 1
-        fi
-        sleep 2
-    done
-    log_info "Postgres is ready (container: ${POSTGRES_EXEC_CONTAINER})."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Start Docker services: Postgres (if needed) + Kafka + fake-llm
-#    (must be up before Bifrost so config_store/logs_store connect successfully)
-# ─────────────────────────────────────────────────────────────────────────────
-log_info "Starting Docker services…"
-cd "${COMPOSE_DIR}"
-cleanup_conflicting_containers
-
-COMPOSE_SERVICES=(fake-llm kafka kafka-ui)
-if postgres_is_ready; then
-    log_info "Postgres already available — skipping load-test postgres container."
-else
-    COMPOSE_SERVICES=(postgres "${COMPOSE_SERVICES[@]}")
-fi
-
-docker compose pull --quiet --ignore-pull-failures 2>/dev/null || true
-docker compose up -d --build "${COMPOSE_SERVICES[@]}"
 
 wait_for_service() {
     local url="$1"
@@ -128,49 +52,90 @@ wait_for_service() {
         attempt=$(( attempt + 1 ))
         if [[ ${attempt} -ge ${max_attempts} ]]; then
             log_error "${name} did not become healthy after ${max_attempts} attempts."
-            docker compose logs --tail=30
-            exit 1
+            return 1
         fi
         sleep 2
     done
     log_info "${name} is ready."
 }
 
-wait_for_postgres
-
-wait_for_service "http://localhost:8000/health" "fake-llm" 40
-wait_for_service "${KAFKA_UI_URL}"              "Kafka UI"  40
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Start dev Bifrost in background (now that Postgres is up)
+# 1. Pre-flight
 # ─────────────────────────────────────────────────────────────────────────────
-BIFROST_STARTED_BY_US=0
-if curl -sf --max-time 2 "${BIFROST_URL}/health" >/dev/null 2>&1; then
-    log_info "Bifrost is already running at ${BIFROST_URL}."
-else
-    log_info "Starting dev Bifrost (APP_DIR=${DEV_CONFIG_DIR})…"
-    cd "${REPO_ROOT}"
-    APP_DIR="${DEV_CONFIG_DIR}" ./start-dev.sh > /tmp/bifrost-load-test.log 2>&1 &
-    BIFROST_PID=$!
-    BIFROST_STARTED_BY_US=1
-    log_info "Bifrost starting (pid ${BIFROST_PID}) — waiting for /health…"
-    attempt=0
-    until curl -sf --max-time 2 "${BIFROST_URL}/health" >/dev/null 2>&1; do
-        attempt=$(( attempt + 1 ))
-        if [[ ${attempt} -ge 60 ]]; then
-            log_error "Bifrost did not become healthy after 120s. See /tmp/bifrost-load-test.log"
-            exit 1
-        fi
-        sleep 2
-    done
-    log_info "Bifrost is ready."
+log_info "Checking dependencies…"
+command -v docker >/dev/null || { log_error "docker not found"; exit 1; }
+docker compose version >/dev/null 2>&1 || { log_error "docker compose v2 required"; exit 1; }
+command -v python3 >/dev/null || { log_error "python3 not found"; exit 1; }
+ensure_python_deps
+
+if [[ ! -f "${REPO_ROOT}/config.json" ]]; then
+    log_error "Missing ${REPO_ROOT}/config.json (tenant_store config)"
+    exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Configure Kafka connector and fake-llm provider on Bifrost
+# 2. Docker: fake-llm (+ optional Kafka)
 # ─────────────────────────────────────────────────────────────────────────────
-log_info "Configuring Kafka connector (brokers=${KAFKA_BROKERS}, topic=${KAFKA_TOPIC})…"
-kafka_payload=$(cat <<EOF
+log_info "Starting Docker services…"
+cd "${COMPOSE_DIR}"
+
+COMPOSE_SERVICES=(fake-llm)
+if [[ "${START_KAFKA}" == "1" ]]; then
+    COMPOSE_SERVICES+=(kafka kafka-ui)
+fi
+
+docker compose pull --quiet --ignore-pull-failures 2>/dev/null || true
+docker compose up -d --build "${COMPOSE_SERVICES[@]}"
+
+wait_for_service "http://localhost:${FAKE_LLM_PORT}/health" "fake-llm" 40
+if [[ "${START_KAFKA}" == "1" ]]; then
+    wait_for_service "${KAFKA_UI_URL}" "Kafka UI" 40
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Seed first tenant (schema patches before Bifrost opens DB connections)
+# ─────────────────────────────────────────────────────────────────────────────
+log_info "Seeding first tenant (global DB → tenant DB)…"
+python3 "${SCRIPT_DIR}/seed_tenant.py" --fake-llm-url "${FAKE_LLM_URL}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Start Bifrost with repo-root config.json (tenant store)
+# ─────────────────────────────────────────────────────────────────────────────
+BIFROST_STARTED_BY_US=0
+if curl -sf --max-time 2 "${BIFROST_URL}/health" >/dev/null 2>&1; then
+    log_warn "Bifrost already running at ${BIFROST_URL}."
+    log_warn "If seed applied new columns, restart Bifrost to avoid PG cached-plan errors."
+else
+    log_info "Starting Bifrost (APP_DIR=${REPO_ROOT})…"
+    cd "${REPO_ROOT}"
+    PORT="${BIFROST_PORT}" APP_DIR="${REPO_ROOT}" ./start-dev.sh > /tmp/bifrost-load-test.log 2>&1 &
+    BIFROST_PID=$!
+    BIFROST_STARTED_BY_US=1
+    log_info "Bifrost starting (pid ${BIFROST_PID})…"
+    wait_for_service "${BIFROST_URL}/health" "Bifrost" 90 || {
+        log_error "See /tmp/bifrost-load-test.log"
+        exit 1
+    }
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Governance tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ "${RUN_GOVERNANCE_TEST}" == "1" ]]; then
+    log_info "Running governance integration tests…"
+    if ! python3 "${SCRIPT_DIR}/governance_test.py" --bifrost-url "${BIFROST_URL}"; then
+        log_error "Governance tests failed — see output above."
+        exit 1
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Optional Kafka connector (legacy flush metrics path)
+# ─────────────────────────────────────────────────────────────────────────────
+if [[ "${START_KAFKA}" == "1" ]]; then
+    log_info "Configuring Kafka observability connector…"
+    kafka_payload=$(cat <<EOF
 {
   "enabled": true,
   "config": {
@@ -183,109 +148,53 @@ kafka_payload=$(cat <<EOF
 }
 EOF
 )
-http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X PUT "${BIFROST_URL}/api/plugins/kafka" \
-  -H "Content-Type: application/json" \
-  -d "${kafka_payload}")
-if [[ "${http_code}" != "200" ]]; then
-    log_error "PUT /api/plugins/kafka returned HTTP ${http_code}"
-    exit 1
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+      -X PUT "${BIFROST_URL}/api/plugins/kafka" \
+      -H "Content-Type: application/json" \
+      -d "${kafka_payload}" || echo "000")
+    if [[ "${http_code}" != "200" ]]; then
+        log_warn "PUT /api/plugins/kafka returned HTTP ${http_code} (non-fatal in tenant mode)"
+    fi
 fi
 
-log_info "Ensuring fake-llm provider exists…"
-provider_payload='{
-  "provider": "fake-llm",
-  "custom_provider_config": {
-    "base_provider_type": "openai",
-    "is_key_less": true
-  },
-  "network_config": {
-    "base_url": "http://localhost:8000/",
-    "default_request_timeout_in_seconds": 30,
-    "max_retries": 0,
-    "retry_backoff_initial": 500,
-    "retry_backoff_max": 5000
-  },
-  "keys": []
-}'
-http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST "${BIFROST_URL}/api/providers" \
-  -H "Content-Type: application/json" \
-  -d "${provider_payload}" || echo "000")
-if [[ "${http_code}" == "200" || "${http_code}" == "201" ]]; then
-    log_info "fake-llm provider created."
-elif [[ "${http_code}" == "409" ]]; then
-    log_info "fake-llm provider already exists."
-else
-    log_error "POST /api/providers returned HTTP ${http_code}"
-    exit 1
-fi
-
-# Pre-create Kafka topic so the idempotent producer does not fail on first write.
-if docker ps --format '{{.Names}}' | grep -qx kafka; then
-    log_info "Ensuring Kafka topic '${KAFKA_TOPIC}' exists…"
-    docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-        --bootstrap-server localhost:9092 \
-        --create --if-not-exists \
-        --topic "${KAFKA_TOPIC}" \
-        --partitions 1 \
-        --replication-factor 1 >/dev/null 2>&1 || true
-fi
-log_info "Connector setup complete."
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. Show service endpoints
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
 echo "  Service endpoints"
 echo "────────────────────────────────────────────"
-echo "  Bifrost (dev)      : ${BIFROST_URL}"
-echo "  Fake LLM API       : http://localhost:8000"
-echo "  Postgres           : localhost:${POSTGRES_PORT}  (db=bifrost)"
-echo "  Kafka broker       : ${KAFKA_BROKERS}"
-echo "  Kafka topic        : ${KAFKA_TOPIC}"
-echo "  Kafka UI           : ${KAFKA_UI_URL}"
+echo "  Bifrost (tenant)   : ${BIFROST_URL}"
+echo "  Fake LLM API       : http://localhost:${FAKE_LLM_PORT}"
+echo "  MPilot global DB   : localhost:5432/mpilotv2 (tenant_store.global)"
+echo "  Config             : ${REPO_ROOT}/config.json"
 echo "────────────────────────────────────────────"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Run load test
+# 7. Load test (tenant JWT)
 # ─────────────────────────────────────────────────────────────────────────────
-log_info "Running load test: ${TOTAL_REQUESTS} requests at concurrency ${CONCURRENCY}…"
-mkdir -p "${COMPOSE_DIR}/results"
-METRICS_FILE="${COMPOSE_DIR}/results/metrics-$(date +%Y%m%d-%H%M%S).json"
+if [[ "${RUN_LOAD_TEST}" == "1" ]]; then
+    log_info "Running load test: ${TOTAL_REQUESTS} requests @ concurrency ${CONCURRENCY}…"
+    mkdir -p "${COMPOSE_DIR}/results"
+    METRICS_FILE="${COMPOSE_DIR}/results/metrics-$(date +%Y%m%d-%H%M%S).json"
 
-python3 "${SCRIPT_DIR}/load_test.py" \
-    --total        "${TOTAL_REQUESTS}" \
-    --concurrency  "${CONCURRENCY}" \
-    --bifrost-url  "${BIFROST_URL}" \
-    --kafka-ui-url "${KAFKA_UI_URL}" \
-    --kafka-topic  "${KAFKA_TOPIC}" \
-    --kafka-container kafka \
-    --postgres-container "${POSTGRES_EXEC_CONTAINER:-bifrost-postgres}" \
-    --metrics-out  "${METRICS_FILE}"
+    MEASURE_FLUSH_FLAG=(--no-measure-flush)
+    if [[ "${START_KAFKA}" == "1" ]]; then
+        MEASURE_FLUSH_FLAG=(--measure-flush)
+    fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. Done — services left running
-# ─────────────────────────────────────────────────────────────────────────────
-echo ""
-log_info "Load test complete!"
-echo ""
-echo "  Bifrost UI:"
-echo "  → ${BIFROST_URL}"
-echo ""
-echo "  Kafka UI:"
-echo "  → ${KAFKA_UI_URL}"
-echo ""
-echo "  Browse Kafka trace records:"
-echo "  → ${KAFKA_UI_URL}/ui/clusters/local/all-topics/${KAFKA_TOPIC}/messages"
-echo ""
-echo "  To stop Docker services:"
-echo "  → cd \"${COMPOSE_DIR}\" && docker compose down"
-if [[ ${BIFROST_STARTED_BY_US} -eq 1 ]]; then
-    echo ""
-    echo "  To stop Bifrost (started by this script):"
-    echo "  → kill ${BIFROST_PID}"
+    python3 "${SCRIPT_DIR}/load_test.py" \
+        --total "${TOTAL_REQUESTS}" \
+        --concurrency "${CONCURRENCY}" \
+        --bifrost-url "${BIFROST_URL}" \
+        --model "fakellm-openai/gpt-4o-mini" \
+        --tenant-auth \
+        --config-json "${REPO_ROOT}/config.json" \
+        "${MEASURE_FLUSH_FLAG[@]}" \
+        --metrics-out "${METRICS_FILE}"
 fi
+
 echo ""
+log_info "Done."
+if [[ ${BIFROST_STARTED_BY_US} -eq 1 ]]; then
+    echo "  Stop Bifrost: kill ${BIFROST_PID}"
+fi
+echo "  Stop fake-llm: cd \"${COMPOSE_DIR}\" && docker compose down"

@@ -14,7 +14,6 @@ import (
 // TableRoutingRule represents a routing rule in the database.
 // Routing scope is expressed with scope_org_id and/or virtual_key_id (both nil = global).
 // org_id is reserved for MPilot tenant visibility and is not used by the routing engine.
-// Legacy scope/scope_id columns are kept in sync for older rows and DB tooling.
 type TableRoutingRule struct {
 	ID            string `gorm:"primaryKey;type:varchar(255)" json:"id"`
 	ConfigHash    string `gorm:"type:varchar(255)" json:"config_hash"` // Hash of config.json version, used for change detection
@@ -45,10 +44,6 @@ type TableRoutingRule struct {
 	ScopeOrgID   *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"scope_org_id,omitempty"`
 	VirtualKeyID *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"virtual_key_id,omitempty"`
 
-	// Legacy scope columns — synced from scope_org_id/virtual_key_id on save; hydrated on load.
-	Scope   string  `gorm:"type:varchar(50);not null" json:"-"`
-	ScopeID *string `gorm:"type:varchar(255)" json:"-"`
-
 	// Chaining
 	ChainRule bool `gorm:"not null;default:false" json:"chain_rule"` // If true, re-evaluates routing chain after this rule matches
 
@@ -74,58 +69,36 @@ func (r *TableRoutingRule) EnabledValue() bool {
 	return *r.Enabled
 }
 
-// HydrateAssociationFromLegacy populates scope_org_id/virtual_key_id from legacy scope columns.
-func (r *TableRoutingRule) HydrateAssociationFromLegacy() {
-	if r == nil {
+// applyLegacyScopeJSON maps config.json scope/scope_id into scope_org_id/virtual_key_id.
+func applyLegacyScopeJSON(r *TableRoutingRule, scope string, scopeID *string) {
+	if r == nil || strings.TrimSpace(scope) == "" {
 		return
 	}
 	if isNonEmptyString(r.ScopeOrgID) || isNonEmptyString(r.VirtualKeyID) {
 		return
 	}
-	switch r.Scope {
+	switch strings.TrimSpace(scope) {
 	case "org", "team", "customer":
-		if r.ScopeID != nil && *r.ScopeID != "" {
-			id := strings.TrimSpace(*r.ScopeID)
+		if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
+			id := strings.TrimSpace(*scopeID)
 			r.ScopeOrgID = &id
 		}
 	case "virtual_key":
-		if r.ScopeID != nil && *r.ScopeID != "" {
-			id := strings.TrimSpace(*r.ScopeID)
+		if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
+			id := strings.TrimSpace(*scopeID)
 			r.VirtualKeyID = &id
 		}
 	}
 }
 
-// SyncLegacyScopeFields writes legacy scope/scope_id from scope_org_id/virtual_key_id.
-func (r *TableRoutingRule) SyncLegacyScopeFields() {
-	if r == nil {
-		return
-	}
-	if isNonEmptyString(r.VirtualKeyID) {
-		r.Scope = "virtual_key"
-		r.ScopeID = r.VirtualKeyID
-		return
-	}
-	if isNonEmptyString(r.ScopeOrgID) {
-		r.Scope = "org"
-		id := strings.TrimSpace(*r.ScopeOrgID)
-		r.ScopeID = &id
-		return
-	}
-	r.Scope = "global"
-	r.ScopeID = nil
-}
-
-// NormalizeRoutingAssociation validates scope_org_id vs virtual_key_id and syncs legacy scope fields.
+// NormalizeRoutingAssociation validates scope_org_id vs virtual_key_id.
 func (r *TableRoutingRule) NormalizeRoutingAssociation() error {
 	if r == nil {
 		return fmt.Errorf("routing rule is nil")
 	}
-	r.HydrateAssociationFromLegacy()
 	if isNonEmptyString(r.ScopeOrgID) && isNonEmptyString(r.VirtualKeyID) {
 		return fmt.Errorf("routing rule cannot specify both scope_org_id and virtual_key_id")
 	}
-	r.SyncLegacyScopeFields()
 	return nil
 }
 
@@ -134,7 +107,6 @@ func (r *TableRoutingRule) RoutingRulesCacheKey() string {
 	if r == nil {
 		return "global:"
 	}
-	r.HydrateAssociationFromLegacy()
 	if isNonEmptyString(r.VirtualKeyID) {
 		return "virtual_key:" + strings.TrimSpace(*r.VirtualKeyID)
 	}
@@ -149,7 +121,6 @@ func (r *TableRoutingRule) RoutingScopeOrgID() string {
 	if r == nil {
 		return ""
 	}
-	r.HydrateAssociationFromLegacy()
 	if !isNonEmptyString(r.ScopeOrgID) {
 		return ""
 	}
@@ -294,17 +265,10 @@ func (r *TableRoutingRule) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*r = TableRoutingRule(temp.Alias)
-	if temp.Scope != "" {
-		r.Scope = temp.Scope
-	}
-	if temp.ScopeID != nil {
-		r.ScopeID = temp.ScopeID
-	}
+	applyLegacyScopeJSON(r, temp.Scope, temp.ScopeID)
 	if len(temp.Targets) > 0 {
 		applyLegacyRoutingTarget(r, temp.Targets[0])
 	}
-	r.HydrateAssociationFromLegacy()
-	r.SyncLegacyScopeFields()
 	return nil
 }
 
@@ -349,7 +313,6 @@ func (r *TableRoutingRule) AfterFind(tx *gorm.DB) error {
 			return err
 		}
 	}
-	r.HydrateAssociationFromLegacy()
 	if err := r.SyncRoutingOutputAssociations(tx); err != nil {
 		return err
 	}

@@ -80,7 +80,6 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget(t *testing.T) {
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 
-		Scope:    "global",
 		Priority: 1,
 	}
 
@@ -143,7 +142,6 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget_WithStore(t *testi
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 
-		Scope:    "global",
 		Priority: 1,
 	}
 
@@ -262,7 +260,6 @@ func TestHTTPTransportPreHook_BedrockRoutingRulePreservesTarget(t *testing.T) {
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 
-		Scope:    "global",
 		Priority: 1,
 	}
 

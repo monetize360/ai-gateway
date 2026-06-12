@@ -7,6 +7,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/tenantstore"
 	"github.com/valyala/fasthttp"
 )
@@ -41,6 +42,40 @@ func (c *Config) StoreFromContext(ctx context.Context) configstore.ConfigStore {
 		return nil
 	}
 	return c.TenantStore.Registry.GetStoreFromContext(ctx)
+}
+
+// LogStoreFromContext resolves the tenant LogStore from ctx, falling back to the global store.
+func (c *Config) LogStoreFromContext(ctx context.Context) logstore.LogStore {
+	if c == nil {
+		return nil
+	}
+	if c.TenantStore != nil && c.TenantStore.LogStoreManager != nil {
+		if store := c.TenantStore.LogStoreManager.GetLogStoreFromContext(ctx); store != nil {
+			return store
+		}
+	}
+	return c.LogsStore
+}
+
+// LogStoreFromRequestCtx resolves the tenant LogStore from a fasthttp request context.
+func (c *Config) LogStoreFromRequestCtx(ctx *fasthttp.RequestCtx) logstore.LogStore {
+	if c == nil {
+		return nil
+	}
+	if c.TenantStore != nil && c.TenantStore.LogStoreManager != nil {
+		if tenantID := TenantIDFromRequest(ctx); tenantID != "" {
+			return c.TenantStore.LogStoreManager.GetLogStoreForTenant(tenantID)
+		}
+	}
+	return c.LogsStore
+}
+
+// LogStoreResolver returns the per-tenant log store manager when configured.
+func (c *Config) LogStoreResolver() tenantstore.LogStoreResolver {
+	if c == nil || c.TenantStore == nil {
+		return nil
+	}
+	return c.TenantStore.LogStoreManager
 }
 
 // TenantIDFromContext reads a tenant ID from a standard or fasthttp request context.

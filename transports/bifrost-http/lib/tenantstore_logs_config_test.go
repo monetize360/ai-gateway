@@ -11,24 +11,21 @@ import (
 
 func TestMergeLogsStorePostgresFromTenantStore_InheritsGlobal(t *testing.T) {
 	tenantStore := &TenantStoreFileConfig{
-		MaxIdleConns: 4,
-		MaxOpenConns: 8,
+		Enabled: true,
 		Global: &TenantStoreGlobalPostgresFile{
-			Host:         "localhost",
-			Port:         "5432",
-			User:         "postgres",
-			Password:     "secret",
-			DBName:       "mpilotv2",
-			SSLMode:      "disable",
-			MaxIdleConns: 2,
-			MaxOpenConns: 10,
+			Host:     "db.example",
+			Port:     "5432",
+			User:     "postgres",
+			Password: "secret",
+			DBName:   "mpilotv2",
+			SSLMode:  "disable",
 		},
+		MaxIdleConns: 2,
+		MaxOpenConns: 10,
 	}
-
 	pg := &logstore.PostgresConfig{}
 	require.NoError(t, MergeLogsStorePostgresFromTenantStore(pg, tenantStore))
-
-	assert.Equal(t, "localhost", pg.Host.GetValue())
+	assert.Equal(t, "db.example", pg.Host.GetValue())
 	assert.Equal(t, "5432", pg.Port.GetValue())
 	assert.Equal(t, "postgres", pg.User.GetValue())
 	assert.Equal(t, "secret", pg.Password.GetValue())
@@ -60,9 +57,6 @@ func TestPrepareLogsStoreConfig_OmittedPostgresConfig(t *testing.T) {
 	var configData ConfigData
 	require.NoError(t, json.Unmarshal([]byte(raw), &configData))
 	require.NoError(t, prepareLogsStoreConfig(&configData))
-
-	pg, ok := configData.LogsStoreConfig.Config.(*logstore.PostgresConfig)
-	require.True(t, ok)
-	assert.Equal(t, "db.example", pg.Host.GetValue())
-	assert.Equal(t, "mpilotv2", pg.DBName.GetValue())
+	// Per-tenant routing opens one log store per tenant DB at startup.
+	assert.Nil(t, configData.LogsStoreConfig.Config)
 }

@@ -232,7 +232,6 @@ func TestEvaluateRoutingRules_GlobalRuleMatches(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 
@@ -282,7 +281,6 @@ func TestEvaluateRoutingRules_PinnedKeyPropagation(t *testing.T) {
 		KeyID:    bifrost.Ptr(pinnedKeyID),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -333,7 +331,6 @@ func TestEvaluateRoutingRules_ScopePrecedence(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), globalRule))
@@ -346,10 +343,9 @@ func TestEvaluateRoutingRules_ScopePrecedence(t *testing.T) {
 		
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
-		Enabled:  bifrost.Ptr(true),
-		Scope:    "virtual_key",
-		ScopeID:  bifrost.Ptr("vk-123"),
-		Priority: 10,
+		Enabled:      bifrost.Ptr(true),
+		VirtualKeyID: bifrost.Ptr("vk-123"),
+		Priority:     10,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), vkRule))
 
@@ -397,7 +393,6 @@ func TestEvaluateRoutingRules_PriorityOrdering(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 10,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule1))
@@ -411,7 +406,6 @@ func TestEvaluateRoutingRules_PriorityOrdering(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule2))
@@ -446,7 +440,6 @@ func TestResolveRoutingWithFallback_RuleMatches(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -512,7 +505,6 @@ func TestEvaluateRoutingRules_DisabledRulesIgnored(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(false),
-		Scope:    "global",
 		Priority: 10,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), disabledRule))
@@ -526,7 +518,6 @@ func TestEvaluateRoutingRules_DisabledRulesIgnored(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), enabledRule))
@@ -563,7 +554,6 @@ func TestEvaluateRoutingRules_ComplexExpression(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -607,7 +597,6 @@ func TestEvaluateRoutingRules_NilVirtualKey(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -644,7 +633,6 @@ func TestEvaluateRoutingRules_MissingHeaderGracefully(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
-		Scope:    "global",
 		Priority: 0,
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -689,7 +677,6 @@ func TestEvaluateRoutingRules_ChainRuleReEvaluation(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  0,
 		ChainRule: true,
 	}
@@ -704,7 +691,6 @@ func TestEvaluateRoutingRules_ChainRuleReEvaluation(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  1,
 		ChainRule: false,
 	}
@@ -747,7 +733,6 @@ func TestEvaluateRoutingRules_TerminalRuleStopsChain(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  0,
 		ChainRule: false,
 	}
@@ -762,7 +747,6 @@ func TestEvaluateRoutingRules_TerminalRuleStopsChain(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  1,
 		ChainRule: false,
 	}
@@ -805,7 +789,6 @@ func TestEvaluateRoutingRules_SelfLoopContinuesToNextRule(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  0,
 		ChainRule: true,
 	}
@@ -820,7 +803,6 @@ func TestEvaluateRoutingRules_SelfLoopContinuesToNextRule(t *testing.T) {
 		Provider: bifrost.Ptr("anthropic"), Model: bifrost.Ptr("claude-3"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  1,
 		ChainRule: false,
 	}
@@ -861,7 +843,6 @@ func TestEvaluateRoutingRules_SelfLoopAloneTerminates(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  0,
 		ChainRule: true,
 	}
@@ -904,7 +885,6 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  0,
 		ChainRule: true,
 	}
@@ -919,7 +899,6 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  1,
 		ChainRule: true,
 	}
@@ -934,7 +913,6 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		Provider: bifrost.Ptr("anthropic"), Model: bifrost.Ptr("claude-3"),
 
 		Enabled:   bifrost.Ptr(true),
-		Scope:     "global",
 		Priority:  2,
 		ChainRule: false,
 	}

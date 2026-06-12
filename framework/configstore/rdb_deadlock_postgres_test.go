@@ -221,7 +221,6 @@ func routingRuleFixture(id string, priority int, provider string) *tables.TableR
 		Name:          id,
 		Enabled:       &enabled,
 		CelExpression: "true",
-		Scope:         "global",
 		Priority:      priority,
 		Provider: &provider,
 		Model:    &model,

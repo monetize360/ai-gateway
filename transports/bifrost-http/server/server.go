@@ -1424,6 +1424,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if tenantHolder != nil {
 			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey, tenantHolder.Registry)
 		}
+		if err := lib.InitTenantLogStores(ctx, s.Config.TenantStore, s.Config.LogsStoreConfig); err != nil {
+			return fmt.Errorf("failed to initialise tenant log stores: %v", err)
+		}
 	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)

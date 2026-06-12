@@ -1219,8 +1219,11 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 // Values written to context on success:
 //   - BifrostContextKeyTenantID                — tenantId claim (UUID)
 //   - BifrostContextKeyGovernanceVirtualKeyID  — virtualKey claim (UUID, governance_virtual_keys.id)
-//   - BifrostContextKeyUserID                  — userId claim (UUID)
+//   - BifrostContextKeyVirtualKey              — same as governance virtual key id (for governance + routing)
 //   - BifrostContextKeyGovernanceOrgID         — morgId claim (UUID) when present
+//
+// The JWT userId claim is intentionally not copied into context: MPilot tenant auth
+// attributes all governance usage (budget, rate limits, finops logs) to the virtual key.
 //
 // The JWT key is shared across all tenants and loaded from config.json at
 // startup. Both RS256 (PEM RSA public key) and HS256 (HMAC secret) are
@@ -1297,9 +1300,6 @@ func (m *TenantMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
 			ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
 			ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, claims.VirtualKey)
 			ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, claims.VirtualKey)
-			if claims.UserID != "" {
-				ctx.SetUserValue(schemas.BifrostContextKeyUserID, claims.UserID)
-			}
 			if claims.MorgID != "" {
 				ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
 			}

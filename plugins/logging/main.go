@@ -21,6 +21,7 @@ import (
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/streaming"
+	"github.com/maximhq/bifrost/framework/tenantstore"
 )
 
 const (
@@ -149,6 +150,7 @@ func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, 
 	if !ok || deferredChan == nil {
 		return
 	}
+	tenantID := tenantstore.TenantIDFromContext(ctx)
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -183,8 +185,13 @@ func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, 
 		// then fail
 		var found bool
 		var findErr error
+		store := p.logStoreForTenant(tenantID)
+		if store == nil {
+			p.logger.Warn("log store not available for deferred usage update on request %s", requestID)
+			return
+		}
 		for i := 0; i < 3; i++ {
-			found, findErr = p.store.IsLogEntryPresent(p.ctx, requestID)
+			found, findErr = store.IsLogEntryPresent(p.ctx, requestID)
 			if findErr != nil {
 				p.logger.Warn("failed to check if log entry is present for request %s: %v", requestID, findErr)
 				continue
@@ -198,7 +205,7 @@ func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, 
 			p.logger.Warn("log entry not found for request %s after 3 retries. failed to update deferred usage for large payload request", requestID)
 			return
 		}
-		if updErr := p.store.Update(p.ctx, requestID, usageUpdates); updErr != nil {
+		if updErr := store.Update(p.ctx, requestID, usageUpdates); updErr != nil {
 			p.logger.Warn("failed to update deferred usage for request %s: %v", requestID, updErr)
 		}
 	}()
@@ -273,6 +280,7 @@ type Config struct {
 type LoggerPlugin struct {
 	ctx                    context.Context
 	store                  logstore.LogStore
+	logStoreResolver       tenantstore.LogStoreResolver
 	disableContentLogging  *bool
 	loggingHeaders         *[]string // Pointer to live config slice for headers to capture in metadata
 	pricingManager         *modelcatalog.ModelCatalog
@@ -302,11 +310,11 @@ type LoggerPlugin struct {
 }
 
 // Init creates new logger plugin with given log store
-func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore logstore.LogStore, pricingManager *modelcatalog.ModelCatalog, mcpCatalog *mcpcatalog.MCPCatalog) (*LoggerPlugin, error) {
+func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore logstore.LogStore, logStoreResolver tenantstore.LogStoreResolver, pricingManager *modelcatalog.ModelCatalog, mcpCatalog *mcpcatalog.MCPCatalog) (*LoggerPlugin, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
-	if logsStore == nil {
+	if logsStore == nil && logStoreResolver == nil {
 		return nil, fmt.Errorf("logs store cannot be nil")
 	}
 	if pricingManager == nil {
@@ -320,6 +328,7 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 	plugin := &LoggerPlugin{
 		ctx:                   ctx,
 		store:                 logsStore,
+		logStoreResolver:      logStoreResolver,
 		pricingManager:        pricingManager,
 		mcpCatalog:            mcpCatalog,
 		disableContentLogging: config.DisableContentLogging,
@@ -361,6 +370,24 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 	return plugin, nil
 }
 
+func (p *LoggerPlugin) logStore(ctx context.Context) logstore.LogStore {
+	if p.logStoreResolver != nil {
+		if store := p.logStoreResolver.GetLogStoreFromContext(ctx); store != nil {
+			return store
+		}
+	}
+	return p.store
+}
+
+func (p *LoggerPlugin) logStoreForTenant(tenantID string) logstore.LogStore {
+	if tenantID != "" && p.logStoreResolver != nil {
+		if store := p.logStoreResolver.GetLogStoreForTenant(tenantID); store != nil {
+			return store
+		}
+	}
+	return p.store
+}
+
 // SetClusterNodeID sets the cluster node ID that will be attached to all log entries.
 // Used in clustered deployments to attribute log entries to specific nodes for
 // disconnected node usage recovery. Uses atomic.Value since it is written at
@@ -389,13 +416,30 @@ func (p *LoggerPlugin) cleanupOldProcessingLogs() {
 	thirtyMinutesAgo := time.Now().UTC().Add(-1 * 30 * time.Minute)
 
 	// Delete LLM processing logs older than 30 minutes
-	if err := p.store.Flush(p.ctx, thirtyMinutesAgo); err != nil {
-		p.logger.Warn("failed to cleanup old processing LLM logs: %v", err)
+	flushLLM := func(store logstore.LogStore) {
+		if store == nil {
+			return
+		}
+		if err := store.Flush(p.ctx, thirtyMinutesAgo); err != nil {
+			p.logger.Warn("failed to cleanup old processing LLM logs: %v", err)
+		}
 	}
-
-	// Delete MCP tool processing logs older than 30 minutes
-	if err := p.store.FlushMCPToolLogs(p.ctx, thirtyMinutesAgo); err != nil {
-		p.logger.Warn("failed to cleanup old processing MCP tool logs: %v", err)
+	flushMCP := func(store logstore.LogStore) {
+		if store == nil {
+			return
+		}
+		if err := store.FlushMCPToolLogs(p.ctx, thirtyMinutesAgo); err != nil {
+			p.logger.Warn("failed to cleanup old processing MCP tool logs: %v", err)
+		}
+	}
+	if p.logStoreResolver != nil {
+		p.logStoreResolver.ForEachStore(func(_ string, store logstore.LogStore) {
+			flushLLM(store)
+			flushMCP(store)
+		})
+	} else {
+		flushLLM(p.store)
+		flushMCP(p.store)
 	}
 
 	// Clean up stale pending log entries (requests where PostLLMHook never fired)
@@ -1168,19 +1212,27 @@ drainQueue:
 // Multiple entries per traceID are supported (e.g. fallback/retry attempts within the same trace).
 func (p *LoggerPlugin) storeOrEnqueueEntry(ctx *schemas.BifrostContext, entry *logstore.Log, callback func(entry *logstore.Log)) {
 	traceID, _ := ctx.Value(schemas.BifrostContextKeyTraceID).(string)
+	tenantID := tenantstore.TenantIDFromContext(ctx)
 	if traceID != "" {
 		// Append to slice for Inject() to pick up — supports multiple attempts per trace
-		existing, loaded := p.pendingLogsToInject.LoadOrStore(traceID, &pendingInjectEntries{entries: []*logstore.Log{entry}, createdAt: time.Now()})
+		existing, loaded := p.pendingLogsToInject.LoadOrStore(traceID, &pendingInjectEntries{
+			tenantID:  tenantID,
+			entries:   []*logstore.Log{entry},
+			createdAt: time.Now(),
+		})
 		if !loaded {
 			return
 		}
 		pending := existing.(*pendingInjectEntries)
 		pending.mu.Lock()
+		if pending.tenantID == "" {
+			pending.tenantID = tenantID
+		}
 		pending.entries = append(pending.entries, entry)
 		pending.mu.Unlock()
 	} else {
 		// Fallback: no tracing (Go SDK path), enqueue directly
-		p.enqueueLogEntry(entry, callback)
+		p.enqueueLogEntry(tenantID, entry, callback)
 	}
 }
 
@@ -1212,7 +1264,7 @@ func (p *LoggerPlugin) Inject(_ context.Context, trace *schemas.Trace) error {
 	for _, entry := range pending.entries {
 		entry.PluginLogs = pluginLogsJSON
 		p.logger.Debug("Inject: enqueuing log entry %s", entry.ID)
-		p.enqueueLogEntry(entry, p.makePostWriteCallback(nil))
+		p.enqueueLogEntry(pending.tenantID, entry, p.makePostWriteCallback(nil))
 	}
 	return nil
 }
@@ -1463,7 +1515,7 @@ func (p *LoggerPlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schemas.Bi
 	p.mu.Lock()
 	callback := p.mcpToolLogCallback
 	p.mu.Unlock()
-	p.enqueueMCPToolLogEntry(entry, callback)
+	p.enqueueMCPToolLogEntry(tenantstore.TenantIDFromContext(ctx), entry, callback)
 
 	return resp, bifrostErr, nil
 }

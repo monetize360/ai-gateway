@@ -81,7 +81,7 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal logging plugin config: %w", err)
 		}
 		return logging.Init(ctx, loggingConfig, logger, bifrostConfig.LogsStore,
-			bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog)
+			bifrostConfig.LogStoreResolver(), bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog)
 
 	case governance.PluginName:
 		governanceConfig, err := MarshalPluginConfig[governance.Config](pluginConfig)
@@ -196,7 +196,8 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	s.Config.SetPluginOrderInfo(prompts.PluginName, builtinPlacement, schemas.Ptr(2))
 
 	// 3. Logging (if enabled)
-	if (s.Config.ClientConfig.EnableLogging == nil || *s.Config.ClientConfig.EnableLogging) && s.Config.LogsStore != nil {
+	hasLogStore := s.Config.LogsStore != nil || s.Config.LogStoreResolver() != nil
+	if (s.Config.ClientConfig.EnableLogging == nil || *s.Config.ClientConfig.EnableLogging) && hasLogStore {
 		config := &logging.Config{
 			DisableContentLogging: &s.Config.ClientConfig.DisableContentLogging,
 			LoggingHeaders:        &s.Config.ClientConfig.LoggingHeaders,

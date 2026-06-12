@@ -401,7 +401,9 @@ func reconcileRateLimitRequests(
 	for _, old := range existing {
 		if !matchedIDs[old.ID] {
 			if err := store.DeleteRateLimit(ctx, old.ID, tx); err != nil {
-				return nil, fmt.Errorf("failed to delete removed rate limit: %w", err)
+				if !errors.Is(err, configstore.ErrNotFound) {
+					return nil, fmt.Errorf("failed to delete removed rate limit: %w", err)
+				}
 			}
 		}
 	}
@@ -3057,7 +3059,6 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		// Filter rules by scope and scopeID
 		var rules []configstoreTables.TableRoutingRule
 		for _, rule := range inMemoryRules {
-			rule.HydrateAssociationFromLegacy()
 			if scopeOrgID != "" {
 				if rule.RoutingScopeOrgID() != scopeOrgID {
 					continue

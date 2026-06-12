@@ -90,3 +90,47 @@ func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger sch
 
 	return &RDBLogStore{db: db, logger: logger}, nil
 }
+
+// NewPostgresLogStoreFromDSN opens a postgres log store from a libpq DSN.
+// Schema management is the caller's responsibility; Bifrost only opens a runtime pool.
+func NewPostgresLogStoreFromDSN(ctx context.Context, dsn string, maxIdleConns, maxOpenConns int, logger schemas.Logger) (LogStore, error) {
+	if dsn == "" {
+		return nil, fmt.Errorf("postgres dsn is required")
+	}
+	_ = ctx
+
+	db, err := gorm.Open(postgres.New(postgres.Config{DSN: dsn}), &gorm.Config{
+		Logger: newGormLogger(logger),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		_ = sqlDBClose(db)
+		return nil, err
+	}
+
+	if maxIdleConns == 0 {
+		maxIdleConns = 5
+	}
+	if maxOpenConns == 0 {
+		maxOpenConns = 50
+	}
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+
+	return &RDBLogStore{db: db, logger: logger}, nil
+}
+
+func sqlDBClose(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}

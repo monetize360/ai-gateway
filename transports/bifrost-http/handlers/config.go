@@ -167,7 +167,7 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 	}
 	mapConfig["is_db_connected"] = h.store.StoreFromRequestCtx(ctx) != nil
 	mapConfig["is_cache_connected"] = h.store.VectorStore != nil
-	mapConfig["is_logs_connected"] = h.store.LogsStore != nil
+	mapConfig["is_logs_connected"] = h.store.LogsStore != nil || h.store.LogStoreResolver() != nil
 	// Fetching proxy config
 	if h.store.StoreFromRequestCtx(ctx) != nil {
 		proxyConfig, err := h.store.StoreFromRequestCtx(ctx).GetProxyConfig(ctx)

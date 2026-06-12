@@ -160,6 +160,25 @@ async def restore_permissive_limits_via_api(
         raise RuntimeError(f"failed to restore permissive limits: HTTP {status}: {body[:300]}")
 
 
+async def put_routing_rule(
+    session: aiohttp.ClientSession,
+    bifrost_url: str,
+    token: str,
+    rule_id: str,
+    body: dict,
+) -> tuple[int, str]:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with session.put(
+        f"{bifrost_url}/api/governance/routing-rules/{rule_id}",
+        json=body,
+        headers=headers,
+        allow_redirects=False,
+        timeout=aiohttp.ClientTimeout(total=60),
+    ) as resp:
+        text = await resp.text()
+        return resp.status, text
+
+
 async def test_routing(
     session: aiohttp.ClientSession,
     bifrost_url: str,
@@ -168,24 +187,39 @@ async def test_routing(
     refresh_interval: int,
 ) -> tuple[bool, str]:
     print("\n── Routing rule ──")
-    set_routing_enabled(False)
-    wait_for_governance_sync(sync_wait, refresh_interval)
+    await restore_permissive_limits_via_api(session, bifrost_url, token)
+    status, body = await put_routing_rule(
+        session,
+        bifrost_url,
+        token,
+        LOAD_TEST_ROUTING_RULE_ID,
+        {"enabled": False},
+    )
+    if status != 200:
+        return False, f"failed to disable routing rule via API: HTTP {status}: {body[:300]}"
 
     status_off, _, raw_off = await post_chat(session, bifrost_url, token, DECOY_MODEL)
     if status_off == 200:
         return False, f"expected failure without routing rule, got HTTP 200: {raw_off[:200]}"
 
-    set_routing_enabled(True)
-    wait_for_governance_sync(sync_wait, refresh_interval)
+    status, body = await put_routing_rule(
+        session,
+        bifrost_url,
+        token,
+        LOAD_TEST_ROUTING_RULE_ID,
+        {"enabled": True},
+    )
+    if status != 200:
+        return False, f"failed to re-enable routing rule via API: HTTP {status}: {body[:300]}"
 
-    status_on, body, raw_on = await post_chat(session, bifrost_url, token, DECOY_MODEL)
+    status_on, body_json, raw_on = await post_chat(session, bifrost_url, token, DECOY_MODEL)
     if status_on != 200:
         return False, f"expected HTTP 200 with routing rule, got {status_on}: {raw_on[:300]}"
 
-    if not body or "choices" not in body:
-        return False, f"unexpected body with routing rule: {body}"
+    if not body_json or "choices" not in body_json:
+        return False, f"unexpected body with routing rule: {body_json}"
 
-    model = body.get("model", "")
+    model = body_json.get("model", "")
     print(f"  without rule: blocked (HTTP {status_off})")
     print(f"  with rule   : HTTP 200, response model={model!r}")
     return True, "routing rule applied (decoy openai → fakellm-openai)"
@@ -199,8 +233,7 @@ async def test_rate_limit(
     refresh_interval: int,
 ) -> tuple[bool, str]:
     print("\n── Rate limit ──")
-    # Use governance API so in-memory limits update immediately. SQL-only changes are
-    # overwritten on the next tenant sync (dump-then-refresh), which made this test flaky.
+    await restore_permissive_limits_via_api(session, bifrost_url, token)
     status, body = await put_virtual_key(
         session,
         bifrost_url,
@@ -241,6 +274,7 @@ async def test_budget(
     refresh_interval: int,
 ) -> tuple[bool, str]:
     print("\n── Budget ──")
+    await restore_permissive_limits_via_api(session, bifrost_url, token)
     budget_payload = {
         "budgets": [
             {
@@ -248,25 +282,24 @@ async def test_budget(
                 "max_limit": 0.01,
                 "reset_duration": BUDGET_RESET_DURATION,
             }
-        ]
+        ],
+        "reset_budget_usage": True,
     }
     status, body = await put_virtual_key(session, bifrost_url, token, LOAD_TEST_VK_ID, budget_payload)
     if status != 200:
         return False, f"failed to tighten budget via API: HTTP {status}: {body[:300]}"
 
-    # Pre-exhaust budget in DB, then reload VK so in-memory usage matches DB.
-    set_budget(0.01, 0.01)
-    status, body = await put_virtual_key(session, bifrost_url, token, LOAD_TEST_VK_ID, budget_payload)
-    if status != 200:
-        return False, f"failed to reload budget state via API: HTTP {status}: {body[:300]}"
+    for attempt in range(1, 16):
+        status, _, raw = await post_chat(session, bifrost_url, token, ROUTED_MODEL)
+        if status == 402:
+            print(f"  blocked at HTTP 402 on attempt {attempt}")
+            await restore_permissive_limits_via_api(session, bifrost_url, token)
+            return True, "budget enforced (402)"
+        if status != 200:
+            return False, f"expected HTTP 200 or 402, got {status} on attempt {attempt}: {raw[:300]}"
 
-    status, _, raw = await post_chat(session, bifrost_url, token, ROUTED_MODEL)
-    if status != 402:
-        return False, f"expected HTTP 402 when budget exhausted, got {status}: {raw[:300]}"
-
-    print("  blocked at HTTP 402 as expected")
     await restore_permissive_limits_via_api(session, bifrost_url, token)
-    return True, "budget enforced (402)"
+    return False, "budget was not exhausted after 15 requests (restart Bifrost after seed if counters are stale)"
 
 
 async def run_tests(args: argparse.Namespace) -> bool:
@@ -287,12 +320,28 @@ async def run_tests(args: argparse.Namespace) -> bool:
     results: list[tuple[str, bool, str]] = []
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(connector=connector) as session:
-        for name, coro in (
-            ("routing", test_routing(session, args.bifrost_url, token, args.sync_wait, cfg.refresh_interval_seconds)),
-            ("rate_limit", test_rate_limit(session, args.bifrost_url, token, args.sync_wait, cfg.refresh_interval_seconds)),
-            ("budget", test_budget(session, args.bifrost_url, token, args.sync_wait, cfg.refresh_interval_seconds)),
-        ):
-            ok, detail = await coro
+        await restore_permissive_limits_via_api(session, args.bifrost_url, token)
+        await put_routing_rule(
+            session,
+            args.bifrost_url,
+            token,
+            LOAD_TEST_ROUTING_RULE_ID,
+            {"enabled": True},
+        )
+
+        test_cases = (
+            ("rate_limit", test_rate_limit),
+            ("budget", test_budget),
+            ("routing", test_routing),
+        )
+        for name, test_fn in test_cases:
+            ok, detail = await test_fn(
+                session,
+                args.bifrost_url,
+                token,
+                args.sync_wait,
+                cfg.refresh_interval_seconds,
+            )
             results.append((name, ok, detail))
             mark = "PASS" if ok else "FAIL"
             print(f"\n  [{mark}] {name}: {detail}")
@@ -303,6 +352,14 @@ async def run_tests(args: argparse.Namespace) -> bool:
     except Exception as exc:
         print(f"\n  [WARN] cleanup restore failed: {exc}")
     set_routing_enabled(True)
+    async with aiohttp.ClientSession() as cleanup_session:
+        await put_routing_rule(
+            cleanup_session,
+            args.bifrost_url,
+            token,
+            LOAD_TEST_ROUTING_RULE_ID,
+            {"enabled": True},
+        )
 
     passed = all(ok for _, ok, _ in results)
     print("\n" + "=" * 60)

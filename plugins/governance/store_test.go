@@ -767,8 +767,6 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 
 		Fallbacks:       nil,
 		ParsedFallbacks: []string{"azure/gpt-4-turbo"},
-		Scope:           "global",
-		ScopeID:         nil,
 		Priority:        10,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -825,24 +823,18 @@ func TestGovernanceStore_RoutingRules_PriorityOrdering(t *testing.T) {
 			ID:       "1",
 			Name:     "Priority 5",
 			Priority: 5,
-			Scope:    "global",
-			ScopeID:  nil,
 			Enabled:  bifrost.Ptr(true),
 		},
 		{
 			ID:       "2",
 			Name:     "Priority 20",
 			Priority: 20,
-			Scope:    "global",
-			ScopeID:  nil,
 			Enabled:  bifrost.Ptr(true),
 		},
 		{
 			ID:       "3",
 			Name:     "Priority 10",
 			Priority: 10,
-			Scope:    "global",
-			ScopeID:  nil,
 			Enabled:  bifrost.Ptr(true),
 		},
 	}
@@ -870,16 +862,12 @@ func TestGovernanceStore_RoutingRules_DisabledRulesFiltered(t *testing.T) {
 		ID:      "1",
 		Name:    "Enabled Rule",
 		Enabled: bifrost.Ptr(true),
-		Scope:   "global",
-		ScopeID: nil,
 	}
 
 	disabledRule := &configstoreTables.TableRoutingRule{
 		ID:      "2",
 		Name:    "Disabled Rule",
 		Enabled: bifrost.Ptr(false),
-		Scope:   "global",
-		ScopeID: nil,
 	}
 
 	err = store.UpdateRoutingRuleInMemory(context.Background(), enabledRule)
@@ -903,8 +891,6 @@ func TestGovernanceStore_RoutingRules_DeleteRule(t *testing.T) {
 		ID:      "1",
 		Name:    "Test Rule",
 		Enabled: bifrost.Ptr(true),
-		Scope:   "global",
-		ScopeID: nil,
 	}
 
 	// Add rule
@@ -1110,7 +1096,6 @@ func TestCompileAndCacheProgram_CacheInvalidation(t *testing.T) {
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
-		Scope:   "global",
 	}
 
 	// Compile and cache
@@ -1143,7 +1128,6 @@ func TestCompileAndCacheProgram_CacheInvalidationOnDelete(t *testing.T) {
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
-		Scope:   "global",
 	}
 
 	// Compile and cache
