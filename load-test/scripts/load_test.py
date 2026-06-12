@@ -16,6 +16,7 @@ import math
 import subprocess
 import sys
 import time
+from pathlib import Path
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ except ImportError:
 
 TOTAL_REQUESTS_DEFAULT = 5_000
 CONCURRENCY_DEFAULT = 50
+TENANT_AUTH_DEFAULT = False
 CHUNK_SIZE_DEFAULT = 10_000
 BIFROST_URL_DEFAULT = "http://localhost:8080"
 KAFKA_UI_URL_DEFAULT = "http://localhost:8090"
@@ -313,12 +315,18 @@ async def send_request(
     request_id: int,
     stats: OnlineLatencyStats,
     semaphore: asyncio.Semaphore,
+    *,
+    model: str,
+    auth_header: Optional[str],
 ) -> None:
     prompt = SAMPLE_PROMPTS[request_id % len(SAMPLE_PROMPTS)]
     payload = {
-        "model": "fake-llm/gpt-4o-mini",
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    headers = {}
+    if auth_header:
+        headers["Authorization"] = auth_header
 
     start = time.monotonic()
     success = False
@@ -327,6 +335,8 @@ async def send_request(
             async with session.post(
                 f"{bifrost_url}/v1/chat/completions",
                 json=payload,
+                headers=headers or None,
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 body = await resp.json()
@@ -343,6 +353,9 @@ async def run_requests(
     bifrost_url: str,
     chunk_size: int,
     progress_interval: int,
+    *,
+    model: str,
+    auth_header: Optional[str],
 ) -> tuple[OnlineLatencyStats, float]:
     stats = OnlineLatencyStats()
     semaphore = asyncio.Semaphore(concurrency)
@@ -354,7 +367,15 @@ async def run_requests(
         for chunk_start in range(0, total, chunk_size):
             chunk_end = min(chunk_start + chunk_size, total)
             tasks = [
-                send_request(session, bifrost_url, i, stats, semaphore)
+                send_request(
+                    session,
+                    bifrost_url,
+                    i,
+                    stats,
+                    semaphore,
+                    model=model,
+                    auth_header=auth_header,
+                )
                 for i in range(chunk_start, chunk_end)
             ]
             await asyncio.gather(*tasks)
@@ -490,8 +511,27 @@ async def run_load_test(args: argparse.Namespace) -> bool:
     print(f"  Concurrency     : {args.concurrency}")
     print(f"  Chunk size      : {args.chunk_size:,}")
     print(f"  Kafka topic     : {args.kafka_topic}")
+    print(f"  Model           : {args.model}")
+    print(f"  Tenant JWT      : {args.tenant_auth}")
     print(f"  Measure flush   : {args.measure_flush}")
     print("=" * 60 + "\n")
+
+    auth_header: Optional[str] = None
+    if args.tenant_auth:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from tenant_env import (
+            LOAD_TEST_VK_ID,
+            first_tenant,
+            first_tenant_user_id,
+            load_tenant_store_config,
+            load_tenant_auth_token,
+        )
+
+        cfg = load_tenant_store_config(Path(args.config_json) if args.config_json else None)
+        tenant = first_tenant(cfg)
+        user_id = first_tenant_user_id(cfg, tenant)
+        auth_header = f"Bearer {load_tenant_auth_token(tenant.tenant_id, LOAD_TEST_VK_ID, user_id=user_id)}"
+        print(f"  Tenant ID       : {tenant.tenant_id} ({tenant.db_name})")
 
     progress_interval = args.progress_interval
     if progress_interval <= 0:
@@ -503,6 +543,8 @@ async def run_load_test(args: argparse.Namespace) -> bool:
         args.bifrost_url,
         args.chunk_size,
         progress_interval,
+        model=args.model,
+        auth_header=auth_header,
     )
     stats.print_summary(elapsed)
 
@@ -558,6 +600,22 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE_DEFAULT)
     parser.add_argument("--progress-interval", type=int, default=0)
     parser.add_argument("--bifrost-url", default=BIFROST_URL_DEFAULT)
+    parser.add_argument(
+        "--model",
+        default="fakellm-openai/gpt-4o-mini",
+        help="Chat model (tenant mode: provider from seeded config_providers row)",
+    )
+    parser.add_argument(
+        "--tenant-auth",
+        action=argparse.BooleanOptionalAction,
+        default=TENANT_AUTH_DEFAULT,
+        help="Send MPilot virtual-key JWT (required when tenant_store.enabled=true)",
+    )
+    parser.add_argument(
+        "--config-json",
+        default="",
+        help="Path to Bifrost config.json (default: repo root config.json via tenant_env)",
+    )
     parser.add_argument("--kafka-ui-url", default=KAFKA_UI_URL_DEFAULT)
     parser.add_argument("--kafka-topic", default=TOPIC_NAME_DEFAULT)
     parser.add_argument("--kafka-container", default="kafka")
