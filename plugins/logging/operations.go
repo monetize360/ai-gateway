@@ -10,7 +10,6 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
-	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/streaming"
 )
 
@@ -1149,8 +1148,8 @@ func (p *LoggerPlugin) extractUniqueMCPKeyPairs(logs []logstore.MCPToolLog, extr
 
 // RecalculateCosts recomputes cost for log entries that are missing cost values
 func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.SearchFilters, limit int) (*RecalculateCostResult, error) {
-	if p.pricingManager == nil {
-		return nil, fmt.Errorf("pricing manager is not configured")
+	if p.configModelPricing == nil {
+		return nil, fmt.Errorf("config model pricing is not configured")
 	}
 
 	if limit <= 0 {
@@ -1181,7 +1180,7 @@ func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.Se
 	costUpdates := make(map[string]float64, len(searchResult.Logs))
 
 	for _, logEntry := range searchResult.Logs {
-		cost, calcErr := p.calculateCostForLog(&logEntry)
+		cost, calcErr := p.calculateCostForLog(ctx, &logEntry)
 		if calcErr != nil {
 			result.Skipped++
 			p.logger.Debug("skipping cost recalculation for log %s: %v", logEntry.ID, calcErr)
@@ -1213,243 +1212,32 @@ func (p *LoggerPlugin) RecalculateCosts(ctx context.Context, filters logstore.Se
 	return result, nil
 }
 
-func (p *LoggerPlugin) calculateCostForLog(logEntry *logstore.Log) (float64, error) {
+func (p *LoggerPlugin) calculateCostForLog(ctx context.Context, logEntry *logstore.Log) (float64, error) {
 	if logEntry == nil {
 		return 0, fmt.Errorf("log entry cannot be nil")
 	}
 
-	if (logEntry.TokenUsageParsed == nil && logEntry.TokenUsage != "") ||
-		(logEntry.CacheDebugParsed == nil && logEntry.CacheDebug != "") {
+	if logEntry.TokenUsageParsed == nil && logEntry.TokenUsage != "" {
 		if err := logEntry.DeserializeFields(); err != nil {
 			return 0, fmt.Errorf("failed to deserialize fields for log %s: %w", logEntry.ID, err)
 		}
 	}
 
-	usage := logEntry.TokenUsageParsed
-	cacheDebug := logEntry.CacheDebugParsed
-
-	// If no cache hit and no usage, we can't calculate cost
-	if usage == nil && (cacheDebug == nil || !cacheDebug.CacheHit) {
+	promptTokens, completionTokens := tokenCountsFromEntry(logEntry)
+	if promptTokens == 0 && completionTokens == 0 {
 		return 0, fmt.Errorf("token usage not available for log %s", logEntry.ID)
 	}
 
-	requestType := schemas.RequestType(logEntry.Object)
-	if requestType == "" && (cacheDebug == nil || !cacheDebug.CacheHit) {
-		p.logger.Warn("skipping cost calculation for log %s: object type is empty (timestamp: %s)", logEntry.ID, logEntry.Timestamp)
-		return 0, fmt.Errorf("object type is empty for log %s", logEntry.ID)
+	cost := p.configModelPricing.calculateCost(
+		ctx,
+		string(logEntry.Provider),
+		logEntry.Model,
+		aliasFromEntry(logEntry),
+		promptTokens,
+		completionTokens,
+	)
+	if cost <= 0 {
+		return 0, fmt.Errorf("no config_models pricing for %s/%s", logEntry.Provider, logEntry.Model)
 	}
-
-	// Build a minimal BifrostResponse matching the request type so that
-	// extractCostInput routes usage into the correct field for each compute function.
-	originalModelRequested := logEntry.Model
-	if logEntry.Alias != nil && *logEntry.Alias != "" {
-		originalModelRequested = *logEntry.Alias
-	}
-
-	extraFields := schemas.BifrostResponseExtraFields{
-		RequestType:            requestType,
-		Provider:               schemas.ModelProvider(logEntry.Provider),
-		OriginalModelRequested: originalModelRequested,
-		ResolvedModelUsed:      logEntry.Model,
-		CacheDebug:             cacheDebug,
-	}
-
-	resp := buildResponseForRequestType(requestType, usage, extraFields)
-
-	// Patch modality-specific output fields that are not captured in BifrostLLMUsage
-	// but are required for accurate cost calculation.
-
-	// Transcription: restore Seconds (duration billing) and InputTokenDetails
-	// (audio/text token breakdown) from the stored response object.
-	if resp.TranscriptionResponse != nil &&
-		logEntry.TranscriptionOutputParsed != nil &&
-		logEntry.TranscriptionOutputParsed.Usage != nil {
-		resp.TranscriptionResponse.Usage = logEntry.TranscriptionOutputParsed.Usage
-	}
-
-	// ImageGeneration: restore full ImageUsage (OutputTokensDetails/NImages for
-	// per-image pricing), Data count, and Size from the stored response object.
-	if resp.ImageGenerationResponse != nil && logEntry.ImageGenerationOutputParsed != nil {
-		parsed := logEntry.ImageGenerationOutputParsed
-		if parsed.Usage != nil {
-			resp.ImageGenerationResponse.Usage = parsed.Usage
-		}
-		if resp.ImageGenerationResponse.ImageGenerationResponseParameters == nil &&
-			parsed.ImageGenerationResponseParameters != nil {
-			resp.ImageGenerationResponse.ImageGenerationResponseParameters = parsed.ImageGenerationResponseParameters
-		}
-		if len(resp.ImageGenerationResponse.Data) == 0 {
-			resp.ImageGenerationResponse.Data = parsed.Data
-		}
-	}
-
-	// VideoGeneration: patch in Seconds from the stored output so that
-	// extractCostInput can compute the per-second cost.
-	if resp.VideoGenerationResponse != nil && logEntry.VideoGenerationOutputParsed != nil {
-		resp.VideoGenerationResponse.Seconds = logEntry.VideoGenerationOutputParsed.Seconds
-	}
-
-	// Speech: restore provider-specific usage (e.g. character-count billing) from
-	// the stored response instead of relying solely on aggregate token counts.
-	if resp.SpeechResponse != nil &&
-		logEntry.SpeechOutputParsed != nil &&
-		logEntry.SpeechOutputParsed.Usage != nil {
-		resp.SpeechResponse.Usage = logEntry.SpeechOutputParsed.Usage
-	}
-
-	scopes := pricingScopesForLog(logEntry)
-	return p.pricingManager.CalculateCost(resp, &scopes), nil
-}
-
-// buildResponseForRequestType wraps BifrostLLMUsage into the correct response
-// field so that CalculateCost's extractCostInput routes it properly.
-func buildResponseForRequestType(requestType schemas.RequestType, usage *schemas.BifrostLLMUsage, extra schemas.BifrostResponseExtraFields) *schemas.BifrostResponse {
-	switch requestType {
-	case schemas.TextCompletionRequest, schemas.TextCompletionStreamRequest:
-		return &schemas.BifrostResponse{
-			TextCompletionResponse: &schemas.BifrostTextCompletionResponse{
-				Usage:       usage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.EmbeddingRequest:
-		return &schemas.BifrostResponse{
-			EmbeddingResponse: &schemas.BifrostEmbeddingResponse{
-				Usage:       usage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.RerankRequest:
-		return &schemas.BifrostResponse{
-			RerankResponse: &schemas.BifrostRerankResponse{
-				Usage:       usage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.OCRRequest:
-		return &schemas.BifrostResponse{
-			OCRResponse: &schemas.BifrostOCRResponse{
-				ExtraFields: extra,
-			},
-		}
-	case schemas.ResponsesRequest, schemas.ResponsesStreamRequest:
-		// Convert BifrostLLMUsage back to ResponsesResponseUsage, preserving token
-		// detail breakdowns so CalculateCost can apply cache and search-query pricing.
-		var respUsage *schemas.ResponsesResponseUsage
-		if usage != nil {
-			respUsage = &schemas.ResponsesResponseUsage{
-				InputTokens:  usage.PromptTokens,
-				OutputTokens: usage.CompletionTokens,
-				TotalTokens:  usage.TotalTokens,
-				Cost:         usage.Cost,
-			}
-			if usage.PromptTokensDetails != nil {
-				respUsage.InputTokensDetails = &schemas.ResponsesResponseInputTokens{
-					TextTokens:        usage.PromptTokensDetails.TextTokens,
-					AudioTokens:       usage.PromptTokensDetails.AudioTokens,
-					ImageTokens:       usage.PromptTokensDetails.ImageTokens,
-					CachedReadTokens:  usage.PromptTokensDetails.CachedReadTokens,
-					CachedWriteTokens: usage.PromptTokensDetails.CachedWriteTokens,
-				}
-			}
-			if usage.CompletionTokensDetails != nil {
-				respUsage.OutputTokensDetails = &schemas.ResponsesResponseOutputTokens{
-					TextTokens:               usage.CompletionTokensDetails.TextTokens,
-					AcceptedPredictionTokens: usage.CompletionTokensDetails.AcceptedPredictionTokens,
-					AudioTokens:              usage.CompletionTokensDetails.AudioTokens,
-					ImageTokens:              usage.CompletionTokensDetails.ImageTokens,
-					ReasoningTokens:          usage.CompletionTokensDetails.ReasoningTokens,
-					RejectedPredictionTokens: usage.CompletionTokensDetails.RejectedPredictionTokens,
-					CitationTokens:           usage.CompletionTokensDetails.CitationTokens,
-					NumSearchQueries:         usage.CompletionTokensDetails.NumSearchQueries,
-				}
-			}
-		}
-		return &schemas.BifrostResponse{
-			ResponsesResponse: &schemas.BifrostResponsesResponse{
-				Usage:       respUsage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.SpeechRequest, schemas.SpeechStreamRequest:
-		var speechUsage *schemas.SpeechUsage
-		if usage != nil {
-			speechUsage = &schemas.SpeechUsage{
-				InputTokens:  usage.PromptTokens,
-				OutputTokens: usage.CompletionTokens,
-				TotalTokens:  usage.TotalTokens,
-			}
-		}
-		return &schemas.BifrostResponse{
-			SpeechResponse: &schemas.BifrostSpeechResponse{
-				Usage:       speechUsage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.TranscriptionRequest, schemas.TranscriptionStreamRequest:
-		var txUsage *schemas.TranscriptionUsage
-		if usage != nil {
-			txUsage = &schemas.TranscriptionUsage{
-				InputTokens:  &usage.PromptTokens,
-				OutputTokens: &usage.CompletionTokens,
-				TotalTokens:  &usage.TotalTokens,
-			}
-		}
-		return &schemas.BifrostResponse{
-			TranscriptionResponse: &schemas.BifrostTranscriptionResponse{
-				Usage:       txUsage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.ImageGenerationRequest, schemas.ImageGenerationStreamRequest,
-		schemas.ImageEditRequest, schemas.ImageEditStreamRequest, schemas.ImageVariationRequest:
-		// Log entries only store BifrostLLMUsage; convert to ImageUsage for proper routing
-		var imgUsage *schemas.ImageUsage
-		if usage != nil {
-			imgUsage = &schemas.ImageUsage{
-				InputTokens:  usage.PromptTokens,
-				OutputTokens: usage.CompletionTokens,
-				TotalTokens:  usage.TotalTokens,
-			}
-		}
-		return &schemas.BifrostResponse{
-			ImageGenerationResponse: &schemas.BifrostImageGenerationResponse{
-				Usage:       imgUsage,
-				ExtraFields: extra,
-			},
-		}
-	case schemas.VideoGenerationRequest, schemas.VideoRemixRequest:
-		// Seconds is not stored in BifrostLLMUsage; the caller must patch it in from
-		// the stored VideoGenerationOutputParsed after this function returns.
-		return &schemas.BifrostResponse{
-			VideoGenerationResponse: &schemas.BifrostVideoGenerationResponse{
-				ExtraFields: extra,
-			},
-		}
-	default:
-		// Default to chat response for unknown or chat request types
-		return &schemas.BifrostResponse{
-			ChatResponse: &schemas.BifrostChatResponse{
-				Usage:       usage,
-				ExtraFields: extra,
-			},
-		}
-	}
-}
-
-func pricingScopesForLog(logEntry *logstore.Log) modelcatalog.PricingLookupScopes {
-	if logEntry == nil {
-		return modelcatalog.PricingLookupScopes{}
-	}
-
-	virtualKeyID := ""
-	if logEntry.VirtualKeyID != nil {
-		virtualKeyID = *logEntry.VirtualKeyID
-	}
-
-	return modelcatalog.PricingLookupScopes{
-		Provider:      logEntry.Provider,
-		SelectedKeyID: logEntry.SelectedKeyID,
-		VirtualKeyID:  virtualKeyID,
-	}
+	return cost, nil
 }

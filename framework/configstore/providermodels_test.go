@@ -62,6 +62,79 @@ func TestSyncProviderModels(t *testing.T) {
 	require.Len(t, models, 3)
 }
 
+func TestSyncProviderModels_PreservesExistingCostsWithoutCatalogPricing(t *testing.T) {
+	store := setupRDBTestStore(t)
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))
+
+	ctx := context.Background()
+	providerID := uuid.NewString()
+	require.NoError(t, store.DB().Create(&tables.TableProvider{
+		ID:   providerID,
+		Name: string(schemas.OpenAI),
+	}).Error)
+
+	inputCost := 0.00001
+	outputCost := 0.00002
+	require.NoError(t, store.DB().Create(&tables.TableModel{
+		ID:                 uuid.NewString(),
+		ProviderID:         providerID,
+		Name:               "gpt-4o",
+		InputCostPerToken:  &inputCost,
+		OutputCostPerToken: &outputCost,
+	}).Error)
+
+	err := store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o"}, map[string]ConfigModelTokenPricing{
+		"gpt-4o": {},
+	})
+	require.NoError(t, err)
+
+	var model tables.TableModel
+	require.NoError(t, ActiveRows(store.DB()).Where("provider_id = ? AND name = ?", providerID, "gpt-4o").First(&model).Error)
+	require.NotNil(t, model.InputCostPerToken)
+	require.NotNil(t, model.OutputCostPerToken)
+	assert.Equal(t, inputCost, *model.InputCostPerToken)
+	assert.Equal(t, outputCost, *model.OutputCostPerToken)
+}
+
+func TestSyncProviderModels_UpdatesCostsFromCatalogPricing(t *testing.T) {
+	store := setupRDBTestStore(t)
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))
+
+	ctx := context.Background()
+	providerID := uuid.NewString()
+	require.NoError(t, store.DB().Create(&tables.TableProvider{
+		ID:   providerID,
+		Name: string(schemas.OpenAI),
+	}).Error)
+
+	existingInput := 0.00001
+	existingOutput := 0.00002
+	require.NoError(t, store.DB().Create(&tables.TableModel{
+		ID:                 uuid.NewString(),
+		ProviderID:         providerID,
+		Name:               "gpt-4o",
+		InputCostPerToken:  &existingInput,
+		OutputCostPerToken: &existingOutput,
+	}).Error)
+
+	catalogInput := 0.00003
+	catalogOutput := 0.00004
+	err := store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o"}, map[string]ConfigModelTokenPricing{
+		"gpt-4o": {
+			InputCostPerToken:  &catalogInput,
+			OutputCostPerToken: &catalogOutput,
+		},
+	})
+	require.NoError(t, err)
+
+	var model tables.TableModel
+	require.NoError(t, ActiveRows(store.DB()).Where("provider_id = ? AND name = ?", providerID, "gpt-4o").First(&model).Error)
+	require.NotNil(t, model.InputCostPerToken)
+	require.NotNil(t, model.OutputCostPerToken)
+	assert.Equal(t, catalogInput, *model.InputCostPerToken)
+	assert.Equal(t, catalogOutput, *model.OutputCostPerToken)
+}
+
 func TestSyncProviderModels_EmptyInputIsNoOp(t *testing.T) {
 	store := setupRDBTestStore(t)
 	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))

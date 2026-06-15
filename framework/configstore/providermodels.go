@@ -37,16 +37,23 @@ type ConfigModelTokenPricing struct {
 	OutputCostPerToken *float64
 }
 
-func configModelPricingUpdates(ctx context.Context, pricing *ConfigModelTokenPricing) map[string]any {
+func configModelPricingUpdates(ctx context.Context, pricing *ConfigModelTokenPricing, existing *tables.TableModel) map[string]any {
 	updates := map[string]any{
 		"updated_at": time.Now().UTC(),
 	}
-	if pricing != nil {
-		updates["input_cost_per_token"] = pricing.InputCostPerToken
-		updates["output_cost_per_token"] = pricing.OutputCostPerToken
+	if pricing == nil {
+		if existing == nil {
+			updates["input_cost_per_token"] = nil
+			updates["output_cost_per_token"] = nil
+		}
 	} else {
-		updates["input_cost_per_token"] = nil
-		updates["output_cost_per_token"] = nil
+		// Only overwrite a cost field when the catalog provides a value, or the row has none yet.
+		if pricing.InputCostPerToken != nil || existing == nil || existing.InputCostPerToken == nil {
+			updates["input_cost_per_token"] = pricing.InputCostPerToken
+		}
+		if pricing.OutputCostPerToken != nil || existing == nil || existing.OutputCostPerToken == nil {
+			updates["output_cost_per_token"] = pricing.OutputCostPerToken
+		}
 	}
 	if userID := auditUserID(ctx); userID != "" {
 		updates["updated_by"] = userID
@@ -95,7 +102,7 @@ func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schema
 			pricing := tokenPricing[name]
 			row, ok := existingByName[name]
 			if ok {
-				updates := configModelPricingUpdates(ctx, &pricing)
+				updates := configModelPricingUpdates(ctx, &pricing, row)
 				if row.Deleted {
 					updates["deleted"] = false
 				}

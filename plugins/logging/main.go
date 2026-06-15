@@ -19,7 +19,6 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
-	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/streaming"
 	"github.com/maximhq/bifrost/framework/tenantstore"
 )
@@ -141,7 +140,7 @@ func (p *LoggerPlugin) contentLoggingEnabled(ctx *schemas.BifrostContext) bool {
 }
 
 // scheduleDeferredUsageUpdate schedules a deferred usage update for the request.
-func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, requestID string, usageAlreadyPresent bool) {
+func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, requestID string, usageAlreadyPresent bool, provider, model, alias string) {
 	if usageAlreadyPresent || ctx == nil {
 		return
 	}
@@ -207,6 +206,21 @@ func (p *LoggerPlugin) scheduleDeferredUsageUpdate(ctx *schemas.BifrostContext, 
 		}
 		if updErr := store.Update(p.ctx, requestID, usageUpdates); updErr != nil {
 			p.logger.Warn("failed to update deferred usage for request %s: %v", requestID, updErr)
+			return
+		}
+		if p.configModelPricing != nil {
+			if cost := p.configModelPricing.calculateCost(
+				ctx,
+				provider,
+				model,
+				alias,
+				deferredUsage.PromptTokens,
+				deferredUsage.CompletionTokens,
+			); cost > 0 {
+				if costErr := store.Update(p.ctx, requestID, map[string]interface{}{"cost": cost}); costErr != nil {
+					p.logger.Warn("failed to update deferred cost for request %s: %v", requestID, costErr)
+				}
+			}
 		}
 	}()
 }
@@ -283,7 +297,7 @@ type LoggerPlugin struct {
 	logStoreResolver       tenantstore.LogStoreResolver
 	disableContentLogging  *bool
 	loggingHeaders         *[]string // Pointer to live config slice for headers to capture in metadata
-	pricingManager         *modelcatalog.ModelCatalog
+	configModelPricing     *configModelPricingCache
 	mcpCatalog             *mcpcatalog.MCPCatalog // MCP catalog for tool cost calculation
 	mu                     sync.Mutex
 	done                   chan struct{}
@@ -310,15 +324,15 @@ type LoggerPlugin struct {
 }
 
 // Init creates new logger plugin with given log store
-func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore logstore.LogStore, logStoreResolver tenantstore.LogStoreResolver, pricingManager *modelcatalog.ModelCatalog, mcpCatalog *mcpcatalog.MCPCatalog) (*LoggerPlugin, error) {
+func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore logstore.LogStore, logStoreResolver tenantstore.LogStoreResolver, configStoreResolver tenantstore.Resolver, mcpCatalog *mcpcatalog.MCPCatalog) (*LoggerPlugin, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
 	if logsStore == nil && logStoreResolver == nil {
 		return nil, fmt.Errorf("logs store cannot be nil")
 	}
-	if pricingManager == nil {
-		logger.Warn("logging plugin requires model catalog to calculate cost, all LLM cost calculations will be skipped.")
+	if configStoreResolver == nil {
+		logger.Warn("logging plugin requires tenant config store to calculate cost from config_models, all LLM cost calculations will be skipped.")
 	}
 	if mcpCatalog == nil {
 		logger.Warn("logging plugin requires MCP catalog to calculate cost, all MCP cost calculations will be skipped.")
@@ -329,7 +343,7 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 		ctx:                   ctx,
 		store:                 logsStore,
 		logStoreResolver:      logStoreResolver,
-		pricingManager:        pricingManager,
+		configModelPricing:    newConfigModelPricingCache(configStoreResolver),
 		mcpCatalog:            mcpCatalog,
 		disableContentLogging: config.DisableContentLogging,
 		loggingHeaders:        config.LoggingHeaders,
@@ -972,8 +986,9 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 			}
 		}
 		applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
+		p.applyConfigModelCostToEntry(ctx, entry)
 		p.storeOrEnqueueEntry(ctx, entry, p.makePostWriteCallback(nil))
-		p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil)
+		p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil, string(entry.Provider), entry.Model, aliasFromEntry(entry))
 		return result, bifrostErr, nil
 	}
 
@@ -1054,11 +1069,12 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 			}
 		}
 		applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
+		p.applyConfigModelCostToEntry(ctx, entry)
 		if tracer != nil && traceID != "" {
 			tracer.CleanupStreamAccumulator(traceID)
 		}
 		p.storeOrEnqueueEntry(ctx, entry, p.makePostWriteCallback(nil))
-		p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil)
+		p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil, string(entry.Provider), entry.Model, aliasFromEntry(entry))
 		return result, bifrostErr, nil
 	}
 
@@ -1094,18 +1110,12 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 	}
 	applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
 
-	// Calculate cost
 	var cacheDebug *schemas.BifrostCacheDebug
 	if result != nil {
 		cacheDebug = result.GetExtraFields().CacheDebug
 	}
 	entry.CacheDebugParsed = cacheDebug
-	if p.pricingManager != nil {
-		pricingScopes := modelcatalog.PricingLookupScopesFromContext(ctx, string(entry.Provider))
-		if cost := p.pricingManager.CalculateCost(result, pricingScopes); cost > 0 {
-			entry.Cost = &cost
-		}
-	}
+	p.applyConfigModelCostToEntry(ctx, entry)
 
 	// Pre-apply denormalized fields for WebSocket callback enrichment
 	if entry.SelectedKeyID != "" && entry.SelectedKeyName != "" {
@@ -1127,7 +1137,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 		}
 	}
 	p.storeOrEnqueueEntry(ctx, entry, p.makePostWriteCallback(nil))
-	p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil)
+	p.scheduleDeferredUsageUpdate(ctx, requestID, entry.TokenUsageParsed != nil, string(entry.Provider), entry.Model, aliasFromEntry(entry))
 	return result, bifrostErr, nil
 }
 

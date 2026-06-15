@@ -81,7 +81,7 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal logging plugin config: %w", err)
 		}
 		return logging.Init(ctx, loggingConfig, logger, bifrostConfig.LogsStore,
-			bifrostConfig.LogStoreResolver(), bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog)
+			bifrostConfig.LogStoreResolver(), bifrostConfig.Registry(), bifrostConfig.MCPCatalog)
 
 	case governance.PluginName:
 		governanceConfig, err := MarshalPluginConfig[governance.Config](pluginConfig)
