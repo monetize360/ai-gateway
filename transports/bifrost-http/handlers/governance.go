@@ -89,6 +89,7 @@ type CreateVirtualKeyRequest struct {
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"` // Empty means no MCP clients allowed (deny-by-default)
 	OrgID           *string                  `json:"org_id,omitempty"`
+	ScopeOrgID      *string                  `json:"scope_org_id,omitempty"`
 	Budgets         []CreateBudgetRequest    `json:"budgets,omitempty"`     // Multi-budget: each must have a unique reset_duration
 	RateLimits      []CreateRateLimitRequest `json:"rate_limits,omitempty"`
 	IsActive        *bool                    `json:"is_active,omitempty"`
@@ -115,6 +116,7 @@ type UpdateVirtualKeyRequest struct {
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"`
 	OrgID            *string                 `json:"org_id,omitempty"`
+	ScopeOrgID       *string                 `json:"scope_org_id,omitempty"`
 	Budgets          []CreateBudgetRequest   `json:"budgets,omitempty"` // Multi-budget: replaces all VK-level budgets
 	RateLimits       []CreateRateLimitRequest  `json:"rate_limits,omitempty"`
 	IsActive         *bool                   `json:"is_active,omitempty"`
@@ -693,6 +695,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 			Value:           governance.GenerateVirtualKey(),
 			Description:     req.Description,
 			OrgID:           req.OrgID,
+			ScopeOrgID:      req.ScopeOrgID,
 			IsActive:        isActive,
 			CalendarAligned: req.CalendarAligned,
 		}
@@ -958,6 +961,13 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				vk.OrgID = nil
 			} else {
 				vk.OrgID = req.OrgID
+			}
+		}
+		if req.ScopeOrgID != nil {
+			if strings.TrimSpace(*req.ScopeOrgID) == "" {
+				vk.ScopeOrgID = nil
+			} else {
+				vk.ScopeOrgID = req.ScopeOrgID
 			}
 		}
 		if req.IsActive != nil {

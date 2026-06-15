@@ -210,8 +210,8 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	// Set virtual key id and name in context
 	ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, vk.ID)
 	ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyName, vk.Name)
-	if vk.OrgID != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *vk.OrgID)
+	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
 	}
 	if !vk.IsActiveValue() {
 		return &EvaluationResult{

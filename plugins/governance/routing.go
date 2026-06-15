@@ -98,8 +98,10 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 	// Build scope chain once — it's based on the immutable VirtualKey and won't change across chain steps.
 	var orgAncestors []string
-	if routingCtx.VirtualKey != nil && routingCtx.VirtualKey.OrgID != nil {
-		orgAncestors = re.store.CollectOrgAncestorIDs(*routingCtx.VirtualKey.OrgID)
+	if routingCtx.VirtualKey != nil {
+		if scopeOrgID := routingCtx.VirtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
+			orgAncestors = re.store.CollectOrgAncestorIDs(*scopeOrgID)
+		}
 	}
 	scopeChain := buildScopeChain(routingCtx.VirtualKey, orgAncestors)
 
@@ -364,8 +366,8 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 		variables["virtual_key_name"] = ""
 	}
 
-	if ctx.VirtualKey != nil && ctx.VirtualKey.OrgID != nil {
-		variables["org_id"] = *ctx.VirtualKey.OrgID
+	if ctx.VirtualKey != nil {
+		variables["org_id"] = ctx.VirtualKey.GovernanceScopeOrgIDString()
 	} else {
 		variables["org_id"] = ""
 	}

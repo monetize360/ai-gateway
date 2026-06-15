@@ -3,6 +3,7 @@ package tables
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -216,7 +217,11 @@ type TableVirtualKey struct {
 	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means all providers allowed
 	MCPConfigs      []TableVirtualKeyMCPConfig      `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
-	OrgID       *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
+	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	// ScopeOrgID is the org used for budget, rate limit, and routing scope at runtime.
+	// When set, it takes precedence over OrgID.
+	ScopeOrgID *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
 
 	CalendarAligned bool `gorm:"default:false" json:"calendar_aligned"`
 
@@ -246,6 +251,29 @@ func (vk *TableVirtualKey) IsActiveValue() bool {
 		return true
 	}
 	return *vk.IsActive
+}
+
+// GovernanceScopeOrgID returns the org ID used for budget, rate limit, and routing scope.
+// scope_org_id takes precedence over org_id.
+func (vk *TableVirtualKey) GovernanceScopeOrgID() *string {
+	if vk == nil {
+		return nil
+	}
+	if isNonEmptyString(vk.ScopeOrgID) {
+		return vk.ScopeOrgID
+	}
+	if isNonEmptyString(vk.OrgID) {
+		return vk.OrgID
+	}
+	return nil
+}
+
+// GovernanceScopeOrgIDString returns the trimmed governance scope org ID, or empty if unset.
+func (vk *TableVirtualKey) GovernanceScopeOrgIDString() string {
+	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
+		return strings.TrimSpace(*scopeOrgID)
+	}
+	return ""
 }
 
 // BeforeSave computes a SHA-256 hash of the plaintext value for indexed lookups and

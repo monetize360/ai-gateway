@@ -804,7 +804,10 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 	} else {
 		hash.Write([]byte("isActive:false"))
 	}
-	// Hash OrgID
+	// Hash org fields: scope_org_id is governance scope; org_id is MPilot visibility.
+	if vk.ScopeOrgID != nil {
+		hash.Write([]byte("scopeOrgID:" + *vk.ScopeOrgID))
+	}
 	if vk.OrgID != nil {
 		hash.Write([]byte("orgID:" + *vk.OrgID))
 	}

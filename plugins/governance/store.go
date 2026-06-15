@@ -1858,8 +1858,8 @@ func (gs *LocalGovernanceStore) collectRateLimitsFromHierarchy(ctx context.Conte
 
 	appendLiveRateLimitsFromSlice(gs, rateLimitsWithCategories, "VK", vk.RateLimits, seen)
 
-	if vk.OrgID != nil {
-		gs.appendOrgHierarchyRateLimits(*vk.OrgID, rateLimitsWithCategories, seen)
+	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
+		gs.appendOrgHierarchyRateLimits(*scopeOrgID, rateLimitsWithCategories, seen)
 	}
 	return rateLimitsWithCategories
 }
@@ -1907,8 +1907,8 @@ func (gs *LocalGovernanceStore) collectBudgetsFromHierarchy(_ context.Context, v
 			}
 		}
 	}
-	if vk.OrgID != nil {
-		gs.appendOrgHierarchyBudgets(*vk.OrgID, entityWiseBudgets, seen)
+	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
+		gs.appendOrgHierarchyBudgets(*scopeOrgID, entityWiseBudgets, seen)
 	}
 	return entityWiseBudgets
 }

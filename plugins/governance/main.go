@@ -412,8 +412,10 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 	}
 
 	// Attach org context from the virtual key
-	if virtualKey != nil && virtualKey.OrgID != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
+	if virtualKey != nil {
+		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
+		}
 	}
 
 	//1. Apply routing rules only if we have rules or matched decision
@@ -504,8 +506,10 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	}
 
 	// Attach org context from the virtual key
-	if virtualKey != nil && virtualKey.OrgID != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
+	if virtualKey != nil {
+		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
+		}
 	}
 
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
@@ -606,8 +610,10 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	}
 
 	// Attach org context from the virtual key
-	if virtualKey != nil && virtualKey.OrgID != nil {
-		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *virtualKey.OrgID)
+	if virtualKey != nil {
+		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
+		}
 	}
 
 	// Apply routing rules
@@ -1242,8 +1248,10 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	}
 
 	// Step 2: Org hierarchy budget/rate-limit when VK-level checks were skipped (user auth path).
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil && hierarchyVK.OrgID != nil {
-		result = resolver.EvaluateOrgHierarchyRequest(ctx, *hierarchyVK.OrgID, evaluationRequest)
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
+		if scopeOrgID := hierarchyVK.GovernanceScopeOrgID(); scopeOrgID != nil {
+			result = resolver.EvaluateOrgHierarchyRequest(ctx, *scopeOrgID, evaluationRequest)
+		}
 	}
 
 	// Step 3: User-level governance (enterprise-only).
