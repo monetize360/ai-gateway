@@ -266,6 +266,18 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 	if finalDecision == nil {
 		re.logger.Debug("[RoutingEngine] No routing rule matched, using default routing")
+		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+			fmt.Sprintf("SUMMARY: No routing rule matched; using %s/%s", routingCtx.Provider, routingCtx.Model))
+	} else {
+		requested := fmt.Sprintf("%s/%s", routingCtx.Provider, routingCtx.Model)
+		resolved := fmt.Sprintf("%s/%s", finalDecision.Provider, finalDecision.Model)
+		if routingCtx.Model != finalDecision.Model || string(routingCtx.Provider) != finalDecision.Provider {
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+				fmt.Sprintf("SUMMARY: Requested %s → routed to %s via rule '%s'", requested, resolved, finalDecision.MatchedRuleName))
+		} else {
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+				fmt.Sprintf("SUMMARY: Rule '%s' matched; kept %s", finalDecision.MatchedRuleName, resolved))
+		}
 	}
 	return finalDecision, nil
 }
