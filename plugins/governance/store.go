@@ -1228,7 +1228,8 @@ func (gs *LocalGovernanceStore) ResetExpiredBudgetsInMemory(ctx context.Context)
 		if !ok || budget == nil {
 			return true
 		}
-		calendarAligned := budget.IsCalendarAligned
+		calendarAligned := budget.IsCalendarAligned &&
+			configstoreTables.IsCalendarAlignableDuration(budget.ResetDuration)
 		var shouldReset bool
 		var newLastReset time.Time
 		if calendarAligned {
@@ -1284,7 +1285,7 @@ func (gs *LocalGovernanceStore) ResetExpiredRateLimitsInMemory(ctx context.Conte
 		if resetDuration == nil {
 			return nil
 		}
-		if calendarAligned {
+		if calendarAligned && configstoreTables.IsCalendarAlignableDuration(*resetDuration) {
 			period := configstoreTables.GetCalendarPeriodStart(*resetDuration, now)
 			if period.After(lastReset) {
 				return &period

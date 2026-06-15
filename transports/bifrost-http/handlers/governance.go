@@ -204,7 +204,7 @@ func isBudgetRemovalRequest(req *UpdateBudgetRequest) bool {
 // When calendarAligned is true it snaps to the start of the current calendar period
 // (e.g. midnight on the 1st of the month for "1M"), otherwise it returns time.Now().
 func budgetLastReset(calendarAligned bool, resetDuration string) time.Time {
-	if calendarAligned {
+	if calendarAligned && configstoreTables.IsCalendarAlignableDuration(resetDuration) {
 		return configstoreTables.GetCalendarPeriodStart(resetDuration, time.Now())
 	}
 	return time.Now()

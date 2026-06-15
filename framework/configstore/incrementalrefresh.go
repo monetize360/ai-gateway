@@ -164,13 +164,20 @@ func (s *RDBConfigStore) collectVirtualKeyIDsChangedSince(ctx context.Context, s
 				INNER JOIN governance_budgets b ON b.provider_config_id = pc.id
 				WHERE b.updated_at >= ? AND pc.virtual_key_id IS NOT NULL
 			UNION
+			SELECT virtual_key_id AS id FROM governance_rate_limits
+				WHERE updated_at >= ? AND virtual_key_id IS NOT NULL
+			UNION
+			SELECT pc.virtual_key_id AS id FROM governance_virtual_key_provider_configs pc
+				INNER JOIN governance_rate_limits rl ON rl.provider_config_id = pc.id
+				WHERE rl.updated_at >= ? AND pc.virtual_key_id IS NOT NULL
+			UNION
 			SELECT pc.virtual_key_id AS id FROM governance_virtual_key_provider_configs pc
 				INNER JOIN governance_virtual_key_provider_config_keys j
 					ON j.table_virtual_key_provider_config_id = pc.id
 				WHERE j.updated_at >= ? AND pc.virtual_key_id IS NOT NULL
 		) changed_vks
 		WHERE id IS NOT NULL
-	`, since, since, since, since, since, since).Scan(&rows).Error
+	`, since, since, since, since, since, since, since, since).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("collect changed virtual key ids: %w", err)
 	}

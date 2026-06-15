@@ -727,6 +727,37 @@ func TestGovernanceStore_ResetExpiredBudgets(t *testing.T) {
 	assert.Equal(t, 0.0, updatedVK.Budgets[0].CurrentUsage, "Budget usage should be reset")
 }
 
+// TestGovernanceStore_ResetExpiredBudgets_CalendarAlignedSubDay verifies that
+// calendar_aligned with a sub-day duration (e.g. "3h") uses rolling reset, not
+// the calendar path that would fire on every worker tick.
+func TestGovernanceStore_ResetExpiredBudgets_CalendarAlignedSubDay(t *testing.T) {
+	logger := NewMockLogger()
+
+	lastReset := time.Now().Add(-10 * time.Second)
+	budget := &configstoreTables.TableBudget{
+		ID:                "budget-cal-3h",
+		MaxLimit:          100.0,
+		CurrentUsage:      5.0,
+		ResetDuration:     "3h",
+		LastReset:         lastReset,
+		IsCalendarAligned: true,
+	}
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		Budgets: []configstoreTables.TableBudget{*budget},
+	}, nil)
+	require.NoError(t, err)
+
+	expiredBudgets := store.ResetExpiredBudgetsInMemory(context.Background())
+	assert.Empty(t, expiredBudgets, "3h budget should not reset after 10 seconds even when calendar_aligned")
+
+	live := store.LoadBudget(context.Background(), "budget-cal-3h")
+	require.NotNil(t, live)
+	assert.InDelta(t, 5.0, live.CurrentUsage, 0.01)
+	assert.True(t, live.LastReset.Equal(lastReset) || live.LastReset.Sub(lastReset) < time.Second,
+		"last_reset should not advance before 3h elapses")
+}
+
 // TestGovernanceStore_GetAllBudgets tests retrieving all budgets
 func TestGovernanceStore_GetAllBudgets(t *testing.T) {
 	logger := NewMockLogger()
