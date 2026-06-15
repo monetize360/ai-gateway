@@ -1501,15 +1501,6 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 		}
 	}
 	if !usesNameRefs {
-		for i := range governanceConfig.PricingOverrides {
-			override := &governanceConfig.PricingOverrides[i]
-			if override.ProviderKeyName != nil && strings.TrimSpace(*override.ProviderKeyName) != "" {
-				usesNameRefs = true
-				break
-			}
-		}
-	}
-	if !usesNameRefs {
 		return nil
 	}
 	if config.StoreFromContext(ctx) == nil {
@@ -1526,22 +1517,6 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 				First(&key).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return "", fmt.Errorf("provider key not found for provider=%q name=%q", provider, keyName)
-			}
-			if err != nil {
-				return "", err
-			}
-			return key.KeyID, nil
-		}
-
-		resolveProviderKeyIDByName := func(keyName string) (string, error) {
-			var key configstoreTables.TableKey
-			err := tx.WithContext(ctx).
-				Model(&configstoreTables.TableKey{}).
-				Select("key_id").
-				Where("name = ?", keyName).
-				First(&key).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return "", fmt.Errorf("provider key not found for name=%q", keyName)
 			}
 			if err != nil {
 				return "", err
@@ -1579,29 +1554,6 @@ func resolveGovernanceKeyReferences(ctx context.Context, config *Config, governa
 			}
 			rule.KeyID = bifrost.Ptr(keyID)
 			rule.ProviderKeyName = nil
-		}
-
-		for i := range governanceConfig.PricingOverrides {
-			override := &governanceConfig.PricingOverrides[i]
-			if override.ProviderKeyName == nil {
-				continue
-			}
-
-			keyName := strings.TrimSpace(*override.ProviderKeyName)
-			if keyName == "" {
-				override.ProviderKeyName = nil
-				continue
-			}
-			if override.ProviderKeyID != nil && strings.TrimSpace(*override.ProviderKeyID) != "" {
-				return fmt.Errorf("pricing override %q cannot set both provider_key_id and provider_key_name", override.ID)
-			}
-
-			keyID, err := resolveProviderKeyIDByName(keyName)
-			if err != nil {
-				return fmt.Errorf("pricing override %q provider_key_name resolution failed: %w", override.ID, err)
-			}
-			override.ProviderKeyID = bifrost.Ptr(keyID)
-			override.ProviderKeyName = nil
 		}
 
 		return nil
@@ -1841,45 +1793,6 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			routingRulesToAdd = append(routingRulesToAdd, configData.Governance.RoutingRules[i])
 		}
 	}
-	// Merge PricingOverrides by ID with hash comparison
-	pricingOverridesToAdd := make([]configstoreTables.TablePricingOverride, 0)
-	pricingOverridesToUpdate := make([]configstoreTables.TablePricingOverride, 0)
-	for i, newOverride := range configData.Governance.PricingOverrides {
-		if len(newOverride.RequestTypes) > 0 {
-			b, err := json.Marshal(newOverride.RequestTypes)
-			if err != nil {
-				logger.Warn("failed to serialize request_types for pricing override %s: %v", newOverride.ID, err)
-				continue
-			}
-			configData.Governance.PricingOverrides[i].RequestTypesJSON = string(b)
-		} else {
-			configData.Governance.PricingOverrides[i].RequestTypesJSON = "[]"
-		}
-		fileHash, err := configstore.GeneratePricingOverrideHash(configData.Governance.PricingOverrides[i])
-		if err != nil {
-			logger.Warn("failed to generate pricing override hash for %s: %v", newOverride.ID, err)
-			continue
-		}
-		configData.Governance.PricingOverrides[i].ConfigHash = fileHash
-
-		found := false
-		for j, existing := range governanceConfig.PricingOverrides {
-			if existing.ID == newOverride.ID {
-				found = true
-				if existing.ConfigHash != fileHash {
-					logger.Debug("config hash mismatch for pricing override %s, syncing from config file", newOverride.ID)
-					pricingOverridesToUpdate = append(pricingOverridesToUpdate, configData.Governance.PricingOverrides[i])
-					governanceConfig.PricingOverrides[j] = configData.Governance.PricingOverrides[i]
-				} else {
-					logger.Debug("config hash matches for pricing override %s, keeping DB config", newOverride.ID)
-				}
-				break
-			}
-		}
-		if !found {
-			pricingOverridesToAdd = append(pricingOverridesToAdd, configData.Governance.PricingOverrides[i])
-		}
-	}
 	// Merge ModelConfigs by ID (governance model-level budget/rate-limit bindings)
 	modelConfigsToAdd := make([]configstoreTables.TableModelConfig, 0)
 	modelConfigsToUpdate := make([]configstoreTables.TableModelConfig, 0)
@@ -1948,7 +1861,6 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 	config.GovernanceConfig.Teams = append(governanceConfig.Teams, teamsToAdd...)
 	config.GovernanceConfig.VirtualKeys = append(governanceConfig.VirtualKeys, virtualKeysToAdd...)
 	config.GovernanceConfig.RoutingRules = append(governanceConfig.RoutingRules, routingRulesToAdd...)
-	config.GovernanceConfig.PricingOverrides = append(governanceConfig.PricingOverrides, pricingOverridesToAdd...)
 	config.GovernanceConfig.ModelConfigs = append(governanceConfig.ModelConfigs, modelConfigsToAdd...)
 	config.GovernanceConfig.Providers = append(governanceConfig.Providers, providersToAdd...)
 	// Update store with merged config items
@@ -1958,7 +1870,6 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 		len(teamsToAdd) > 0 || len(teamsToUpdate) > 0 ||
 		len(virtualKeysToAdd) > 0 || len(virtualKeysToUpdate) > 0 ||
 		len(routingRulesToAdd) > 0 || len(routingRulesToUpdate) > 0 ||
-		len(pricingOverridesToAdd) > 0 || len(pricingOverridesToUpdate) > 0 ||
 		len(modelConfigsToAdd) > 0 || len(modelConfigsToUpdate) > 0 ||
 		len(providersToAdd) > 0 || len(providersToUpdate) > 0
 	if config.StoreFromContext(ctx) != nil && hasChanges {
@@ -1969,27 +1880,10 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			teamsToAdd, teamsToUpdate,
 			virtualKeysToAdd, virtualKeysToUpdate,
 			routingRulesToAdd, routingRulesToUpdate,
-			pricingOverridesToAdd, pricingOverridesToUpdate,
 			modelConfigsToAdd, modelConfigsToUpdate,
 			providersToAdd, providersToUpdate)
 		if err != nil {
 			logger.Fatal("failed to sync governance config: %v", err)
-		}
-	}
-	// Sync pricing overrides into the model catalog in one batch to avoid
-	// rebuilding the lookup map on every iteration.
-	if config.ModelCatalog != nil {
-		rows := make([]*configstoreTables.TablePricingOverride, 0, len(pricingOverridesToAdd)+len(pricingOverridesToUpdate))
-		for i := range pricingOverridesToAdd {
-			rows = append(rows, &pricingOverridesToAdd[i])
-		}
-		for i := range pricingOverridesToUpdate {
-			rows = append(rows, &pricingOverridesToUpdate[i])
-		}
-		if len(rows) > 0 {
-			if err := config.ModelCatalog.UpsertPricingOverrides(rows...); err != nil {
-				logger.Error("failed to upsert pricing overrides into model catalog: %v", err)
-			}
 		}
 	}
 }
@@ -2010,8 +1904,6 @@ func updateGovernanceConfigInStore(
 	virtualKeysToUpdate []configstoreTables.TableVirtualKey,
 	routingRulesToAdd []configstoreTables.TableRoutingRule,
 	routingRulesToUpdate []configstoreTables.TableRoutingRule,
-	pricingOverridesToAdd []configstoreTables.TablePricingOverride,
-	pricingOverridesToUpdate []configstoreTables.TablePricingOverride,
 	modelConfigsToAdd []configstoreTables.TableModelConfig,
 	modelConfigsToUpdate []configstoreTables.TableModelConfig,
 	providersToAdd []configstoreTables.TableProvider,
@@ -2179,19 +2071,6 @@ func updateGovernanceConfigInStore(
 			}
 		}
 
-		// Create pricing overrides (new from config.json)
-		for _, override := range pricingOverridesToAdd {
-			if err := config.StoreFromContext(ctx).CreatePricingOverride(ctx, &override, tx); err != nil {
-				return fmt.Errorf("failed to create pricing override %s: %w", override.ID, err)
-			}
-		}
-
-		// Update pricing overrides (config.json changed)
-		for _, override := range pricingOverridesToUpdate {
-			if err := config.StoreFromContext(ctx).UpdatePricingOverride(ctx, &override, tx); err != nil {
-				return fmt.Errorf("failed to update pricing override %s: %w", override.ID, err)
-			}
-		}
 		// Create model configs (new from config.json)
 		for _, modelConfig := range modelConfigsToAdd {
 			if err := validateModelConfigGovernanceOwnership(tx, modelConfig); err != nil {
@@ -2690,29 +2569,6 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			}
 		}
 
-		// Create pricing overrides after virtual keys so that scoped overrides referencing
-		// a virtual key ID are inserted after the VK row exists.
-		for i := range config.GovernanceConfig.PricingOverrides {
-			override := &config.GovernanceConfig.PricingOverrides[i]
-			if len(override.RequestTypes) > 0 {
-				b, err := json.Marshal(override.RequestTypes)
-				if err != nil {
-					return fmt.Errorf("failed to serialize request_types for pricing override %s: %w", override.ID, err)
-				}
-				override.RequestTypesJSON = string(b)
-			} else {
-				override.RequestTypesJSON = "[]"
-			}
-			overrideHash, err := configstore.GeneratePricingOverrideHash(*override)
-			if err != nil {
-				return fmt.Errorf("failed to generate pricing override hash for %s: %w", override.ID, err)
-			}
-			override.ConfigHash = overrideHash
-			if err := config.StoreFromContext(ctx).CreatePricingOverride(ctx, override, tx); err != nil {
-				return fmt.Errorf("failed to create pricing override %s: %w", override.ID, err)
-			}
-		}
-
 		return nil
 	}); err != nil {
 		logger.Warn("failed to update governance config: %v", err)
@@ -3101,15 +2957,6 @@ func initFrameworkConfig(ctx context.Context, config *Config, configData *Config
 		logger.Warn("failed to initialize MCP catalog: %v", err)
 	}
 	config.MCPCatalog = mcpCatalog
-
-	// ModelCatalog is now initialized; replay pricing overrides for the no-store path.
-	// loadGovernanceConfig ran before ModelCatalog existed, so the in-memory
-	// load was skipped. Do it here now that ModelCatalog is available.
-	if config.ModelCatalog != nil && config.GovernanceConfig != nil && len(config.GovernanceConfig.PricingOverrides) > 0 {
-		if err := config.ModelCatalog.SetPricingOverrides(config.GovernanceConfig.PricingOverrides); err != nil {
-			logger.Warn("failed to set pricing overrides from config file: %v", err)
-		}
-	}
 }
 
 // initEncryption initializes encryption from config data or environment variables.

@@ -1168,6 +1168,52 @@ func TestCompileAndCacheProgram_EmptyExpression(t *testing.T) {
 	assert.Equal(t, program, program2)
 }
 
+func TestGovernanceStore_CalculateBudgetCost(t *testing.T) {
+	t.Parallel()
+
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	inputRate := 0.000005  // $5 / 1M tokens
+	outputRate := 0.000015 // $15 / 1M tokens
+	store.configModels.Store("openai:gpt-4o", &configstoreTables.TableModel{
+		Name:               "gpt-4o",
+		InputCostPerToken:  bifrost.Ptr(inputRate),
+		OutputCostPerToken: bifrost.Ptr(outputRate),
+	})
+	store.configModels.Store("openai:input-only", &configstoreTables.TableModel{
+		Name:              "input-only",
+		InputCostPerToken: bifrost.Ptr(0.001),
+	})
+	store.configModels.Store("openai:unset-rates", &configstoreTables.TableModel{
+		Name: "unset-rates",
+	})
+
+	t.Run("empty provider or model", func(t *testing.T) {
+		assert.Equal(t, 0.0, store.CalculateBudgetCost(schemas.OpenAI, "", 1000, 500))
+		assert.Equal(t, 0.0, store.CalculateBudgetCost("", "gpt-4o", 1000, 500))
+	})
+
+	t.Run("unknown model", func(t *testing.T) {
+		assert.Equal(t, 0.0, store.CalculateBudgetCost(schemas.OpenAI, "unknown-model", 1000, 500))
+	})
+
+	t.Run("unset rates", func(t *testing.T) {
+		assert.Equal(t, 0.0, store.CalculateBudgetCost(schemas.OpenAI, "unset-rates", 1000, 500))
+	})
+
+	t.Run("input and output rates", func(t *testing.T) {
+		// 10_000 * 0.000005 + 2_000 * 0.000015 = 0.05 + 0.03 = 0.08
+		cost := store.CalculateBudgetCost(schemas.OpenAI, "gpt-4o", 10000, 2000)
+		assert.InDelta(t, 0.08, cost, 1e-12)
+	})
+
+	t.Run("input rate only", func(t *testing.T) {
+		assert.InDelta(t, 1.0, store.CalculateBudgetCost(schemas.OpenAI, "input-only", 1000, 500), 1e-12)
+	})
+}
+
 // Utility functions for tests
 func ptrInt64(i int64) *int64 {
 	return &i

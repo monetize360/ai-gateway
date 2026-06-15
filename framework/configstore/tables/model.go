@@ -6,6 +6,9 @@ type TableModel struct {
 	ProviderID string `gorm:"type:uuid;index;not null;uniqueIndex:idx_provider_name" json:"provider_id"`
 	Name       string `gorm:"uniqueIndex:idx_provider_name" json:"name"`
 
+	InputCostPerToken  *float64 `json:"input_cost_per_token,omitempty"`
+	OutputCostPerToken *float64 `json:"output_cost_per_token,omitempty"`
+
 	SystemColumns
 }
 

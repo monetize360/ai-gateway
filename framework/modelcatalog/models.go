@@ -7,7 +7,6 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
-	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
 // GetModelCapabilityEntryForModel returns capability metadata for a model/provider pair.
@@ -434,79 +433,6 @@ func (mc *ModelCatalog) RefineModelForProvider(provider schemas.ModelProvider, m
 		return mc.refineNestedProviderModel(provider, model)
 	}
 	return model, nil
-}
-
-// SetPricingOverrides replaces the full in-memory pricing override set.
-func (mc *ModelCatalog) SetPricingOverrides(rows []configstoreTables.TablePricingOverride) error {
-	seen := make(map[string]int, len(rows))
-	overrides := make([]PricingOverride, 0, len(rows))
-	for i := range rows {
-		o, err := convertTablePricingOverrideToPricingOverride(&rows[i])
-		if err != nil {
-			return err
-		}
-		if idx, exists := seen[o.ID]; exists {
-			overrides[idx] = o // last entry wins for duplicate IDs
-		} else {
-			seen[o.ID] = len(overrides)
-			overrides = append(overrides, o)
-		}
-	}
-	mc.overridesMu.Lock()
-	mc.rawOverrides = overrides
-	mc.customPricing = buildCustomPricingData(overrides)
-	mc.overridesMu.Unlock()
-	return nil
-}
-
-// UpsertPricingOverrides inserts or replaces one or more pricing overrides in a single
-// operation, rebuilding the lookup map only once at the end.
-func (mc *ModelCatalog) UpsertPricingOverrides(rows ...*configstoreTables.TablePricingOverride) error {
-	// Deduplicate the input batch by ID (last entry wins) and build the
-	// incoming set for O(1) lookup when filtering existing rawOverrides.
-	seenIncoming := make(map[string]int, len(rows))
-	overrides := make([]PricingOverride, 0, len(rows))
-	for _, row := range rows {
-		o, err := convertTablePricingOverrideToPricingOverride(row)
-		if err != nil {
-			return err
-		}
-		if idx, exists := seenIncoming[o.ID]; exists {
-			overrides[idx] = o // last entry wins for duplicate IDs
-		} else {
-			seenIncoming[o.ID] = len(overrides)
-			overrides = append(overrides, o)
-		}
-	}
-
-	mc.overridesMu.Lock()
-	defer mc.overridesMu.Unlock()
-
-	updated := make([]PricingOverride, 0, len(mc.rawOverrides)+len(overrides))
-	for _, o := range mc.rawOverrides {
-		if _, replacing := seenIncoming[o.ID]; !replacing {
-			updated = append(updated, o)
-		}
-	}
-	updated = append(updated, overrides...)
-	mc.rawOverrides = updated
-	mc.customPricing = buildCustomPricingData(updated)
-	return nil
-}
-
-// DeletePricingOverride removes a pricing override by ID.
-func (mc *ModelCatalog) DeletePricingOverride(id string) {
-	mc.overridesMu.Lock()
-	defer mc.overridesMu.Unlock()
-
-	updated := make([]PricingOverride, 0, len(mc.rawOverrides))
-	for _, o := range mc.rawOverrides {
-		if o.ID != id {
-			updated = append(updated, o)
-		}
-	}
-	mc.rawOverrides = updated
-	mc.customPricing = buildCustomPricingData(updated)
 }
 
 // IsTextCompletionSupported checks if a model supports text completion for the given provider.

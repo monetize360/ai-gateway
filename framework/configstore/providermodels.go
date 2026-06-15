@@ -31,10 +31,34 @@ func ModelNamesFromListResponse(provider schemas.ModelProvider, listResp *schema
 	return names
 }
 
+// ConfigModelTokenPricing carries per-token rates to persist on config_models rows.
+type ConfigModelTokenPricing struct {
+	InputCostPerToken  *float64
+	OutputCostPerToken *float64
+}
+
+func configModelPricingUpdates(ctx context.Context, pricing *ConfigModelTokenPricing) map[string]any {
+	updates := map[string]any{
+		"updated_at": time.Now().UTC(),
+	}
+	if pricing != nil {
+		updates["input_cost_per_token"] = pricing.InputCostPerToken
+		updates["output_cost_per_token"] = pricing.OutputCostPerToken
+	} else {
+		updates["input_cost_per_token"] = nil
+		updates["output_cost_per_token"] = nil
+	}
+	if userID := auditUserID(ctx); userID != "" {
+		updates["updated_by"] = userID
+	}
+	return updates
+}
+
 // SyncProviderModels upserts ListModels results into config_models for the given provider.
 // Models no longer present in modelNames are soft-deleted. Empty modelNames is a no-op
 // so a failed or empty upstream response does not wipe existing rows.
-func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tx ...*gorm.DB) error {
+// tokenPricing maps model name to catalog-derived per-token rates (nil values mean unknown pricing).
+func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tokenPricing map[string]ConfigModelTokenPricing, tx ...*gorm.DB) error {
 	if len(modelNames) == 0 {
 		return nil
 	}
@@ -68,26 +92,24 @@ func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schema
 		}
 
 		for name := range desired {
+			pricing := tokenPricing[name]
 			row, ok := existingByName[name]
 			if ok {
+				updates := configModelPricingUpdates(ctx, &pricing)
 				if row.Deleted {
-					updates := map[string]any{
-						"deleted":    false,
-						"updated_at": time.Now().UTC(),
-					}
-					if userID := auditUserID(ctx); userID != "" {
-						updates["updated_by"] = userID
-					}
-					if err := txDB.WithContext(ctx).Model(&tables.TableModel{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
-						return err
-					}
+					updates["deleted"] = false
+				}
+				if err := txDB.WithContext(ctx).Model(&tables.TableModel{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
+					return err
 				}
 				continue
 			}
 
 			model := &tables.TableModel{
-				ProviderID: dbProvider.ID,
-				Name:       name,
+				ProviderID:         dbProvider.ID,
+				Name:               name,
+				InputCostPerToken:  pricing.InputCostPerToken,
+				OutputCostPerToken: pricing.OutputCostPerToken,
 			}
 			EnsureGovernanceRowID(&model.ID)
 			ApplyAuditOnCreate(ctx, &model.SystemColumns)
@@ -115,4 +137,16 @@ func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schema
 		return s.DB().WithContext(ctx).Transaction(syncFn)
 	}
 	return syncFn(tx[0])
+}
+
+// GetConfigModels returns all active config_models rows.
+func (s *RDBConfigStore) GetConfigModels(ctx context.Context) ([]tables.TableModel, error) {
+	if !s.DB().WithContext(ctx).Migrator().HasTable(&tables.TableModel{}) {
+		return nil, nil
+	}
+	var models []tables.TableModel
+	if err := ActiveRows(s.DB().WithContext(ctx)).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	return models, nil
 }

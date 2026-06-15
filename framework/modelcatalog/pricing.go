@@ -212,31 +212,46 @@ func (mc *ModelCatalog) GetPricingEntryForModel(model string, provider schemas.M
 	return nil
 }
 
+// PricingLookupScopes is retained for logging/telemetry API compatibility.
+// Budget dollar costs use config_models pricing instead of scoped overrides.
+type PricingLookupScopes struct {
+	VirtualKeyID  string
+	SelectedKeyID string
+	Provider      string
+}
+
+// PricingLookupScopesFromContext builds pricing lookup scopes from a BifrostContext.
+func PricingLookupScopesFromContext(ctx *schemas.BifrostContext, provider string) *PricingLookupScopes {
+	if ctx == nil {
+		return nil
+	}
+	virtualKeyID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
+	selectedKeyID, _ := ctx.Value(schemas.BifrostContextKeySelectedKeyID).(string)
+	return &PricingLookupScopes{
+		VirtualKeyID:  virtualKeyID,
+		SelectedKeyID: selectedKeyID,
+		Provider:      provider,
+	}
+}
+
 // CalculateCost calculates the cost of a Bifrost response.
 // It handles all request types, cache debug billing, and tiered pricing.
-// If scopes is nil, an empty PricingLookupScopes is used; global and provider-scoped
-// overrides may still apply since the provider is derived from the response.
-func (mc *ModelCatalog) CalculateCost(result *schemas.BifrostResponse, scopes *PricingLookupScopes) float64 {
+func (mc *ModelCatalog) CalculateCost(result *schemas.BifrostResponse, _ *PricingLookupScopes) float64 {
 	if result == nil {
 		return 0
-	}
-
-	var s PricingLookupScopes
-	if scopes != nil {
-		s = *scopes
 	}
 
 	// Handle semantic cache billing
 	cacheDebug := result.GetExtraFields().CacheDebug
 	if cacheDebug != nil {
-		return mc.calculateCostWithCache(result, cacheDebug, s)
+		return mc.calculateCostWithCache(result, cacheDebug)
 	}
 
-	return mc.calculateBaseCost(result, s)
+	return mc.calculateBaseCost(result)
 }
 
 // calculateCostWithCache handles cost calculation when semantic cache debug info is present.
-func (mc *ModelCatalog) calculateCostWithCache(result *schemas.BifrostResponse, cacheDebug *schemas.BifrostCacheDebug, scopes PricingLookupScopes) float64 {
+func (mc *ModelCatalog) calculateCostWithCache(result *schemas.BifrostResponse, cacheDebug *schemas.BifrostCacheDebug) float64 {
 	if cacheDebug.CacheHit {
 		// Direct cache hit — no LLM call, no cost
 		if cacheDebug.HitType != nil && *cacheDebug.HitType == "direct" {
@@ -244,26 +259,23 @@ func (mc *ModelCatalog) calculateCostWithCache(result *schemas.BifrostResponse, 
 		}
 		// Semantic cache hit — only the embedding lookup cost
 		if cacheDebug.ProviderUsed != nil && cacheDebug.ModelUsed != nil && cacheDebug.InputTokens != nil {
-			return mc.computeCacheEmbeddingCost(cacheDebug, scopes)
+			return mc.computeCacheEmbeddingCost(cacheDebug)
 		}
 		return 0
 	}
 
 	// Cache miss — full LLM cost + embedding lookup cost
-	baseCost := mc.calculateBaseCost(result, scopes)
-	embeddingCost := mc.computeCacheEmbeddingCost(cacheDebug, scopes)
+	baseCost := mc.calculateBaseCost(result)
+	embeddingCost := mc.computeCacheEmbeddingCost(cacheDebug)
 	return baseCost + embeddingCost
 }
 
 // computeCacheEmbeddingCost calculates the embedding cost for a semantic cache lookup.
-func (mc *ModelCatalog) computeCacheEmbeddingCost(cacheDebug *schemas.BifrostCacheDebug, scopes PricingLookupScopes) float64 {
+func (mc *ModelCatalog) computeCacheEmbeddingCost(cacheDebug *schemas.BifrostCacheDebug) float64 {
 	if cacheDebug == nil || cacheDebug.ProviderUsed == nil || cacheDebug.ModelUsed == nil || cacheDebug.InputTokens == nil {
 		return 0
 	}
-	if scopes.Provider == "" {
-		scopes.Provider = *cacheDebug.ProviderUsed
-	}
-	pricing := mc.resolvePricing(*cacheDebug.ProviderUsed, *cacheDebug.ModelUsed, "", schemas.EmbeddingRequest, scopes)
+	pricing := mc.resolvePricing(*cacheDebug.ProviderUsed, *cacheDebug.ModelUsed, "", schemas.EmbeddingRequest)
 	if pricing == nil {
 		return 0
 	}
@@ -279,7 +291,7 @@ func computeContainerCreationCost(pricing *configstoreTables.TableModelPricing) 
 }
 
 // calculateBaseCost extracts usage from the response and routes to the appropriate compute function.
-func (mc *ModelCatalog) calculateBaseCost(result *schemas.BifrostResponse, scopes PricingLookupScopes) float64 {
+func (mc *ModelCatalog) calculateBaseCost(result *schemas.BifrostResponse) float64 {
 	extraFields := result.GetExtraFields()
 	if extraFields == nil {
 		return 0
@@ -315,7 +327,7 @@ func (mc *ModelCatalog) calculateBaseCost(result *schemas.BifrostResponse, scope
 	}
 
 	// Resolve pricing entry with deployment fallback
-	pricing := mc.resolvePricing(provider, lookupModel, lookupResolved, requestType, scopes)
+	pricing := mc.resolvePricing(provider, lookupModel, lookupResolved, requestType)
 	if pricing == nil {
 		return 0
 	}
@@ -1139,38 +1151,36 @@ func populateOutputImageCount(imageUsage *schemas.ImageUsage, dataLen int) {
 // Pricing resolution
 // ---------------------------------------------------------------------------
 
+// GetChatTokenRates returns chat input/output per-token rates from the embedded catalog.
+func (mc *ModelCatalog) GetChatTokenRates(provider, modelName string) (inputCost, outputCost *float64) {
+	if mc == nil || modelName == "" {
+		return nil, nil
+	}
+	pricing := mc.resolvePricing(provider, modelName, modelName, schemas.ChatCompletionRequest)
+	if pricing == nil {
+		return nil, nil
+	}
+	return pricing.InputCostPerToken, pricing.OutputCostPerToken
+}
+
 // resolvePricing resolves the pricing entry for a model, trying deployment as fallback.
-func (mc *ModelCatalog) resolvePricing(provider, originalModelRequested, resolvedModelUsed string, requestType schemas.RequestType, scopes PricingLookupScopes) *configstoreTables.TableModelPricing {
+func (mc *ModelCatalog) resolvePricing(provider, originalModelRequested, resolvedModelUsed string, requestType schemas.RequestType) *configstoreTables.TableModelPricing {
 	if resolvedModelUsed == "" {
 		resolvedModelUsed = originalModelRequested
 	}
 	mc.logger.Debug("looking up pricing for resolved model %s and provider %s of request type %s", resolvedModelUsed, provider, normalizeRequestType(requestType))
 
-	if scopes.Provider == "" {
-		scopes.Provider = provider
-	}
-
 	base, exists := mc.getBasePricing(resolvedModelUsed, provider, requestType)
 	if exists && base != nil {
-		result, _ := mc.applyPricingOverrides(resolvedModelUsed, requestType, *base, scopes)
-		return &result
+		return base
 	}
 
 	mc.logger.Debug("pricing not found for resolved model %s, trying alias %s", resolvedModelUsed, originalModelRequested)
 	base, exists = mc.getBasePricing(originalModelRequested, provider, requestType)
 	if exists && base != nil {
-		// Apply overrides using the resolved model name, not the alias
-		result, _ := mc.applyPricingOverrides(resolvedModelUsed, requestType, *base, scopes)
-		return &result
+		return base
 	}
 
-	// No base catalog entry found; still try overrides in case the user defined
-	// override-only pricing for a model not in the built-in catalog.
-	mc.logger.Debug("pricing not found for resolved model %s and provider %s, trying override-only pricing", resolvedModelUsed, provider)
-	result, applied := mc.applyPricingOverrides(resolvedModelUsed, requestType, configstoreTables.TableModelPricing{}, scopes)
-	if applied {
-		return &result
-	}
 	mc.logger.Debug("no pricing found for resolved model %s and provider %s, skipping cost calculation", resolvedModelUsed, provider)
 	return nil
 }

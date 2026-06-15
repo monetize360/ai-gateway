@@ -29,6 +29,7 @@ type LocalGovernanceStore struct {
 	budgets        sync.Map // string -> *Budget (Budget ID -> Budget)
 	rateLimits   sync.Map // string -> *RateLimit (RateLimit ID -> RateLimit)
 	modelConfigs sync.Map // string -> *ModelConfig (key: "modelName" or "modelName:provider" -> ModelConfig)
+	configModels sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
 	providers    sync.Map // string -> *Provider (Provider name -> Provider with preloaded relationships)
 	routingRules sync.Map // string -> []*TableRoutingRule (key: "scope:scopeID" -> rules, scopeID="" for global)
 
@@ -135,6 +136,8 @@ type GovernanceStore interface {
 	// Provider and model-level usage updates (combined)
 	UpdateProviderAndModelBudgetUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, cost float64) error
 	UpdateProviderAndModelRateLimitUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
+	// CalculateBudgetCost computes dollar cost from config_models token pricing (0 when unknown).
+	CalculateBudgetCost(provider schemas.ModelProvider, model string, promptTokens, completionTokens int) float64
 	// Dump operations
 	DumpRateLimits(ctx context.Context, tokenBaselines map[string]int64, requestBaselines map[string]int64) error
 	DumpBudgets(ctx context.Context, baselines map[string]float64) error
@@ -784,6 +787,31 @@ func (gs *LocalGovernanceStore) CheckRateLimit(ctx context.Context, entityWiseRa
 		}
 	}
 	return DecisionAllow, nil
+}
+
+// CalculateBudgetCost computes dollar cost from config_models token pricing.
+// Returns 0 when the model is unknown or rates are unset.
+func (gs *LocalGovernanceStore) CalculateBudgetCost(provider schemas.ModelProvider, model string, promptTokens, completionTokens int) float64 {
+	if model == "" || provider == "" {
+		return 0
+	}
+	key := fmt.Sprintf("%s:%s", string(provider), model)
+	value, ok := gs.configModels.Load(key)
+	if !ok || value == nil {
+		return 0
+	}
+	configModel, ok := value.(*configstoreTables.TableModel)
+	if !ok || configModel == nil {
+		return 0
+	}
+	var cost float64
+	if configModel.InputCostPerToken != nil {
+		cost += float64(promptTokens) * *configModel.InputCostPerToken
+	}
+	if configModel.OutputCostPerToken != nil {
+		cost += float64(completionTokens) * *configModel.OutputCostPerToken
+	}
+	return cost
 }
 
 // Generic check budget method
@@ -1573,6 +1601,11 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load providers: %w", err)
 	}
 
+	configModels, err := gs.configStore.GetConfigModels(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load config models: %w", err)
+	}
+
 	// Load routing rules
 	routingRules, err := gs.configStore.GetRoutingRules(ctx)
 	if err != nil {
@@ -1580,7 +1613,7 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	}
 
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, routingRules)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules)
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
@@ -1671,21 +1704,36 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	attachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, routingRules)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, routingRules []configstoreTables.TableRoutingRule) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
 	gs.budgets = sync.Map{}
 	gs.rateLimits = sync.Map{}
 	gs.modelConfigs = sync.Map{}
+	gs.configModels = sync.Map{}
 	gs.providers = sync.Map{}
 	gs.routingRules = sync.Map{}
+
+	providerNameByID := make(map[string]string, len(providers))
+	for i := range providers {
+		providerNameByID[providers[i].ID] = providers[i].Name
+	}
+	for i := range configModels {
+		cm := &configModels[i]
+		providerName, ok := providerNameByID[cm.ProviderID]
+		if !ok || providerName == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s:%s", providerName, cm.Name)
+		gs.configModels.Store(key, cm)
+	}
 
 	for i := range organizations {
 		org := &organizations[i]

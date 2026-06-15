@@ -1984,136 +1984,6 @@ func (s *RDBConfigStore) UpdateConfig(ctx context.Context, config *tables.TableG
 	return txDB.WithContext(ctx).Save(config).Error
 }
 
-func (s *RDBConfigStore) GetPricingOverrides(ctx context.Context, filters PricingOverrideFilters) ([]tables.TablePricingOverride, error) {
-	var overrides []tables.TablePricingOverride
-	q := GovernanceActive(s.DB().WithContext(ctx)).Model(&tables.TablePricingOverride{})
-	if filters.ScopeKind != nil {
-		q = q.Where("scope_kind = ?", *filters.ScopeKind)
-	}
-	if filters.VirtualKeyID != nil {
-		q = q.Where("virtual_key_id = ?", *filters.VirtualKeyID)
-	}
-	if filters.ProviderID != nil {
-		q = q.Where("provider_id = ?", *filters.ProviderID)
-	}
-	if filters.ProviderKeyID != nil {
-		q = q.Where("provider_key_id = ?", *filters.ProviderKeyID)
-	}
-	if err := q.Order("created_at ASC").Find(&overrides).Error; err != nil {
-		return nil, s.parseGormError(err)
-	}
-	return overrides, nil
-}
-
-func (s *RDBConfigStore) GetPricingOverridesPaginated(ctx context.Context, params PricingOverridesQueryParams) ([]tables.TablePricingOverride, int64, error) {
-	baseQuery := GovernanceActive(s.DB().WithContext(ctx)).Model(&tables.TablePricingOverride{})
-
-	if params.Search != "" {
-		search := "%" + strings.ToLower(params.Search) + "%"
-		baseQuery = baseQuery.Where("LOWER(name) LIKE ?", search)
-	}
-	if params.ScopeKind != nil {
-		baseQuery = baseQuery.Where("scope_kind = ?", *params.ScopeKind)
-	}
-	if params.VirtualKeyID != nil {
-		baseQuery = baseQuery.Where("virtual_key_id = ?", *params.VirtualKeyID)
-	}
-	if params.ProviderID != nil {
-		baseQuery = baseQuery.Where("provider_id = ?", *params.ProviderID)
-	}
-	if params.ProviderKeyID != nil {
-		baseQuery = baseQuery.Where("provider_key_id = ?", *params.ProviderKeyID)
-	}
-
-	var totalCount int64
-	if err := baseQuery.Count(&totalCount).Error; err != nil {
-		return nil, 0, err
-	}
-
-	limit := params.Limit
-	offset := params.Offset
-
-	if limit <= 0 {
-		limit = 25
-	} else if limit > 100 {
-		limit = 100
-	}
-
-	if offset < 0 {
-		offset = 0
-	}
-
-	var overrides []tables.TablePricingOverride
-	if err := baseQuery.
-		Order("created_at ASC").
-		Offset(offset).
-		Limit(limit).
-		Find(&overrides).Error; err != nil {
-		return nil, 0, s.parseGormError(err)
-	}
-	return overrides, totalCount, nil
-}
-
-func (s *RDBConfigStore) GetPricingOverrideByID(ctx context.Context, id string) (*tables.TablePricingOverride, error) {
-	var override tables.TablePricingOverride
-	if err := GovernanceActive(s.DB().WithContext(ctx)).First(&override, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, s.parseGormError(err)
-	}
-	return &override, nil
-}
-
-func (s *RDBConfigStore) CreatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	EnsureGovernanceRowID(&override.ID)
-	ApplyAuditOnCreate(ctx, &override.SystemColumns)
-	if err := txDB.WithContext(ctx).Create(override).Error; err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-func (s *RDBConfigStore) UpdatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	ApplyAuditOnUpdate(ctx, &override.SystemColumns)
-	if err := txDB.WithContext(ctx).Save(override).Error; err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-func (s *RDBConfigStore) DeletePricingOverride(ctx context.Context, id string, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	var existing tables.TablePricingOverride
-	if err := GovernanceActive(txDB.WithContext(ctx)).First(&existing, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrNotFound
-		}
-		return s.parseGormError(err)
-	}
-	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TablePricingOverride{}, "id = ?", id); err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
 // PLUGINS METHODS
 
 func (s *RDBConfigStore) GetPlugins(ctx context.Context) ([]*tables.TablePlugin, error) {
@@ -4032,7 +3902,6 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 	var modelConfigs []tables.TableModelConfig
 	var providers []tables.TableProvider
 	var routingRules []tables.TableRoutingRule
-	var pricingOverrides []tables.TablePricingOverride
 	var governanceConfigs []tables.TableGovernanceConfig
 
 	if err := preloadVirtualKeyBaseRelations(GovernanceActive(s.DB().WithContext(ctx))).
@@ -4063,15 +3932,12 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 	if err := s.loadRoutingRulesOrdered(ctx, &routingRules); err != nil {
 		return nil, err
 	}
-	if err := GovernanceActive(s.DB().WithContext(ctx)).Find(&pricingOverrides).Error; err != nil {
-		return nil, err
-	}
 	// Fetching governance config for username and password
 	if err := GovernanceActive(s.DB().WithContext(ctx)).Find(&governanceConfigs).Error; err != nil {
 		return nil, err
 	}
 	// Check if any config is present
-	if len(virtualKeys) == 0 && len(teams) == 0 && len(customers) == 0 && len(budgets) == 0 && len(rateLimits) == 0 && len(modelConfigs) == 0 && len(providers) == 0 && len(governanceConfigs) == 0 && len(routingRules) == 0 && len(pricingOverrides) == 0 {
+	if len(virtualKeys) == 0 && len(teams) == 0 && len(customers) == 0 && len(budgets) == 0 && len(rateLimits) == 0 && len(modelConfigs) == 0 && len(providers) == 0 && len(governanceConfigs) == 0 && len(routingRules) == 0 {
 		return nil, nil
 	}
 	var authConfig *AuthConfig
@@ -4112,9 +3978,8 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 		RateLimits:       rateLimits,
 		ModelConfigs:     modelConfigs,
 		Providers:        providers,
-		RoutingRules:     routingRules,
-		PricingOverrides: pricingOverrides,
-		AuthConfig:       authConfig,
+		RoutingRules: routingRules,
+		AuthConfig:   authConfig,
 	}, nil
 }
 

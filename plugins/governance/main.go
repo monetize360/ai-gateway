@@ -1471,9 +1471,6 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 
 	isFinalChunk := bifrost.IsFinalChunk(ctx)
 
-	// Build pricing scopes from context using the governance VK ID (not the raw VK token)
-	pricingScopes := modelcatalog.PricingLookupScopesFromContext(ctx, string(provider))
-
 	// Always process usage tracking (with or without virtual key).
 	// Enterprise user auth skips VK usage tracking so user-level governance owns limits.
 	effectiveVK := virtualKey
@@ -1501,7 +1498,7 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		go func() {
 			defer p.wg.Done()
 			// Use the requested model for usage tracking
-			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, pricingScopes)
+			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk)
 		}()
 	}
 
@@ -1707,6 +1704,26 @@ func (p *GovernancePlugin) Cleanup() error {
 	return cleanupErr
 }
 
+func extractBudgetTokenCounts(result *schemas.BifrostResponse) (promptTokens, completionTokens int) {
+	if result == nil {
+		return 0, 0
+	}
+	switch {
+	case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
+		return result.TextCompletionResponse.Usage.PromptTokens, result.TextCompletionResponse.Usage.CompletionTokens
+	case result.ChatResponse != nil && result.ChatResponse.Usage != nil:
+		return result.ChatResponse.Usage.PromptTokens, result.ChatResponse.Usage.CompletionTokens
+	case result.ResponsesResponse != nil && result.ResponsesResponse.Usage != nil:
+		return result.ResponsesResponse.Usage.InputTokens, result.ResponsesResponse.Usage.OutputTokens
+	case result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.Response != nil && result.ResponsesStreamResponse.Response.Usage != nil:
+		return result.ResponsesStreamResponse.Response.Usage.InputTokens, result.ResponsesStreamResponse.Response.Usage.OutputTokens
+	case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
+		return result.EmbeddingResponse.Usage.PromptTokens, 0
+	default:
+		return 0, 0
+	}
+}
+
 // postHookWorker is a worker function that processes the response and updates usage tracking
 // It is used to avoid blocking the main thread when updating usage tracking
 // Handles both cases: with virtual key and without virtual key (empty string)
@@ -1723,8 +1740,7 @@ func (p *GovernancePlugin) Cleanup() error {
 //   - isCacheRead: Whether the request is a cache read
 //   - isBatch: Whether the request is a batch request
 //   - isFinalChunk: Whether the request is the final chunk
-//   - pricingScopes: Prebuilt pricing lookup scopes using governance VK ID (nil if not applicable)
-func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool, pricingScopes *modelcatalog.PricingLookupScopes) {
+func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool) {
 	if comp == nil || comp.tracker == nil {
 		return
 	}
@@ -1735,9 +1751,10 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 	isStreaming := bifrost.IsStreamRequestType(requestType)
 
 	if !isStreaming || (isStreaming && isFinalChunk) {
-		var cost float64
-		if p.modelCatalog != nil && result != nil {
-			cost = p.modelCatalog.CalculateCost(result, pricingScopes)
+		promptTokens, completionTokens := extractBudgetTokenCounts(result)
+		cost := float64(0)
+		if comp.store != nil {
+			cost = comp.store.CalculateBudgetCost(provider, model, promptTokens, completionTokens)
 		}
 		tokensUsed := 0
 		if result != nil {

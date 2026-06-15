@@ -83,8 +83,6 @@ type ServerCallbacks interface {
 	// Pricing related callbacks
 	UpdateSyncConfig(ctx context.Context) error
 	ForceReloadPricing(ctx context.Context) error
-	UpsertPricingOverride(ctx context.Context, override *tables.TablePricingOverride) error
-	DeletePricingOverride(ctx context.Context, id string) error
 	// Proxy related callbacks
 	ReloadProxyConfig(ctx context.Context, config *tables.GlobalProxyConfig) error
 	// Client config related callbacks
@@ -692,7 +690,17 @@ func (s *BifrostHTTPServer) syncListedModelsToConfigStore(
 	if len(modelNames) == 0 {
 		return
 	}
-	if err := store.SyncProviderModels(ctx, provider, modelNames); err != nil {
+	tokenPricing := make(map[string]configstore.ConfigModelTokenPricing, len(modelNames))
+	if s.Config.ModelCatalog != nil {
+		for _, name := range modelNames {
+			inputCost, outputCost := s.Config.ModelCatalog.GetChatTokenRates(string(provider), name)
+			tokenPricing[name] = configstore.ConfigModelTokenPricing{
+				InputCostPerToken:  inputCost,
+				OutputCostPerToken: outputCost,
+			}
+		}
+	}
+	if err := store.SyncProviderModels(ctx, provider, modelNames, tokenPricing); err != nil {
 		logger.Warn("failed to sync config_models for provider %s: %v", provider, err)
 	}
 }
@@ -995,23 +1003,6 @@ func (s *BifrostHTTPServer) ReloadPricingFromDBAndPopulateModelPool(ctx context.
 		}
 		return s.populateModelPoolWithListModels(ctx)
 	}
-	return nil
-}
-
-// UpsertPricingOverride inserts or updates a pricing override in the in-memory model catalog.
-func (s *BifrostHTTPServer) UpsertPricingOverride(ctx context.Context, override *tables.TablePricingOverride) error {
-	if s.Config == nil || s.Config.ModelCatalog == nil {
-		return fmt.Errorf("pricing manager not found")
-	}
-	return s.Config.ModelCatalog.UpsertPricingOverrides(override)
-}
-
-// DeletePricingOverride removes a pricing override from the in-memory model catalog.
-func (s *BifrostHTTPServer) DeletePricingOverride(ctx context.Context, id string) error {
-	if s.Config == nil || s.Config.ModelCatalog == nil {
-		return fmt.Errorf("pricing manager not found")
-	}
-	s.Config.ModelCatalog.DeletePricingOverride(id)
 	return nil
 }
 

@@ -1476,7 +1476,7 @@ func TestGetPricing_DirectLookup(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gpt-4o", "openai", "chat"): chatPricing(0.000005, 0.000015),
 	})
-	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ChatCompletionRequest, PricingLookupScopes{Provider: "openai"})
+	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ChatCompletionRequest)
 	assert.Equal(t, 0.000005, derefF(p.InputCostPerToken))
 }
 
@@ -1487,7 +1487,7 @@ func TestGetPricing_GeminiFallsBackToVertex(t *testing.T) {
 			InputCostPerToken: bifrost.Ptr(0.0000001), OutputCostPerToken: bifrost.Ptr(0.0000004),
 		},
 	})
-	p := mc.resolvePricing("gemini", "gemini-2.0-flash", "", schemas.ChatCompletionRequest, PricingLookupScopes{Provider: "gemini"})
+	p := mc.resolvePricing("gemini", "gemini-2.0-flash", "", schemas.ChatCompletionRequest)
 	assert.Equal(t, 0.0000001, derefF(p.InputCostPerToken))
 }
 
@@ -1495,7 +1495,7 @@ func TestGetPricing_VertexStripsProviderPrefix(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gemini-2.0-flash", "vertex", "chat"): chatPricing(0.0000001, 0.0000004),
 	})
-	p := mc.resolvePricing("vertex", "google/gemini-2.0-flash", "", schemas.ChatCompletionRequest, PricingLookupScopes{Provider: "vertex"})
+	p := mc.resolvePricing("vertex", "google/gemini-2.0-flash", "", schemas.ChatCompletionRequest)
 	assert.Equal(t, 0.0000001, derefF(p.InputCostPerToken))
 }
 
@@ -1503,7 +1503,7 @@ func TestGetPricing_BedrockAddsAnthropicPrefix(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("anthropic.claude-3-5-sonnet-20241022-v2:0", "bedrock", "chat"): chatPricing(0.000003, 0.000015),
 	})
-	p := mc.resolvePricing("bedrock", "claude-3-5-sonnet-20241022-v2:0", "", schemas.ChatCompletionRequest, PricingLookupScopes{Provider: "bedrock"})
+	p := mc.resolvePricing("bedrock", "claude-3-5-sonnet-20241022-v2:0", "", schemas.ChatCompletionRequest)
 	assert.Equal(t, 0.000003, derefF(p.InputCostPerToken))
 }
 
@@ -1511,7 +1511,7 @@ func TestGetPricing_ResponsesFallsBackToChat(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gpt-4o", "openai", "chat"): chatPricing(0.000005, 0.000015),
 	})
-	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ResponsesRequest, PricingLookupScopes{Provider: "openai"})
+	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ResponsesRequest)
 	assert.Equal(t, 0.000005, derefF(p.InputCostPerToken))
 }
 
@@ -1519,7 +1519,7 @@ func TestGetPricing_ResponsesStreamFallsBackToChat(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gpt-4o", "openai", "chat"): chatPricing(0.000005, 0.000015),
 	})
-	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ResponsesStreamRequest, PricingLookupScopes{Provider: "openai"})
+	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.ResponsesStreamRequest)
 	assert.Equal(t, 0.000005, derefF(p.InputCostPerToken))
 }
 
@@ -1527,7 +1527,7 @@ func TestGetPricing_RealtimeFallsBackToChat(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gpt-4o", "openai", "chat"): chatPricing(0.000005, 0.000015),
 	})
-	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.RealtimeRequest, PricingLookupScopes{Provider: "openai"})
+	p := mc.resolvePricing("openai", "gpt-4o", "", schemas.RealtimeRequest)
 	assert.Equal(t, 0.000005, derefF(p.InputCostPerToken))
 }
 
@@ -1536,13 +1536,13 @@ func TestGetPricing_GeminiResponsesFallsBackToVertexChat(t *testing.T) {
 		makeKey("gemini-2.0-flash", "vertex", "chat"): chatPricing(0.0000001, 0.0000004),
 	})
 	// gemini provider + responses request → try vertex + responses → try vertex + chat
-	p := mc.resolvePricing("gemini", "gemini-2.0-flash", "", schemas.ResponsesRequest, PricingLookupScopes{Provider: "gemini"})
+	p := mc.resolvePricing("gemini", "gemini-2.0-flash", "", schemas.ResponsesRequest)
 	assert.Equal(t, 0.0000001, derefF(p.InputCostPerToken))
 }
 
 func TestGetPricing_NotFound(t *testing.T) {
 	mc := testCatalogWithPricing(nil)
-	p := mc.resolvePricing("openai", "nonexistent", "", schemas.ChatCompletionRequest, PricingLookupScopes{Provider: "openai"})
+	p := mc.resolvePricing("openai", "nonexistent", "", schemas.ChatCompletionRequest)
 	assert.Nil(t, p)
 }
 
@@ -1556,7 +1556,7 @@ func TestResolvePricing_DeploymentFallback(t *testing.T) {
 	})
 
 	// Model not found directly, but deployment matches
-	p := mc.resolvePricing("openai", "gpt-4o-custom", "my-deployment", schemas.ChatCompletionRequest, PricingLookupScopes{})
+	p := mc.resolvePricing("openai", "gpt-4o-custom", "my-deployment", schemas.ChatCompletionRequest)
 	require.NotNil(t, p)
 	assert.Equal(t, 0.000005, derefF(p.InputCostPerToken))
 }
@@ -1569,14 +1569,14 @@ func TestResolvePricing_ResolvedModelHasPriority(t *testing.T) {
 
 	// Resolved model ("my-deployment") is looked up first and has priority
 	// over the originally requested model ("gpt-4o").
-	p := mc.resolvePricing("openai", "gpt-4o", "my-deployment", schemas.ChatCompletionRequest, PricingLookupScopes{})
+	p := mc.resolvePricing("openai", "gpt-4o", "my-deployment", schemas.ChatCompletionRequest)
 	require.NotNil(t, p)
 	assert.Equal(t, 0.000001, derefF(p.InputCostPerToken))
 }
 
 func TestResolvePricing_NothingFound(t *testing.T) {
 	mc := testCatalogWithPricing(nil)
-	p := mc.resolvePricing("openai", "unknown", "", schemas.ChatCompletionRequest, PricingLookupScopes{})
+	p := mc.resolvePricing("openai", "unknown", "", schemas.ChatCompletionRequest)
 	assert.Nil(t, p)
 }
 

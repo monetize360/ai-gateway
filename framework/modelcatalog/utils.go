@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytedance/sonic"
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
@@ -328,26 +327,6 @@ func convertTableModelPricingToPricingData(pricing *configstoreTables.TableModel
 		Architecture:    pricing.Architecture,
 		PricingOptions:  options,
 	}
-}
-
-// convertTablePricingOverrideToPricingOverride converts a TablePricingOverride to a PricingOverride.
-func convertTablePricingOverrideToPricingOverride(override *configstoreTables.TablePricingOverride) (PricingOverride, error) {
-	var options PricingOptions
-	if err := sonic.Unmarshal([]byte(override.PricingPatchJSON), &options); err != nil {
-		return PricingOverride{}, err
-	}
-	return PricingOverride{
-		ID:            override.ID,
-		Name:          override.Name,
-		ScopeKind:     ScopeKind(override.ScopeKind),
-		VirtualKeyID:  override.VirtualKeyID,
-		ProviderID:    override.ProviderID,
-		ProviderKeyID: override.ProviderKeyID,
-		MatchType:     MatchType(override.MatchType),
-		Pattern:       override.Pattern,
-		RequestTypes:  override.RequestTypes,
-		Options:       options,
-	}, nil
 }
 
 // normalizeEndpointToOutputType converts a supported_endpoints URL path to a normalized output type.

@@ -76,7 +76,6 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.TableVirtualKeyProviderConfigKey{},
 		&tables.TableGovernanceConfig{},
 		&tables.TableModelConfig{},
-		&tables.TablePricingOverride{},
 		&tables.TablePlugin{},
 		&tables.TableFeatureFlag{},
 		&tables.TableFrameworkConfig{},

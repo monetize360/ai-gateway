@@ -22,14 +22,6 @@ type ModelCatalog struct {
 	pricingData map[string]configstoreTables.TableModelPricing
 	mu          sync.RWMutex
 
-	// rawOverrides is the canonical list of all active overrides. It exists solely
-	// to support incremental mutations: UpsertPricingOverrides and DeletePricingOverride
-	// iterate over it to rebuild the list, then derive customPricing from it.
-	// customPricing is the actual lookup structure used at query time.
-	rawOverrides  []PricingOverride
-	customPricing *customPricingData
-	overridesMu   sync.RWMutex
-
 	modelPool           map[schemas.ModelProvider][]string
 	unfilteredModelPool map[schemas.ModelProvider][]string // model pool without allowed models filtering
 	baseModelIndex      map[string]string                  // model string → canonical base model name
@@ -67,10 +59,6 @@ func Init(ctx context.Context, _ *Config, configStore configstore.ConfigStore, l
 	}
 
 	mc.populateModelPoolFromPricingData()
-
-	if err := mc.loadPricingOverridesFromStore(ctx); err != nil {
-		return nil, fmt.Errorf("failed to load pricing overrides: %w", err)
-	}
 
 	providerUtils.SetCacheMissHandler(func(model string) *providerUtils.ModelParams {
 		return mc.lookupModelParams(model)
@@ -125,16 +113,16 @@ func (mc *ModelCatalog) SetAfterSyncHook(_ func(ctx context.Context)) {}
 // WaitStartupBackgroundSync is retained for API compatibility.
 func (mc *ModelCatalog) WaitStartupBackgroundSync(_ context.Context) {}
 
-// ReloadFromDB reloads the embedded catalog and tenant pricing overrides.
+// ReloadFromDB reloads the embedded catalog.
 func (mc *ModelCatalog) ReloadFromDB(ctx context.Context) error {
 	if err := mc.loadEmbeddedCatalog(); err != nil {
 		return err
 	}
 	mc.populateModelPoolFromPricingData()
-	return mc.loadPricingOverridesFromStore(ctx)
+	return nil
 }
 
-// UpdateSyncConfig reloads the embedded catalog and tenant pricing overrides.
+// UpdateSyncConfig reloads the embedded catalog.
 func (mc *ModelCatalog) UpdateSyncConfig(ctx context.Context, _ *Config) error {
 	return mc.ForceReloadPricing(ctx)
 }
@@ -144,9 +132,6 @@ func (mc *ModelCatalog) ForceReloadPricing(ctx context.Context) error {
 		return fmt.Errorf("failed to reload embedded model catalog: %w", err)
 	}
 	mc.populateModelPoolFromPricingData()
-	if err := mc.loadPricingOverridesFromStore(ctx); err != nil {
-		return fmt.Errorf("failed to load pricing overrides: %w", err)
-	}
 	return nil
 }
 

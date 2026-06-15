@@ -61,24 +61,7 @@ type CustomersQueryParams struct {
 	Search string
 }
 
-// PricingOverrideFilters holds the filters for pricing overrides.
-type PricingOverrideFilters struct {
-	ScopeKind     *string
-	VirtualKeyID  *string
-	ProviderID    *string
-	ProviderKeyID *string
-}
-
-// PricingOverridesQueryParams holds pagination, filtering, and search parameters for pricing override queries.
-type PricingOverridesQueryParams struct {
-	Limit         int
-	Offset        int
-	Search        string
-	ScopeKind     *string
-	VirtualKeyID  *string
-	ProviderID    *string
-	ProviderKeyID *string
-}
+// PricingOverrideFilters and PricingOverridesQueryParams removed — pricing lives on config_models.
 
 // ConfigStore is the interface for the config store.
 type ConfigStore interface {
@@ -120,7 +103,8 @@ type ConfigStore interface {
 	DeleteProviderKey(ctx context.Context, provider schemas.ModelProvider, keyID string, tx ...*gorm.DB) error
 	GetProviders(ctx context.Context) ([]tables.TableProvider, error)
 	GetProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
-	SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tx ...*gorm.DB) error
+	SyncProviderModels(ctx context.Context, provider schemas.ModelProvider, modelNames []string, tokenPricing map[string]ConfigModelTokenPricing, tx ...*gorm.DB) error
+	GetConfigModels(ctx context.Context) ([]tables.TableModel, error)
 	UpdateStatus(ctx context.Context, provider schemas.ModelProvider, keyID string, status, errorMsg string) error
 
 	// MCP config CRUD
@@ -272,14 +256,6 @@ type ConfigStore interface {
 	// the link as soon as the work it authorized is finished.
 	DeleteTempTokensByResourceID(ctx context.Context, scope, resourceID string, tx ...*gorm.DB) (int64, error)
 	DeleteExpiredTempTokens(ctx context.Context, before time.Time) (int64, error)
-
-	// Governance pricing overrides CRUD
-	GetPricingOverrides(ctx context.Context, filters PricingOverrideFilters) ([]tables.TablePricingOverride, error)
-	GetPricingOverridesPaginated(ctx context.Context, params PricingOverridesQueryParams) ([]tables.TablePricingOverride, int64, error)
-	GetPricingOverrideByID(ctx context.Context, id string) (*tables.TablePricingOverride, error)
-	CreatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
-	UpdatePricingOverride(ctx context.Context, override *tables.TablePricingOverride, tx ...*gorm.DB) error
-	DeletePricingOverride(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Key management
 	GetKeysByIDs(ctx context.Context, ids []string) ([]tables.TableKey, error)

@@ -35,7 +35,7 @@ func TestSyncProviderModels(t *testing.T) {
 		Name: string(schemas.OpenAI),
 	}).Error)
 
-	err := store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4o-mini"})
+	err := store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4o-mini"}, nil)
 	require.NoError(t, err)
 
 	var models []tables.TableModel
@@ -44,7 +44,7 @@ func TestSyncProviderModels(t *testing.T) {
 	assert.Equal(t, "gpt-4o", models[0].Name)
 	assert.Equal(t, "gpt-4o-mini", models[1].Name)
 
-	err = store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4.1"})
+	err = store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4.1"}, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, ActiveRows(store.DB()).Where("provider_id = ?", providerID).Order("name ASC").Find(&models).Error)
@@ -55,7 +55,7 @@ func TestSyncProviderModels(t *testing.T) {
 	require.NoError(t, store.DB().Unscoped().Where("provider_id = ? AND name = ?", providerID, "gpt-4o-mini").First(&deleted).Error)
 	assert.True(t, deleted.Deleted)
 
-	err = store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1"})
+	err = store.SyncProviderModels(ctx, schemas.OpenAI, []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1"}, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, ActiveRows(store.DB()).Where("provider_id = ?", providerID).Order("name ASC").Find(&models).Error)
@@ -78,7 +78,7 @@ func TestSyncProviderModels_EmptyInputIsNoOp(t *testing.T) {
 		Name:       "gpt-4o",
 	}).Error)
 
-	err := store.SyncProviderModels(ctx, schemas.OpenAI, nil)
+	err := store.SyncProviderModels(ctx, schemas.OpenAI, nil, nil)
 	require.NoError(t, err)
 
 	var count int64
