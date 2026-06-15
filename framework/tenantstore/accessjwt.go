@@ -42,13 +42,48 @@ type TenantClaims struct {
 //   - the token has expired or is not yet valid
 //   - tenantId or virtualKey claims are missing
 func ExtractClaimsFromJWT(tokenStr string, key []byte) (*TenantClaims, error) {
+	return extractClaimsFromJWTWithKeys(tokenStr, true, key)
+}
+
+// ExtractTenantAuthClaimsFromJWT validates a JWT signed with any of the supplied keys
+// and returns claims when tenantId is present. virtualKey is optional (MPilot user tokens).
+func ExtractTenantAuthClaimsFromJWT(tokenStr string, keys ...[]byte) (*TenantClaims, error) {
+	return extractClaimsFromJWTWithKeys(tokenStr, false, keys...)
+}
+
+func extractClaimsFromJWTWithKeys(tokenStr string, requireVirtualKey bool, keys ...[]byte) (*TenantClaims, error) {
 	if tokenStr == "" {
 		return nil, fmt.Errorf("token string is empty")
 	}
-	if len(key) == 0 {
+	if len(keys) == 0 {
 		return nil, fmt.Errorf("JWT key must not be empty")
 	}
 
+	var lastErr error
+	for _, key := range keys {
+		if len(key) == 0 {
+			continue
+		}
+		claims, err := parseTenantClaims(tokenStr, key)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if claims.TenantID == "" {
+			return nil, fmt.Errorf("token missing tenantId claim")
+		}
+		if requireVirtualKey && claims.VirtualKey == "" {
+			return nil, fmt.Errorf("token missing virtualKey claim")
+		}
+		return claims, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("JWT key must not be empty")
+}
+
+func parseTenantClaims(tokenStr string, key []byte) (*TenantClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &TenantClaims{}, func(t *jwt.Token) (any, error) {
 		switch t.Method.(type) {
 		case *jwt.SigningMethodRSA:
@@ -76,12 +111,6 @@ func ExtractClaimsFromJWT(tokenStr string, key []byte) (*TenantClaims, error) {
 	claims, ok := token.Claims.(*TenantClaims)
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("could not parse token claims")
-	}
-	if claims.TenantID == "" {
-		return nil, fmt.Errorf("token missing tenantId claim")
-	}
-	if claims.VirtualKey == "" {
-		return nil, fmt.Errorf("token missing virtualKey claim")
 	}
 	return claims, nil
 }

@@ -104,6 +104,7 @@ type ServerCallbacks interface {
 	RemoveModelConfig(ctx context.Context, id string) error
 	ReloadProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
 	RemoveProvider(ctx context.Context, provider schemas.ModelProvider) error
+	SyncProviderModelsForTenant(ctx context.Context, tenantID string) error
 	ReloadRoutingRule(ctx context.Context, id string) error
 	RemoveRoutingRule(ctx context.Context, id string) error
 	// MCP related callbacks
@@ -705,6 +706,35 @@ func (s *BifrostHTTPServer) syncListedModelsToConfigStore(
 	}
 }
 
+// syncProviderModelsForTenant lists models for each provider in a single tenant and
+// persists them into that tenant's config_models table.
+func (s *BifrostHTTPServer) SyncProviderModelsForTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenant id is required")
+	}
+	if s.Config == nil || s.Config.TenantStore == nil || s.Config.TenantStore.Registry == nil {
+		return fmt.Errorf("tenant store is not configured")
+	}
+
+	store := s.Config.TenantStore.Registry.GetStoreForTenant(ctx, tenantID)
+	if store == nil {
+		return fmt.Errorf("unknown tenant")
+	}
+
+	tenantCtx := context.WithValue(ctx, schemas.BifrostContextKeyTenantID, tenantID)
+	providers, err := store.GetProvidersConfig(tenantCtx)
+	if err != nil {
+		return fmt.Errorf("failed to list providers for tenant %s: %w", tenantID, err)
+	}
+
+	for provider := range providers {
+		if _, reloadErr := s.ReloadProvider(tenantCtx, provider); reloadErr != nil {
+			return fmt.Errorf("provider model sync failed: %w", reloadErr)
+		}
+	}
+	return nil
+}
+
 // syncProviderModelsForAllTenants lists models for each tenant's providers and
 // persists them into that tenant's config_models table. Startup and pricing reload
 // paths run without a tenant on the root context, so they must iterate tenants
@@ -720,23 +750,8 @@ func (s *BifrostHTTPServer) syncProviderModelsForAllTenants(ctx context.Context)
 	}
 
 	for _, tenantID := range registry.ListTenantIDs(ctx) {
-		tenantCtx := context.WithValue(ctx, schemas.BifrostContextKeyTenantID, tenantID)
-		store := registry.GetStoreForTenant(ctx, tenantID)
-		if store == nil {
-			logger.Warn("tenant model sync: no config store for tenant %s", tenantID)
-			continue
-		}
-
-		providers, err := store.GetProvidersConfig(tenantCtx)
-		if err != nil {
-			logger.Warn("tenant model sync: failed to list providers for tenant %s: %v", tenantID, err)
-			continue
-		}
-
-		for provider := range providers {
-			if _, err := s.ReloadProvider(tenantCtx, provider); err != nil {
-				logger.Warn("tenant model sync: failed for tenant %s provider %s: %v", tenantID, provider, err)
-			}
+		if err := s.SyncProviderModelsForTenant(ctx, tenantID); err != nil {
+			logger.Warn("tenant model sync: failed for tenant %s: %v", tenantID, err)
 		}
 	}
 }
@@ -1413,7 +1428,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		}
 		s.Config.TenantStore = tenantHolder
 		if tenantHolder != nil {
-			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey, tenantHolder.Registry)
+			s.TenantMiddleware = handlers.NewTenantMiddleware(tenantHolder.JWTKey, tenantHolder.Registry, tenantHolder.AdminJWTKey)
 		}
 		if err := lib.InitTenantLogStores(ctx, s.Config.TenantStore, s.Config.LogsStoreConfig); err != nil {
 			return fmt.Errorf("failed to initialise tenant log stores: %v", err)

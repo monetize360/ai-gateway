@@ -1211,45 +1211,28 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 	return obsPlugins
 }
 
-// TenantMiddleware validates the Bearer JWT issued by the mpilotv2 backend and
-// injects tenant-scoped identity values into the fasthttp user-value map.
-// ConvertToBifrostContext then copies all user values into BifrostContext
-// automatically via VisitUserValuesAll.
-//
-// Values written to context on success:
-//   - BifrostContextKeyTenantID                — tenantId claim (UUID)
-//   - BifrostContextKeyGovernanceVirtualKeyID  — virtualKey claim (UUID, governance_virtual_keys.id)
-//   - BifrostContextKeyVirtualKey              — same as governance virtual key id (for governance + routing)
-//   - BifrostContextKeyGovernanceOrgID         — morgId claim (UUID) when present
-//
-// The JWT userId claim is intentionally not copied into context: MPilot tenant auth
-// attributes all governance usage (budget, rate limits, finops logs) to the virtual key.
-//
-// The JWT key is shared across all tenants and loaded from config.json at
-// startup. Both RS256 (PEM RSA public key) and HS256 (HMAC secret) are
-// supported; the algorithm is auto-detected from the token header.
-//
-// Returns 401 when:
-//   - the Authorization header is missing or does not start with "Bearer "
-//   - the JWT signature is invalid or the token has expired
-//   - the tenantId or virtualKey claims are absent or empty
-//   - the virtual key does not exist or is inactive in the tenant DB
+// TenantMiddleware validates MPilot JWTs and injects tenant-scoped identity into the
+// fasthttp user-value map. Inference routes require a virtual-key JWT; admin/API
+// routes accept a tenant-only JWT signed with the MPilot admin key (admin_jwt_public_key).
 type TenantMiddleware struct {
-	jwtKey   []byte
-	registry tenantstore.Resolver
+	virtualKeyJWTKey []byte
+	adminJWTKey      []byte
+	registry         tenantstore.Resolver
 }
 
 // NewTenantMiddleware creates a TenantMiddleware using the supplied key bytes.
-// For RS256 tokens pass a PEM-encoded RSA public key; for HS256 pass the raw secret.
-// registry resolves per-tenant config stores for virtual key validation.
-func NewTenantMiddleware(jwtKey []byte, registry tenantstore.Resolver) *TenantMiddleware {
-	return &TenantMiddleware{jwtKey: jwtKey, registry: registry}
+// virtualKeyJWTKey verifies inference tokens (virtual-key.public).
+// adminJWTKey verifies tenant admin tokens (jwt.key.public / admin_jwt_public_key).
+func NewTenantMiddleware(virtualKeyJWTKey []byte, registry tenantstore.Resolver, adminJWTKey ...[]byte) *TenantMiddleware {
+	m := &TenantMiddleware{virtualKeyJWTKey: virtualKeyJWTKey, registry: registry}
+	if len(adminJWTKey) > 0 {
+		m.adminJWTKey = adminJWTKey[0]
+	}
+	return m
 }
 
-// Middleware returns a schemas.BifrostHTTPMiddleware that validates the JWT and
-// injects tenantId + virtualKey into the request context.
-// OptionalMiddleware returns tenant JWT middleware that skips whitelisted paths
-// (health, metrics, UI static, session login, etc.).
+// OptionalMiddleware returns tenant JWT middleware for admin/API routes. Whitelisted
+// paths (health, login, static assets) skip JWT entirely.
 func (m *TenantMiddleware) OptionalMiddleware() schemas.BifrostHTTPMiddleware {
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
@@ -1257,53 +1240,103 @@ func (m *TenantMiddleware) OptionalMiddleware() schemas.BifrostHTTPMiddleware {
 				next(ctx)
 				return
 			}
-			m.Middleware()(next)(ctx)
+			m.AuthMiddleware()(next)(ctx)
 		}
 	}
 }
 
+// Middleware validates virtual-key JWTs for inference routes.
 func (m *TenantMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
-			authHeader := string(ctx.Request.Header.Peek("Authorization"))
-			if !strings.HasPrefix(authHeader, "Bearer ") {
-				SendError(ctx, fasthttp.StatusUnauthorized, "missing or invalid Authorization header")
+			if err := m.authenticateInferenceRequest(ctx); err != nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, err.Error())
 				return
-			}
-			rawToken := strings.TrimPrefix(authHeader, "Bearer ")
-
-			claims, err := tenantstore.ExtractClaimsFromJWT(rawToken, m.jwtKey)
-			if err != nil {
-				SendError(ctx, fasthttp.StatusUnauthorized, "invalid tenant token: "+err.Error())
-				return
-			}
-
-			if m.registry == nil {
-				SendError(ctx, fasthttp.StatusUnauthorized, "tenant store not configured")
-				return
-			}
-			store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
-			if store == nil {
-				SendError(ctx, fasthttp.StatusUnauthorized, "unknown tenant")
-				return
-			}
-			vk, vkErr := store.GetVirtualKey(ctx, claims.VirtualKey)
-			if vkErr != nil || vk == nil {
-				SendError(ctx, fasthttp.StatusUnauthorized, "virtual key not found")
-				return
-			}
-			if !vk.IsActiveValue() {
-				SendError(ctx, fasthttp.StatusUnauthorized, "virtual key is inactive")
-				return
-			}
-
-			ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
-			ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, claims.VirtualKey)
-			ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, claims.VirtualKey)
-			if claims.MorgID != "" {
-				ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
 			}
 			next(ctx)
 		}
 	}
+}
+
+// AuthMiddleware validates tenant-only admin JWTs (tenantId claim, no virtual key).
+func (m *TenantMiddleware) AuthMiddleware() schemas.BifrostHTTPMiddleware {
+	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+		return func(ctx *fasthttp.RequestCtx) {
+			if err := m.authenticateAdminRequest(ctx); err != nil {
+				SendError(ctx, fasthttp.StatusUnauthorized, err.Error())
+				return
+			}
+			next(ctx)
+		}
+	}
+}
+
+func (m *TenantMiddleware) authenticateInferenceRequest(ctx *fasthttp.RequestCtx) error {
+	authHeader := string(ctx.Request.Header.Peek("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return fmt.Errorf("missing or invalid Authorization header")
+	}
+	rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+
+	claims, err := tenantstore.ExtractClaimsFromJWT(rawToken, m.virtualKeyJWTKey)
+	if err != nil {
+		return fmt.Errorf("invalid tenant token: %w", err)
+	}
+
+	if m.registry == nil {
+		return fmt.Errorf("tenant store not configured")
+	}
+	store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
+	if store == nil {
+		return fmt.Errorf("unknown tenant")
+	}
+
+	vk, vkErr := store.GetVirtualKey(ctx, claims.VirtualKey)
+	if vkErr != nil || vk == nil {
+		return fmt.Errorf("virtual key not found")
+	}
+	if !vk.IsActiveValue() {
+		return fmt.Errorf("virtual key is inactive")
+	}
+
+	ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
+	ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, claims.VirtualKey)
+	ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, claims.VirtualKey)
+	if claims.MorgID != "" {
+		ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
+	}
+	return nil
+}
+
+func (m *TenantMiddleware) authenticateAdminRequest(ctx *fasthttp.RequestCtx) error {
+	authHeader := string(ctx.Request.Header.Peek("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return fmt.Errorf("missing or invalid Authorization header")
+	}
+	rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+
+	if len(m.adminJWTKey) == 0 {
+		return fmt.Errorf("tenant admin JWT key is not configured")
+	}
+	claims, err := tenantstore.ExtractTenantAuthClaimsFromJWT(rawToken, m.adminJWTKey)
+	if err != nil {
+		return fmt.Errorf("invalid tenant token: %w", err)
+	}
+
+	if m.registry == nil {
+		return fmt.Errorf("tenant store not configured")
+	}
+	store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
+	if store == nil {
+		return fmt.Errorf("unknown tenant")
+	}
+
+	ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
+	if claims.UserID != "" {
+		ctx.SetUserValue(schemas.BifrostContextKeyUserID, claims.UserID)
+	}
+	if claims.MorgID != "" {
+		ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
+	}
+	return nil
 }

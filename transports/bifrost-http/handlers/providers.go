@@ -30,6 +30,7 @@ type ModelsManager interface {
 	RemoveProvider(ctx context.Context, provider schemas.ModelProvider) error
 	GetModelsForProvider(provider schemas.ModelProvider) []string
 	GetUnfilteredModelsForProvider(provider schemas.ModelProvider) []string
+	SyncProviderModelsForTenant(ctx context.Context, tenantID string) error
 }
 
 // ProviderHandler manages HTTP requests for provider operations
@@ -126,6 +127,27 @@ func (h *ProviderHandler) RegisterRoutes(r *router.Router, middlewares ...schema
 	r.GET("/api/models/details", lib.ChainMiddlewares(h.listModelDetails, middlewares...))
 	r.GET("/api/models/parameters", lib.ChainMiddlewares(h.getModelParameters, middlewares...))
 	r.GET("/api/models/base", lib.ChainMiddlewares(h.listBaseModels, middlewares...))
+	r.POST("/api/providers/sync-models", lib.ChainMiddlewares(h.syncProviderModels, middlewares...))
+}
+
+// syncProviderModels handles POST /api/providers/sync-models — reload models for all
+// providers in the tenant identified by the Bearer JWT.
+func (h *ProviderHandler) syncProviderModels(ctx *fasthttp.RequestCtx) {
+	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
+	if tenantID == "" {
+		SendError(ctx, fasthttp.StatusUnauthorized, "tenant context required")
+		return
+	}
+
+	if err := h.modelsManager.SyncProviderModelsForTenant(ctx, tenantID); err != nil {
+		if strings.Contains(err.Error(), "unknown tenant") {
+			SendError(ctx, fasthttp.StatusNotFound, err.Error())
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
+		return
+	}
+	SendJSON(ctx, map[string]string{"message": "Provider models synced successfully"})
 }
 
 // listProviders handles GET /api/providers - List all providers

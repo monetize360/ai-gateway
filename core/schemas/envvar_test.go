@@ -528,3 +528,27 @@ func TestEnvVar_IsSet(t *testing.T) {
 	}
 }
 
+func TestEnvVarScanJSONBValueOnly(t *testing.T) {
+	var e EnvVar
+	raw := `{"value": "sk-proj-abc123kA"}`
+	if err := e.Scan([]byte(raw)); err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if e.GetValue() != "sk-proj-abc123kA" {
+		t.Errorf("Expected Val=sk-proj-abc123kA, got Val=%q", e.GetValue())
+	}
+}
+
+func TestEnvVarUnmarshalJSON_ValueOnlyObject(t *testing.T) {
+	var e EnvVar
+	err := e.UnmarshalJSON([]byte(`{"value":"sk-test-key"}`))
+	if err != nil {
+		t.Fatalf("UnmarshalJSON failed: %v", err)
+	}
+	if e.GetValue() != "sk-test-key" {
+		t.Errorf("Expected Val=sk-test-key, got Val=%q", e.GetValue())
+	}
+	if e.FromEnv {
+		t.Error("Expected FromEnv=false")
+	}
+}

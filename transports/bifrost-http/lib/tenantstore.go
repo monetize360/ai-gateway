@@ -21,6 +21,9 @@ type TenantStoreFileConfig struct {
 	Global                 *TenantStoreGlobalPostgresFile `json:"global,omitempty"`
 	JWTPublicKey           string                         `json:"jwt_public_key,omitempty"`
 	JWTSecret              string                         `json:"jwt_secret,omitempty"`
+	// AdminJWTPublicKey is the MPilot admin API RSA public key (jwt.key.public).
+	// When set, tenant admin routes accept Bearer tokens that carry only tenantId.
+	AdminJWTPublicKey string `json:"admin_jwt_public_key,omitempty"`
 }
 
 // TenantStoreGlobalPostgresFile holds plain-string postgres settings for the global DB.
@@ -43,6 +46,7 @@ type TenantStoreHolder struct {
 	LogStoreManager  tenantstore.LogStoreResolver
 	GlobalDB         *tenantstore.GlobalDB
 	JWTKey           []byte
+	AdminJWTKey      []byte
 }
 
 // Close releases global DB and per-tenant connection pools.
@@ -83,6 +87,7 @@ func InitTenantStore(
 	if len(jwtKey) == 0 {
 		return nil, fmt.Errorf("tenant_store.jwt_public_key or tenant_store.jwt_secret is required")
 	}
+	adminJWTKey := tenantstore.FormatJWTVerificationKey(cfg.AdminJWTPublicKey)
 
 	globalCfg := postgresConfigFromFile(cfg.Global)
 	globalDB, err := tenantstore.NewGlobalDB(ctx, globalCfg, logger)
@@ -99,10 +104,11 @@ func InitTenantStore(
 	registry := tenantstore.NewTenantConfigRegistry(manager)
 
 	holder := &TenantStoreHolder{
-		Registry: registry,
-		Manager:  manager,
-		GlobalDB: globalDB,
-		JWTKey:   jwtKey,
+		Registry:   registry,
+		Manager:    manager,
+		GlobalDB:   globalDB,
+		JWTKey:     jwtKey,
+		AdminJWTKey: adminJWTKey,
 	}
 
 	logger.Info("multi-tenant mode enabled")

@@ -198,8 +198,7 @@ func (e *EnvVar) UnmarshalJSON(data []byte) error {
 	// If it's a valid JSON object and follows the EnvVar schema, then we will unmarshal it into an EnvVar object
 	if sonic.Valid(data) {
 		valueNode, _ := sonic.Get(data, "value")
-		envNode, _ := sonic.Get(data, "env_var")
-		if valueNode.Exists() && envNode.Exists() {
+		if valueNode.Exists() {
 			// Use a type alias to avoid infinite recursion (alias doesn't inherit methods)
 			type envVarAlias EnvVar
 			var envVar envVarAlias
@@ -207,22 +206,7 @@ func (e *EnvVar) UnmarshalJSON(data []byte) error {
 				e.Val = envVar.Val
 				e.FromEnv = envVar.FromEnv
 				e.EnvVar = envVar.EnvVar
-				// Old format: value == env_var == "env.XXX"
-				if strings.HasPrefix(e.Val, "env.") && e.Val == e.EnvVar {
-					e.Val = ""
-					// Load the environment variable value
-					envValue, ok := os.LookupEnv(strings.TrimPrefix(e.EnvVar, "env."))
-					if ok {
-						e.Val = envValue
-					}
-					e.FromEnv = true
-				}
-				// New format: value is empty, from_env=true, env_var holds the reference
-				if e.Val == "" && e.FromEnv && strings.HasPrefix(e.EnvVar, "env.") {
-					if envValue, ok := os.LookupEnv(strings.TrimPrefix(e.EnvVar, "env.")); ok {
-						e.Val = envValue
-					}
-				}
+				e.resolveEnvReferences()
 				return nil
 			}
 			// Else the value is JSON, so we will treat this as a normal value
@@ -251,6 +235,27 @@ func (e *EnvVar) String() string {
 	return e.Val
 }
 
+// resolveEnvReferences loads Val from the environment when this EnvVar is env-backed.
+func (e *EnvVar) resolveEnvReferences() {
+	if e == nil {
+		return
+	}
+	// Old format: value == env_var == "env.XXX"
+	if strings.HasPrefix(e.Val, "env.") && e.Val == e.EnvVar {
+		e.Val = ""
+		if envValue, ok := os.LookupEnv(strings.TrimPrefix(e.EnvVar, "env.")); ok {
+			e.Val = envValue
+		}
+		e.FromEnv = true
+	}
+	// New format: value is empty, from_env=true, env_var holds the reference
+	if e.Val == "" && e.FromEnv && strings.HasPrefix(e.EnvVar, "env.") {
+		if envValue, ok := os.LookupEnv(strings.TrimPrefix(e.EnvVar, "env.")); ok {
+			e.Val = envValue
+		}
+	}
+}
+
 // Scan scans the value from the database.
 func (e *EnvVar) Scan(value any) error {
 	if value == nil {
@@ -266,6 +271,15 @@ func (e *EnvVar) Scan(value any) error {
 		// Cleanup string if required
 		// The string may have "\"env.TEST\"", "env.TEST" or "env.TEST\"", we need to clean it up to "env.TEST"
 		val := strings.Trim(v, "\"")
+		// MPilot stores EnvVar columns as jsonb (e.g. {"value":"sk-..."}); parse like UnmarshalJSON.
+		if sonic.Valid([]byte(val)) {
+			valueNode, _ := sonic.Get([]byte(val), "value")
+			if valueNode.Exists() {
+				if err := e.UnmarshalJSON([]byte(val)); err == nil {
+					return nil
+				}
+			}
+		}
 		if envKey, ok := strings.CutPrefix(val, "env."); ok {
 			if envValue, ok := os.LookupEnv(envKey); ok {
 				e.Val = envValue
