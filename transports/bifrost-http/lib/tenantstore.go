@@ -41,12 +41,12 @@ type TenantStoreGlobalPostgresFile struct {
 // TenantStoreHolder wires the per-tenant ConfigStore registry and JWT verification
 // key into the HTTP transport layer.
 type TenantStoreHolder struct {
-	Registry         tenantstore.Resolver
-	Manager          *tenantstore.TenantDBManager
-	LogStoreManager  tenantstore.LogStoreResolver
-	GlobalDB         *tenantstore.GlobalDB
-	JWTKey           []byte
-	AdminJWTKey      []byte
+	Registry        tenantstore.Resolver
+	Manager         *tenantstore.TenantDBManager
+	LogStoreManager tenantstore.LogStoreResolver
+	GlobalDB        *tenantstore.GlobalDB
+	JWTKey          []byte
+	AdminJWTKey     []byte
 }
 
 // Close releases global DB and per-tenant connection pools.
@@ -104,10 +104,10 @@ func InitTenantStore(
 	registry := tenantstore.NewTenantConfigRegistry(manager)
 
 	holder := &TenantStoreHolder{
-		Registry:   registry,
-		Manager:    manager,
-		GlobalDB:   globalDB,
-		JWTKey:     jwtKey,
+		Registry:    registry,
+		Manager:     manager,
+		GlobalDB:    globalDB,
+		JWTKey:      jwtKey,
 		AdminJWTKey: adminJWTKey,
 	}
 
