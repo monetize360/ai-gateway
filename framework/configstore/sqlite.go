@@ -75,7 +75,6 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.TableVirtualKeyMCPConfig{},
 		&tables.TableVirtualKeyProviderConfigKey{},
 		&tables.TableGovernanceConfig{},
-		&tables.TableModelConfig{},
 		&tables.TablePlugin{},
 		&tables.TableFeatureFlag{},
 		&tables.TableFrameworkConfig{},
@@ -96,5 +95,8 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 	if err := migrateGovernanceReverseOwnership(db); err != nil {
 		return err
 	}
-	return migrateGovernanceOrgOwnership(db)
+	if err := migrateGovernanceOrgOwnership(db); err != nil {
+		return err
+	}
+	return migrateGovernanceModelConfigsToConfigModels(db)
 }

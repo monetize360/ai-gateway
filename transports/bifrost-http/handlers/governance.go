@@ -2590,6 +2590,10 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Model name is required")
 		return
 	}
+	if req.Provider == nil || strings.TrimSpace(*req.Provider) == "" {
+		SendError(ctx, 400, "Provider is required for model governance")
+		return
+	}
 	// Check if model config with same (model_name, provider) already exists
 	existing, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfig(ctx, req.ModelName, req.Provider)
 	if err != nil && err != configstore.ErrNotFound {

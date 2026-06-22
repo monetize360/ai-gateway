@@ -49,7 +49,6 @@ func main() {
 		&tables.TableFrameworkConfig{},
 		&tables.SessionsTable{},
 		&tables.TableVirtualKeyProviderConfigKey{},
-		&tables.TableModelConfig{},
 		&tables.TableRoutingRule{},
 		&tables.TableFolder{},
 		&tables.TablePrompt{},

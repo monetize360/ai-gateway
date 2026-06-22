@@ -11,10 +11,10 @@ func attachGovernanceFromReverseFK(
 	budgets []configstoreTables.TableBudget,
 	rateLimits []configstoreTables.TableRateLimit,
 	providers []configstoreTables.TableProvider,
-	modelConfigs []configstoreTables.TableModelConfig,
+	configModels []configstoreTables.TableModel,
 	virtualKeys []configstoreTables.TableVirtualKey,
 ) {
-	configstore.AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
+	configstore.AttachGovernanceFromReverseFK(budgets, rateLimits, providers, configModels, virtualKeys)
 }
 
 func budgetID(b *configstoreTables.TableBudget) string {

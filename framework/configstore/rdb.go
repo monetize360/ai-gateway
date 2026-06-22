@@ -108,8 +108,8 @@ func lockBudgetOwner(ctx context.Context, txDB *gorm.DB, budget tables.TableBudg
 			return err
 		}
 	case budget.ModelConfigID != nil && *budget.ModelConfigID != "":
-		var modelConfig tables.TableModelConfig
-		if err := dbForUpdate(txDB.WithContext(ctx)).First(&modelConfig, "id = ?", *budget.ModelConfigID).Error; err != nil {
+		var configModel tables.TableModel
+		if err := dbForUpdate(txDB.WithContext(ctx)).First(&configModel, "id = ?", *budget.ModelConfigID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
@@ -3720,178 +3720,6 @@ func (s *RDBConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx ..
 	}))
 }
 
-// GetModelConfigs retrieves all model configs from the database.
-func (s *RDBConfigStore) GetModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error) {
-	var modelConfigs []tables.TableModelConfig
-	pre := governanceActivePreload()
-	if err := GovernanceActive(s.DB().WithContext(ctx)).
-		Preload("Budgets", pre).
-		Preload("RateLimits", pre).
-		Find(&modelConfigs).Error; err != nil {
-		return nil, err
-	}
-	return modelConfigs, nil
-}
-
-// GetModelConfigsPaginated retrieves model configs with pagination, filtering, and search support.
-func (s *RDBConfigStore) GetModelConfigsPaginated(ctx context.Context, params ModelConfigsQueryParams) ([]tables.TableModelConfig, int64, error) {
-	baseQuery := GovernanceActive(s.DB().WithContext(ctx)).Model(&tables.TableModelConfig{})
-
-	if params.Search != "" {
-		search := "%" + strings.ToLower(params.Search) + "%"
-		baseQuery = baseQuery.Where("LOWER(model_name) LIKE ?", search)
-	}
-
-	var totalCount int64
-	if err := baseQuery.Count(&totalCount).Error; err != nil {
-		return nil, 0, err
-	}
-
-	limit := params.Limit
-	offset := params.Offset
-
-	if limit <= 0 {
-		limit = 25
-	} else if limit > 100 {
-		limit = 100
-	}
-
-	if offset < 0 {
-		offset = 0
-	}
-
-	var modelConfigs []tables.TableModelConfig
-	pre := governanceActivePreload()
-	if err := baseQuery.
-		Preload("Budgets", pre).
-		Preload("RateLimits", pre).
-		Order("created_at ASC, id ASC").
-		Offset(offset).
-		Limit(limit).
-		Find(&modelConfigs).Error; err != nil {
-		return nil, 0, err
-	}
-	return modelConfigs, totalCount, nil
-}
-
-// GetModelConfig retrieves a specific model config from the database by model name and optional provider.
-func (s *RDBConfigStore) GetModelConfig(ctx context.Context, modelName string, provider *string) (*tables.TableModelConfig, error) {
-	var modelConfig tables.TableModelConfig
-	pre := governanceActivePreload()
-	query := GovernanceActive(s.DB().WithContext(ctx)).Where("model_name = ?", modelName)
-	if provider != nil {
-		query = query.Where("provider = ?", *provider)
-	} else {
-		query = query.Where("provider IS NULL")
-	}
-	if err := query.Preload("Budgets", pre).Preload("RateLimits", pre).First(&modelConfig).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &modelConfig, nil
-}
-
-// GetModelConfigByID retrieves a specific model config from the database by ID.
-func (s *RDBConfigStore) GetModelConfigByID(ctx context.Context, id string) (*tables.TableModelConfig, error) {
-	var modelConfig tables.TableModelConfig
-	pre := governanceActivePreload()
-	if err := GovernanceActive(s.DB().WithContext(ctx)).
-		Preload("Budgets", pre).
-		Preload("RateLimits", pre).
-		First(&modelConfig, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &modelConfig, nil
-}
-
-// CreateModelConfig creates a new model config in the database.
-func (s *RDBConfigStore) CreateModelConfig(ctx context.Context, modelConfig *tables.TableModelConfig, tx ...*gorm.DB) error {
-	var txDB *gorm.DB
-	if len(tx) > 0 {
-		txDB = tx[0]
-	} else {
-		txDB = s.DB()
-	}
-	EnsureGovernanceRowID(&modelConfig.ID)
-	ApplyAuditOnCreate(ctx, &modelConfig.SystemColumns)
-	if err := txDB.WithContext(ctx).Create(modelConfig).Error; err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-// UpdateModelConfig updates a model config in the database.
-func (s *RDBConfigStore) UpdateModelConfig(ctx context.Context, modelConfig *tables.TableModelConfig, tx ...*gorm.DB) error {
-	if len(tx) == 0 {
-		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-			return s.UpdateModelConfig(ctx, modelConfig, transaction)
-		})
-	}
-
-	txDB := tx[0]
-	if modelConfig.ID != "" {
-		var existing tables.TableModelConfig
-		if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).First(&existing, "id = ?", modelConfig.ID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
-			return err
-		}
-	}
-	ApplyAuditOnUpdate(ctx, &modelConfig.SystemColumns)
-	if err := txDB.WithContext(ctx).Save(modelConfig).Error; err != nil {
-		return s.parseGormError(err)
-	}
-	return nil
-}
-
-// UpdateModelConfigs updates multiple model configs in the database.
-func (s *RDBConfigStore) UpdateModelConfigs(ctx context.Context, modelConfigs []*tables.TableModelConfig, tx ...*gorm.DB) error {
-	if len(tx) == 0 {
-		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-			return s.UpdateModelConfigs(ctx, modelConfigs, transaction)
-		})
-	}
-
-	txDB := tx[0]
-	sortedModelConfigs := append([]*tables.TableModelConfig(nil), modelConfigs...)
-	sort.Slice(sortedModelConfigs, func(i, j int) bool { return sortedModelConfigs[i].ID < sortedModelConfigs[j].ID })
-	for _, mc := range sortedModelConfigs {
-		if err := s.UpdateModelConfig(ctx, mc, txDB); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// DeleteModelConfig soft-deletes a model config and owned budget/rate limit rows.
-func (s *RDBConfigStore) DeleteModelConfig(ctx context.Context, id string) error {
-	return s.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var modelConfig tables.TableModelConfig
-		if err := dbForUpdate(GovernanceActive(tx)).First(&modelConfig, "id = ?", id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
-			return err
-		}
-		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableBudget{}, "model_config_id = ?", id); err != nil {
-			return err
-		}
-		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableRateLimit{}, "model_config_id = ?", id); err != nil {
-			return err
-		}
-		if err := MarkGovernanceDeleted(ctx, tx, &tables.TableModelConfig{}, "id = ?", id); err != nil {
-			return s.parseGormError(err)
-		}
-		return nil
-	})
-}
-
 // GetGovernanceConfig retrieves the governance configuration from the database.
 func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceConfig, error) {
 	var virtualKeys []tables.TableVirtualKey
@@ -3899,7 +3727,6 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 	var customers []tables.TableCustomer
 	var budgets []tables.TableBudget
 	var rateLimits []tables.TableRateLimit
-	var modelConfigs []tables.TableModelConfig
 	var providers []tables.TableProvider
 	var routingRules []tables.TableRoutingRule
 	var governanceConfigs []tables.TableGovernanceConfig
@@ -3923,7 +3750,16 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 	if err := GovernanceActive(s.DB().WithContext(ctx)).Find(&rateLimits).Error; err != nil {
 		return nil, err
 	}
-	if err := GovernanceActive(s.DB().WithContext(ctx)).Find(&modelConfigs).Error; err != nil {
+	var configModels []tables.TableModel
+	pre := governanceActivePreload()
+	if err := ActiveRows(s.DB().WithContext(ctx)).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
+		Find(&configModels).Error; err != nil {
+		return nil, err
+	}
+	modelConfigs, err := s.GetModelConfigs(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if err := s.DB().WithContext(ctx).Find(&providers).Error; err != nil {
@@ -3968,7 +3804,7 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 			}
 		}
 	}
-	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
+	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, configModels, virtualKeys)
 
 	return &GovernanceConfig{
 		VirtualKeys:      virtualKeys,

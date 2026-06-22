@@ -8,7 +8,7 @@ func AttachGovernanceFromReverseFK(
 	budgets []tables.TableBudget,
 	rateLimits []tables.TableRateLimit,
 	providers []tables.TableProvider,
-	modelConfigs []tables.TableModelConfig,
+	configModels []tables.TableModel,
 	virtualKeys []tables.TableVirtualKey,
 ) {
 	providerByID := make(map[string]*tables.TableProvider, len(providers))
@@ -16,9 +16,9 @@ func AttachGovernanceFromReverseFK(
 		providerByID[providers[i].ID] = &providers[i]
 	}
 
-	modelConfigByID := make(map[string]*tables.TableModelConfig, len(modelConfigs))
-	for i := range modelConfigs {
-		modelConfigByID[modelConfigs[i].ID] = &modelConfigs[i]
+	configModelByID := make(map[string]*tables.TableModel, len(configModels))
+	for i := range configModels {
+		configModelByID[configModels[i].ID] = &configModels[i]
 	}
 
 	vkByID := make(map[string]*tables.TableVirtualKey, len(virtualKeys))
@@ -42,8 +42,8 @@ func AttachGovernanceFromReverseFK(
 				p.Budgets = appendUniqueBudget(p.Budgets, b)
 			}
 		case b.ModelConfigID != nil:
-			if mc, ok := modelConfigByID[*b.ModelConfigID]; ok {
-				mc.Budgets = appendUniqueBudget(mc.Budgets, b)
+			if cm, ok := configModelByID[*b.ModelConfigID]; ok {
+				cm.Budgets = appendUniqueBudget(cm.Budgets, b)
 			}
 		case b.VirtualKeyID != nil:
 			if vk, ok := vkByID[*b.VirtualKeyID]; ok {
@@ -64,8 +64,8 @@ func AttachGovernanceFromReverseFK(
 				p.RateLimits = appendUniqueRateLimit(p.RateLimits, rl)
 			}
 		case rl.ModelConfigID != nil:
-			if mc, ok := modelConfigByID[*rl.ModelConfigID]; ok {
-				mc.RateLimits = appendUniqueRateLimit(mc.RateLimits, rl)
+			if cm, ok := configModelByID[*rl.ModelConfigID]; ok {
+				cm.RateLimits = appendUniqueRateLimit(cm.RateLimits, rl)
 			}
 		case rl.VirtualKeyID != nil:
 			if vk, ok := vkByID[*rl.VirtualKeyID]; ok {

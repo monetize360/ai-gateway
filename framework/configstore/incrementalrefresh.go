@@ -85,14 +85,27 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 
 	pre := governanceActivePreload()
-	if err := GovernanceActive(db.Where("updated_at >= ?", since)).
+	var changedModels []tables.TableModel
+	if err := ActiveRows(db.Where("updated_at >= ?", since)).
 		Preload("Budgets", pre).
 		Preload("RateLimits", pre).
-		Find(&delta.ModelConfigs).Error; err != nil {
+		Find(&changedModels).Error; err != nil {
 		return nil, fmt.Errorf("model configs changed since: %w", err)
 	}
-	if err := appendDeletedRowsSince(db, since, &delta.ModelConfigs); err != nil {
+	names, err := s.providerNameIndex(ctx)
+	if err != nil {
 		return nil, err
+	}
+	delta.ModelConfigs = tableModelsToModelConfigs(changedModels, names)
+	var deletedModels []tables.TableModel
+	if err := appendDeletedRowsSince(db, since, &deletedModels); err != nil {
+		return nil, err
+	}
+	for i := range deletedModels {
+		deletedModels[i].Deleted = true
+		if mc := tables.ModelConfigFromTableModel(&deletedModels[i], nil); mc != nil {
+			delta.ModelConfigs = append(delta.ModelConfigs, *mc)
+		}
 	}
 
 	if err := ActiveRows(db.Where("updated_at >= ?", since)).

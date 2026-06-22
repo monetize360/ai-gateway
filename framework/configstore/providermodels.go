@@ -146,13 +146,17 @@ func (s *RDBConfigStore) SyncProviderModels(ctx context.Context, provider schema
 	return syncFn(tx[0])
 }
 
-// GetConfigModels returns all active config_models rows.
+// GetConfigModels returns all active config_models rows with governance relationships preloaded.
 func (s *RDBConfigStore) GetConfigModels(ctx context.Context) ([]tables.TableModel, error) {
 	if !s.DB().WithContext(ctx).Migrator().HasTable(&tables.TableModel{}) {
 		return nil, nil
 	}
 	var models []tables.TableModel
-	if err := ActiveRows(s.DB().WithContext(ctx)).Find(&models).Error; err != nil {
+	pre := governanceActivePreload()
+	if err := ActiveRows(s.DB().WithContext(ctx)).
+		Preload("Budgets", pre).
+		Preload("RateLimits", pre).
+		Find(&models).Error; err != nil {
 		return nil, err
 	}
 	return models, nil
