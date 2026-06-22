@@ -256,6 +256,7 @@ const (
 	BifrostContextKeyAccessKey                           BifrostContextKey = "bifrost-access-key"                               // string (deprecated: legacy access_key_token UUID; TenantMiddleware now sets BifrostContextKeyGovernanceVirtualKeyID)
 	BifrostContextKeyGovernanceBudgetIDs                 BifrostContextKey = "bifrost-governance-budget-ids"                    // []string (budget IDs applicable to this request - set by governance plugin)
 	BifrostContextKeyGovernanceRateLimitIDs              BifrostContextKey = "bifrost-governance-rate-limit-ids"                // []string (rate limit IDs applicable to this request - set by governance plugin)
+	BifrostContextKeyGovernanceSoftLimitExceeded         BifrostContextKey = "bifrost-governance-soft-limit-exceeded"           // bool (true when a soft budget or rate limit was exceeded; request is still allowed)
 	BifrostContextKeyPromptsPluginName                   BifrostContextKey = "prompts-plugin-name"                              // string (name of the prompts plugin to use - set by bifrost - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyIsEnterprise                        BifrostContextKey = "is-enterprise"                                    // bool (set by bifrost - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyAvailableProviders                  BifrostContextKey = "available-providers"                              // []ModelProvider (set by bifrost - DO NOT SET THIS MANUALLY))

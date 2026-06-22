@@ -88,6 +88,11 @@ type BudgetAndRateLimitStatus struct {
 	BudgetPercentUsed           float64 `json:"budget_percent_used"`             // 0-100, >100 means exhausted
 	RateLimitTokenPercentUsed   float64 `json:"rate_limit_token_percent_used"`   // 0-100, >100 means exhausted
 	RateLimitRequestPercentUsed float64 `json:"rate_limit_request_percent_used"` // 0-100, >100 means exhausted
+
+	// SoftLimitExceeded is true when at least one limit is >= 100% AND that limit is marked
+	// soft_limit=true. Exposed as the `soft_limit_exceeded` CEL variable in routing rules,
+	// letting operators switch models on exhaustion without ever blocking requests.
+	SoftLimitExceeded bool `json:"soft_limit_exceeded"`
 }
 
 // GovernanceStore defines the interface for governance data access and policy evaluation.
@@ -772,18 +777,29 @@ func (gs *LocalGovernanceStore) CheckRateLimit(ctx context.Context, entityWiseRa
 					rateLimit.RequestCurrentUsage+requestsBaseline, *rateLimit.RequestMaxLimit, duration))
 			}
 
-			if len(violations) > 0 {
-				// Determine specific violation type
-				decision := DecisionRateLimited // Default to general rate limited decision
-				if len(violations) == 1 {
-					if strings.Contains(violations[0], "token") {
-						decision = DecisionTokenLimited // More specific violation type
-					} else if strings.Contains(violations[0], "request") {
-						decision = DecisionRequestLimited // More specific violation type
+		if len(violations) > 0 {
+			// Determine specific violation type; use soft variants when the limit is marked soft.
+			decision := DecisionRateLimited // default hard decision
+			if rateLimit.SoftLimit {
+				decision = DecisionRateLimitedSoft
+			}
+			if len(violations) == 1 {
+				if strings.Contains(violations[0], "token") {
+					if rateLimit.SoftLimit {
+						decision = DecisionTokenLimitedSoft
+					} else {
+						decision = DecisionTokenLimited
+					}
+				} else if strings.Contains(violations[0], "request") {
+					if rateLimit.SoftLimit {
+						decision = DecisionRequestLimitedSoft
+					} else {
+						decision = DecisionRequestLimited
 					}
 				}
-				return decision, fmt.Errorf("rate limit violated for %s: %s", entity, violations)
 			}
+			return decision, fmt.Errorf("rate limit violated for %s: %s", entity, violations)
+		}
 		}
 	}
 	return DecisionAllow, nil
@@ -836,12 +852,16 @@ func (gs *LocalGovernanceStore) CheckBudget(ctx context.Context, entityWiseBudge
 			}
 			gs.logger.Debug("LocalStore CheckBudget: Checking %s budget %s: local=%.4f, remote=%.4f, total=%.4f, limit=%.4f",
 				entity, budget.ID, budget.CurrentUsage, baseline, budget.CurrentUsage+baseline, budget.MaxLimit)
-			// Check if current usage (local + remote baseline) exceeds budget limit
-			if budget.CurrentUsage+baseline >= budget.MaxLimit {
-				gs.logger.Debug("LocalStore CheckBudget: Budget %s EXCEEDED", budget.ID)
-				return DecisionBudgetExceeded, fmt.Errorf("%s budget exceeded: %.4f >= %.4f dollars",
+		// Check if current usage (local + remote baseline) exceeds budget limit
+		if budget.CurrentUsage+baseline >= budget.MaxLimit {
+			gs.logger.Debug("LocalStore CheckBudget: Budget %s EXCEEDED (soft=%v)", budget.ID, budget.SoftLimit)
+			if budget.SoftLimit {
+				return DecisionBudgetExceededSoft, fmt.Errorf("%s soft budget exceeded: %.4f >= %.4f dollars",
 					entity, budget.CurrentUsage+baseline, budget.MaxLimit)
 			}
+			return DecisionBudgetExceeded, fmt.Errorf("%s budget exceeded: %.4f >= %.4f dollars",
+				entity, budget.CurrentUsage+baseline, budget.MaxLimit)
+		}
 		}
 	}
 	return DecisionAllow, nil

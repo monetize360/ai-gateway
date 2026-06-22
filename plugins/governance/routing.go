@@ -394,11 +394,13 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 		variables["budget_used"] = ctx.BudgetAndRateLimitStatus.BudgetPercentUsed
 		variables["tokens_used"] = ctx.BudgetAndRateLimitStatus.RateLimitTokenPercentUsed
 		variables["request"] = ctx.BudgetAndRateLimitStatus.RateLimitRequestPercentUsed
+		variables["soft_limit_exceeded"] = ctx.BudgetAndRateLimitStatus.SoftLimitExceeded
 	} else {
 		// No budget/rate limit configured, provide 0 values
 		variables["budget_used"] = 0.0
 		variables["tokens_used"] = 0.0
 		variables["request"] = 0.0
+		variables["soft_limit_exceeded"] = false
 	}
 
 	return variables, nil
@@ -427,6 +429,7 @@ func buildNoMatchContext(expr string, variables map[string]any) string {
 		fmt.Sprintf("budget_used=%.1f%%", variables["budget_used"]),
 		fmt.Sprintf("tokens_used=%.1f%%", variables["tokens_used"]),
 		fmt.Sprintf("request=%.1f%%", variables["request"]),
+		fmt.Sprintf("soft_limit_exceeded=%v", variables["soft_limit_exceeded"]),
 	}
 	for _, mapName := range []string{"headers", "params"} {
 		keys := extractMapKeysFromCEL(expr, mapName)
@@ -504,5 +507,10 @@ func createCELEnvironment() (*cel.Env, error) {
 		cel.Variable("tokens_used", cel.DoubleType),
 		cel.Variable("request", cel.DoubleType),
 		cel.Variable("budget_used", cel.DoubleType),
+
+		// Soft limit indicator: true when a soft budget or rate limit is >= 100%.
+		// Use in routing rules to switch models on exhaustion without blocking requests.
+		// Example: soft_limit_exceeded == true → route to fallback model
+		cel.Variable("soft_limit_exceeded", cel.BoolType),
 	)
 }

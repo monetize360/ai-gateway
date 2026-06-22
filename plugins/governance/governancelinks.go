@@ -183,11 +183,17 @@ func applyRateLimitStatusFromSlice(gs *LocalGovernanceStore, rateLimits []config
 					if tokenPercent > result.RateLimitTokenPercentUsed {
 						result.RateLimitTokenPercentUsed = tokenPercent
 					}
+					if tokenPercent >= 100.0 && rateLimit.SoftLimit {
+						result.SoftLimitExceeded = true
+					}
 				}
 				if rateLimit.RequestMaxLimit != nil && *rateLimit.RequestMaxLimit > 0 {
 					requestPercent := float64(rateLimit.RequestCurrentUsage+requestsBaseline) / float64(*rateLimit.RequestMaxLimit) * 100
 					if requestPercent > result.RateLimitRequestPercentUsed {
 						result.RateLimitRequestPercentUsed = requestPercent
+					}
+					if requestPercent >= 100.0 && rateLimit.SoftLimit {
+						result.SoftLimitExceeded = true
 					}
 				}
 			}
@@ -204,6 +210,9 @@ func applyBudgetStatusFromSlice(gs *LocalGovernanceStore, budgets []configstoreT
 					budgetPercent := float64(budget.CurrentUsage+baseline) / budget.MaxLimit * 100
 					if budgetPercent > result.BudgetPercentUsed {
 						result.BudgetPercentUsed = budgetPercent
+					}
+					if budgetPercent >= 100.0 && budget.SoftLimit {
+						result.SoftLimitExceeded = true
 					}
 				}
 			}
