@@ -378,6 +378,11 @@
                 "type": "string",
                 "description": "ID of the team this budget belongs to (mutually exclusive with virtual_key_id and provider_config_id)"
               },
+              "soft_limit": {
+                "type": "boolean",
+                "description": "When true, requests are allowed through even when this budget is exhausted. Usage is still tracked and budget_used % is still reported. Pair with a routing rule using budget_used >= 100.0 or soft_limit_exceeded to switch models without blocking requests.",
+                "default": false
+              },
               "calendar_aligned": {
                 "type": "boolean",
                 "description": "Deprecated: set calendar_aligned on the owner (team / virtual key / access profile) instead. Kept for backward compatibility with older config.json files; ignored unless a reconciler promotes it to its owner.",
@@ -433,6 +438,11 @@
                 "type": "string",
                 "format": "date-time",
                 "description": "Last time request counter was reset"
+              },
+              "soft_limit": {
+                "type": "boolean",
+                "description": "When true, requests are allowed through even when this rate limit is exhausted. Usage is still tracked and tokens_used/request % is still reported. Pair with a routing rule using tokens_used >= 100.0, request >= 100.0, or soft_limit_exceeded to switch models without blocking requests.",
+                "default": false
               },
               "calendar_aligned": {
                 "type": "boolean",
@@ -4061,14 +4071,14 @@
           "type": "string",
           "description": "Reset window, e.g. \"1M\", \"1h\""
         },
+        "soft_limit": {
+          "type": "boolean",
+          "description": "When true, requests are allowed through even when this budget is exhausted. Usage is still tracked and budget_used % is still reported. Pair with a routing rule using budget_used >= 100.0 or soft_limit_exceeded to switch models without blocking requests.",
+          "default": false
+        },
         "calendar_aligned": {
           "type": "boolean",
           "description": "Deprecated: set calendar_aligned on the parent access profile instead. Kept for backward compatibility with older config.json files; the access-profile reconciler promotes any true value here to the profile's top-level calendar_aligned at load time.",
-          "default": false
-        },
-        "soft_limit": {
-          "type": "boolean",
-          "description": "When true, requests are allowed through even when this budget is exhausted — usage is still tracked and budget_used % is still reported. Combine with a routing rule using `budget_used >= 100.0` or `soft_limit_exceeded` to switch models on exhaustion without ever blocking a request.",
           "default": false
         }
       },
@@ -4098,14 +4108,14 @@
           "type": "string",
           "description": "Request reset window, e.g. \"1M\", \"1h\""
         },
+        "soft_limit": {
+          "type": "boolean",
+          "description": "When true, requests are allowed through even when this rate limit is exhausted. Usage is still tracked and tokens_used/request % is still reported. Pair with a routing rule using tokens_used >= 100.0, request >= 100.0, or soft_limit_exceeded to switch models without blocking requests.",
+          "default": false
+        },
         "calendar_aligned": {
           "type": "boolean",
           "description": "Deprecated: set calendar_aligned on the parent access profile instead. Kept for backward compatibility with older config.json files; the access-profile reconciler promotes any true value here to the profile's top-level calendar_aligned at load time.",
-          "default": false
-        },
-        "soft_limit": {
-          "type": "boolean",
-          "description": "When true, requests are allowed through even when this rate limit is exhausted — usage is still tracked and tokens_used/request % is still reported. Combine with a routing rule using `tokens_used >= 100.0`, `request >= 100.0`, or `soft_limit_exceeded` to switch models on exhaustion without ever blocking a request.",
           "default": false
         }
       },

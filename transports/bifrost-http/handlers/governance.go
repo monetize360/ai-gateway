@@ -133,18 +133,14 @@ type CreateBudgetRequest struct {
 	ID            string  `json:"id,omitempty"`
 	MaxLimit      float64 `json:"max_limit" validate:"required"`      // Maximum budget in dollars
 	ResetDuration string  `json:"reset_duration" validate:"required"` // e.g., "30s", "5m", "1h", "1d", "1w", "1M"
-	// SoftLimit when true allows requests to proceed even when this budget is exceeded.
-	// Usage is still tracked and budget_used % is still reported. Combine with a routing
-	// rule using `budget_used >= 100.0` or `soft_limit_exceeded` to switch models on
-	// exhaustion without ever blocking a request.
-	SoftLimit bool `json:"soft_limit,omitempty"`
+	SoftLimit     *bool   `json:"soft_limit,omitempty"`               // When true, requests pass through even when budget is exhausted
 }
 
 // UpdateBudgetRequest represents the request body for updating a budget
 type UpdateBudgetRequest struct {
 	MaxLimit      *float64 `json:"max_limit,omitempty"`
 	ResetDuration *string  `json:"reset_duration,omitempty"`
-	SoftLimit     *bool    `json:"soft_limit,omitempty"`
+	SoftLimit     *bool    `json:"soft_limit,omitempty"` // When true, requests pass through even when budget is exhausted
 }
 
 // CreateRoutingRuleRequest represents the request body for creating a routing rule
@@ -192,11 +188,7 @@ type CreateRateLimitRequest struct {
 	TokenResetDuration   *string `json:"token_reset_duration,omitempty"`   // e.g., "30s", "5m", "1h", "1d", "1w", "1M"
 	RequestMaxLimit      *int64  `json:"request_max_limit,omitempty"`      // Maximum requests allowed
 	RequestResetDuration *string `json:"request_reset_duration,omitempty"` // e.g., "30s", "5m", "1h", "1d", "1w", "1M"
-	// SoftLimit when true allows requests to proceed even when this rate limit is exceeded.
-	// Usage is still tracked and tokens_used/request % is still reported. Combine with a
-	// routing rule using `tokens_used >= 100.0`, `request >= 100.0`, or `soft_limit_exceeded`
-	// to switch models on exhaustion without ever blocking a request.
-	SoftLimit bool `json:"soft_limit,omitempty"`
+	SoftLimit            *bool   `json:"soft_limit,omitempty"`             // When true, requests pass through even when rate limit is exhausted
 }
 
 // UpdateRateLimitRequest represents the request body for updating a rate limit using flexible approach
@@ -205,11 +197,11 @@ type UpdateRateLimitRequest struct {
 	TokenResetDuration   *string `json:"token_reset_duration,omitempty"`   // e.g., "30s", "5m", "1h", "1d", "1w", "1M"
 	RequestMaxLimit      *int64  `json:"request_max_limit,omitempty"`      // Maximum requests allowed
 	RequestResetDuration *string `json:"request_reset_duration,omitempty"` // e.g., "30s", "5m", "1h", "1d", "1w", "1M"
-	SoftLimit            *bool   `json:"soft_limit,omitempty"`
+	SoftLimit            *bool   `json:"soft_limit,omitempty"`             // When true, requests pass through even when rate limit is exhausted
 }
 
 func isBudgetRemovalRequest(req *UpdateBudgetRequest) bool {
-	return req != nil && req.MaxLimit == nil && req.ResetDuration == nil
+	return req != nil && req.MaxLimit == nil && req.ResetDuration == nil && req.SoftLimit == nil
 }
 
 // budgetLastReset returns the appropriate LastReset for a new budget.
@@ -317,7 +309,7 @@ func findExistingBudget(request CreateBudgetRequest, byID map[string]configstore
 
 func isRateLimitRemovalRequest(req *UpdateRateLimitRequest) bool {
 	return req != nil && req.TokenMaxLimit == nil && req.RequestMaxLimit == nil &&
-		req.TokenResetDuration == nil && req.RequestResetDuration == nil
+		req.TokenResetDuration == nil && req.RequestResetDuration == nil && req.SoftLimit == nil
 }
 
 func rateLimitRequestKey(req CreateRateLimitRequest) string {
@@ -381,7 +373,9 @@ func reconcileRateLimitRequests(
 			rl.TokenResetDuration = req.TokenResetDuration
 			rl.RequestMaxLimit = req.RequestMaxLimit
 			rl.RequestResetDuration = req.RequestResetDuration
-			rl.SoftLimit = req.SoftLimit
+			if req.SoftLimit != nil {
+				rl.SoftLimit = req.SoftLimit
+			}
 			if err := validateRateLimit(&rl); err != nil {
 				return nil, err
 			}
@@ -398,9 +392,9 @@ func reconcileRateLimitRequests(
 			TokenResetDuration:   req.TokenResetDuration,
 			RequestMaxLimit:      req.RequestMaxLimit,
 			RequestResetDuration: req.RequestResetDuration,
+			SoftLimit:            req.SoftLimit,
 			TokenLastReset:       time.Now(),
 			RequestLastReset:     time.Now(),
-			SoftLimit:            req.SoftLimit,
 		}
 		assignOwner(&rl)
 		if err := validateRateLimit(&rl); err != nil {
@@ -733,10 +727,10 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 					ID:            uuid.NewString(),
 					MaxLimit:      b.MaxLimit,
 					ResetDuration: b.ResetDuration,
+					SoftLimit:     b.SoftLimit,
 					LastReset:     budgetLastReset(vk.CalendarAligned, b.ResetDuration),
 					CurrentUsage:  0,
 					VirtualKeyID:  &vk.ID,
-					SoftLimit:     b.SoftLimit,
 				}
 				if err := validateBudget(&budget); err != nil {
 					return err
@@ -817,10 +811,10 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 							ID:               uuid.NewString(),
 							MaxLimit:         b.MaxLimit,
 							ResetDuration:    b.ResetDuration,
+							SoftLimit:        b.SoftLimit,
 							LastReset:        budgetLastReset(vk.CalendarAligned, b.ResetDuration),
 							CurrentUsage:     0,
 							ProviderConfigID: &providerConfig.ID,
-							SoftLimit:        b.SoftLimit,
 						}
 						if err := validateBudget(&budget); err != nil {
 							return err
@@ -1025,7 +1019,9 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				if found {
 					existing.MaxLimit = b.MaxLimit
 					existing.ResetDuration = b.ResetDuration
-					existing.SoftLimit = b.SoftLimit
+					if b.SoftLimit != nil {
+						existing.SoftLimit = b.SoftLimit
+					}
 					resetBudgetUsageIfRequested(&existing, resetBudgetUsage, vk.CalendarAligned)
 					if err := validateBudget(&existing); err != nil {
 						return err
@@ -1041,10 +1037,10 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						ID:            uuid.NewString(),
 						MaxLimit:      b.MaxLimit,
 						ResetDuration: b.ResetDuration,
+						SoftLimit:     b.SoftLimit,
 						LastReset:     budgetLastReset(vk.CalendarAligned, b.ResetDuration),
 						CurrentUsage:  0,
 						VirtualKeyID:  &vk.ID,
-						SoftLimit:     b.SoftLimit,
 					}
 					inheritUsageFromClosestShorterBudget(&budget, vk.Budgets, resetBudgetUsage)
 					if err := validateBudget(&budget); err != nil {
@@ -1180,15 +1176,15 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 								return &badRequestError{err: fmt.Errorf("duplicate reset_duration in provider config budgets: %s", b.ResetDuration)}
 							}
 							seenDurations[b.ResetDuration] = true
-							budget := configstoreTables.TableBudget{
-								ID:               uuid.NewString(),
-								MaxLimit:         b.MaxLimit,
-								ResetDuration:    b.ResetDuration,
-								LastReset:        budgetLastReset(vk.CalendarAligned, b.ResetDuration),
-								CurrentUsage:     0,
-								ProviderConfigID: &providerConfig.ID,
-								SoftLimit:        b.SoftLimit,
-							}
+					budget := configstoreTables.TableBudget{
+							ID:               uuid.NewString(),
+							MaxLimit:         b.MaxLimit,
+							ResetDuration:    b.ResetDuration,
+							SoftLimit:        b.SoftLimit,
+							LastReset:        budgetLastReset(vk.CalendarAligned, b.ResetDuration),
+							CurrentUsage:     0,
+							ProviderConfigID: &providerConfig.ID,
+						}
 							if err := validateBudget(&budget); err != nil {
 								return err
 							}
@@ -1273,30 +1269,32 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 							if err != nil {
 								return err
 							}
-							if found {
-								eb.MaxLimit = b.MaxLimit
-								eb.ResetDuration = b.ResetDuration
+						if found {
+							eb.MaxLimit = b.MaxLimit
+							eb.ResetDuration = b.ResetDuration
+							if b.SoftLimit != nil {
 								eb.SoftLimit = b.SoftLimit
-								resetBudgetUsageIfRequested(&eb, resetBudgetUsage, vk.CalendarAligned)
-								if err := validateBudget(&eb); err != nil {
-									return err
-								}
-								if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &eb, tx); err != nil {
-									return err
-								}
-								pcReconciledBudgets = append(pcReconciledBudgets, eb)
-								pcMatchedIDs[eb.ID] = true
-							} else {
-								// New budget duration — create fresh
-								budget := configstoreTables.TableBudget{
-									ID:               uuid.NewString(),
-									MaxLimit:         b.MaxLimit,
-									ResetDuration:    b.ResetDuration,
-									LastReset:        budgetLastReset(vk.CalendarAligned, b.ResetDuration),
-									CurrentUsage:     0,
-									ProviderConfigID: &existing.ID,
-									SoftLimit:        b.SoftLimit,
-								}
+							}
+							resetBudgetUsageIfRequested(&eb, resetBudgetUsage, vk.CalendarAligned)
+							if err := validateBudget(&eb); err != nil {
+								return err
+							}
+							if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &eb, tx); err != nil {
+								return err
+							}
+							pcReconciledBudgets = append(pcReconciledBudgets, eb)
+							pcMatchedIDs[eb.ID] = true
+						} else {
+							// New budget duration — create fresh
+							budget := configstoreTables.TableBudget{
+								ID:               uuid.NewString(),
+								MaxLimit:         b.MaxLimit,
+								ResetDuration:    b.ResetDuration,
+								SoftLimit:        b.SoftLimit,
+								LastReset:        budgetLastReset(vk.CalendarAligned, b.ResetDuration),
+								CurrentUsage:     0,
+								ProviderConfigID: &existing.ID,
+							}
 								inheritUsageFromClosestShorterBudget(&budget, existing.Budgets, resetBudgetUsage)
 								if err := validateBudget(&budget); err != nil {
 									return err
@@ -1700,16 +1698,16 @@ func (h *GovernanceHandler) createTeam(ctx *fasthttp.RequestCtx) {
 			CustomerID:      req.CustomerID,
 			CalendarAligned: req.CalendarAligned,
 		}
-		if req.RateLimit != nil {
+	if req.RateLimit != nil {
 			rateLimit := configstoreTables.TableRateLimit{
 				ID:                   uuid.NewString(),
 				TokenMaxLimit:        req.RateLimit.TokenMaxLimit,
 				TokenResetDuration:   req.RateLimit.TokenResetDuration,
 				RequestMaxLimit:      req.RateLimit.RequestMaxLimit,
 				RequestResetDuration: req.RateLimit.RequestResetDuration,
+				SoftLimit:            req.RateLimit.SoftLimit,
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
-				SoftLimit:            req.RateLimit.SoftLimit,
 			}
 			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
@@ -1835,12 +1833,12 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 				if err := tx.First(&rateLimit, "id = ?", *team.RateLimitID).Error; err != nil {
 					return err
 				}
-			rateLimit.TokenMaxLimit = req.RateLimit.TokenMaxLimit
+		rateLimit.TokenMaxLimit = req.RateLimit.TokenMaxLimit
 			rateLimit.TokenResetDuration = req.RateLimit.TokenResetDuration
 			rateLimit.RequestMaxLimit = req.RateLimit.RequestMaxLimit
 			rateLimit.RequestResetDuration = req.RateLimit.RequestResetDuration
 			if req.RateLimit.SoftLimit != nil {
-				rateLimit.SoftLimit = *req.RateLimit.SoftLimit
+				rateLimit.SoftLimit = req.RateLimit.SoftLimit
 			}
 			if err := validateRateLimit(&rateLimit); err != nil {
 				return err
@@ -1849,30 +1847,26 @@ func (h *GovernanceHandler) updateTeam(ctx *fasthttp.RequestCtx) {
 				return err
 			}
 			team.RateLimit = &rateLimit
-			} else {
+		} else {
 			// Create new rate limit
-			teamRLSoftLimit := false
-			if req.RateLimit.SoftLimit != nil {
-				teamRLSoftLimit = *req.RateLimit.SoftLimit
-			}
 			rateLimit := configstoreTables.TableRateLimit{
 				ID:                   uuid.NewString(),
 				TokenMaxLimit:        req.RateLimit.TokenMaxLimit,
 				TokenResetDuration:   req.RateLimit.TokenResetDuration,
 				RequestMaxLimit:      req.RateLimit.RequestMaxLimit,
 				RequestResetDuration: req.RateLimit.RequestResetDuration,
+				SoftLimit:            req.RateLimit.SoftLimit,
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
-				SoftLimit:            teamRLSoftLimit,
 			}
-			if err := validateRateLimit(&rateLimit); err != nil {
-				return err
-			}
-			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
-				return err
-			}
-			team.RateLimitID = &rateLimit.ID
-			team.RateLimit = &rateLimit
+				if err := validateRateLimit(&rateLimit); err != nil {
+					return err
+				}
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+					return err
+				}
+				team.RateLimitID = &rateLimit.ID
+				team.RateLimit = &rateLimit
 			}
 		}
 		// Snap budgets and rate limit to the current calendar period when calendar
@@ -2065,14 +2059,14 @@ func (h *GovernanceHandler) createCustomer(ctx *fasthttp.RequestCtx) {
 			Name: req.Name,
 		}
 
-		if req.Budget != nil {
+	if req.Budget != nil {
 			budget := configstoreTables.TableBudget{
 				ID:            uuid.NewString(),
 				MaxLimit:      req.Budget.MaxLimit,
 				ResetDuration: req.Budget.ResetDuration,
+				SoftLimit:     req.Budget.SoftLimit,
 				LastReset:     budgetLastReset(false, req.Budget.ResetDuration),
 				CurrentUsage:  0,
-				SoftLimit:     req.Budget.SoftLimit,
 			}
 			if err := validateBudget(&budget); err != nil {
 				return err
@@ -2089,9 +2083,9 @@ func (h *GovernanceHandler) createCustomer(ctx *fasthttp.RequestCtx) {
 				TokenResetDuration:   req.RateLimit.TokenResetDuration,
 				RequestMaxLimit:      req.RateLimit.RequestMaxLimit,
 				RequestResetDuration: req.RateLimit.RequestResetDuration,
+				SoftLimit:            req.RateLimit.SoftLimit,
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
-				SoftLimit:            req.RateLimit.SoftLimit,
 			}
 			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
 				return err
@@ -2191,37 +2185,33 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 				budget.ResetDuration = *req.Budget.ResetDuration
 			}
 			if req.Budget.SoftLimit != nil {
-				budget.SoftLimit = *req.Budget.SoftLimit
+				budget.SoftLimit = req.Budget.SoftLimit
 			}
 			if err := validateBudget(&budget); err != nil {
-					return err
-				}
-				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
-					return err
-				}
-				customer.Budget = &budget
-			} else {
-				// Create new budget
-				if req.Budget.MaxLimit == nil || req.Budget.ResetDuration == nil {
-					return fmt.Errorf("both max_limit and reset_duration are required when creating a new budget")
-				}
-				if *req.Budget.MaxLimit < 0 {
-					return fmt.Errorf("budget max_limit cannot be negative: %.2f", *req.Budget.MaxLimit)
-				}
-				if _, err := configstoreTables.ParseDuration(*req.Budget.ResetDuration); err != nil {
-					return fmt.Errorf("invalid reset duration format: %s", *req.Budget.ResetDuration)
-				}
-			softLimit := false
-			if req.Budget.SoftLimit != nil {
-				softLimit = *req.Budget.SoftLimit
+				return err
+			}
+			if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &budget, tx); err != nil {
+				return err
+			}
+			customer.Budget = &budget
+		} else {
+			// Create new budget
+			if req.Budget.MaxLimit == nil || req.Budget.ResetDuration == nil {
+				return fmt.Errorf("both max_limit and reset_duration are required when creating a new budget")
+			}
+			if *req.Budget.MaxLimit < 0 {
+				return fmt.Errorf("budget max_limit cannot be negative: %.2f", *req.Budget.MaxLimit)
+			}
+			if _, err := configstoreTables.ParseDuration(*req.Budget.ResetDuration); err != nil {
+				return fmt.Errorf("invalid reset duration format: %s", *req.Budget.ResetDuration)
 			}
 			budget := configstoreTables.TableBudget{
 				ID:            uuid.NewString(),
 				MaxLimit:      *req.Budget.MaxLimit,
 				ResetDuration: *req.Budget.ResetDuration,
+				SoftLimit:     req.Budget.SoftLimit,
 				LastReset:     budgetLastReset(false, *req.Budget.ResetDuration),
 				CurrentUsage:  0,
-				SoftLimit:     softLimit,
 			}
 				if err := validateBudget(&budget); err != nil {
 					return err
@@ -2255,7 +2245,7 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 			rateLimit.RequestMaxLimit = req.RateLimit.RequestMaxLimit
 			rateLimit.RequestResetDuration = req.RateLimit.RequestResetDuration
 			if req.RateLimit.SoftLimit != nil {
-				rateLimit.SoftLimit = *req.RateLimit.SoftLimit
+				rateLimit.SoftLimit = req.RateLimit.SoftLimit
 			}
 			if err := validateRateLimit(&rateLimit); err != nil {
 				return err
@@ -2266,29 +2256,25 @@ func (h *GovernanceHandler) updateCustomer(ctx *fasthttp.RequestCtx) {
 			customer.RateLimit = &rateLimit
 		} else {
 			// Create new rate limit
-			custRLSoftLimit := false
-			if req.RateLimit.SoftLimit != nil {
-				custRLSoftLimit = *req.RateLimit.SoftLimit
-			}
 			rateLimit := configstoreTables.TableRateLimit{
 				ID:                   uuid.NewString(),
 				TokenMaxLimit:        req.RateLimit.TokenMaxLimit,
 				TokenResetDuration:   req.RateLimit.TokenResetDuration,
 				RequestMaxLimit:      req.RateLimit.RequestMaxLimit,
 				RequestResetDuration: req.RateLimit.RequestResetDuration,
+				SoftLimit:            req.RateLimit.SoftLimit,
 				TokenLastReset:       time.Now(),
 				RequestLastReset:     time.Now(),
-				SoftLimit:            custRLSoftLimit,
 			}
-			if err := validateRateLimit(&rateLimit); err != nil {
-				return err
+				if err := validateRateLimit(&rateLimit); err != nil {
+					return err
+				}
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+					return err
+				}
+				customer.RateLimitID = &rateLimit.ID
+				customer.RateLimit = &rateLimit
 			}
-			if err := h.cfg.StoreFromRequestCtx(ctx).CreateRateLimit(ctx, &rateLimit, tx); err != nil {
-				return err
-			}
-			customer.RateLimitID = &rateLimit.ID
-			customer.RateLimit = &rateLimit
-		}
 		}
 		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateCustomer(ctx, customer, tx); err != nil {
 			return err
@@ -2590,10 +2576,6 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, 400, "Model name is required")
 		return
 	}
-	if req.Provider == nil || strings.TrimSpace(*req.Provider) == "" {
-		SendError(ctx, 400, "Provider is required for model governance")
-		return
-	}
 	// Check if model config with same (model_name, provider) already exists
 	existing, err := h.cfg.StoreFromRequestCtx(ctx).GetModelConfig(ctx, req.ModelName, req.Provider)
 	if err != nil && err != configstore.ErrNotFound {
@@ -2642,16 +2624,16 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 			return err
 		}
 		mcID := mc.ID
-		if len(req.Budgets) > 0 {
+	if len(req.Budgets) > 0 {
 			for _, b := range req.Budgets {
 				budget := configstoreTables.TableBudget{
 					ID:            uuid.NewString(),
 					MaxLimit:      b.MaxLimit,
 					ResetDuration: b.ResetDuration,
+					SoftLimit:     b.SoftLimit,
 					LastReset:     budgetLastReset(false, b.ResetDuration),
 					CurrentUsage:  0,
 					ModelConfigID: &mcID,
-					SoftLimit:        b.SoftLimit,
 				}
 				if err := validateBudget(&budget); err != nil {
 					return err
@@ -2747,28 +2729,30 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 				if err != nil {
 					return err
 				}
-				if found {
-					existing.MaxLimit = b.MaxLimit
-					existing.ResetDuration = b.ResetDuration
+			if found {
+				existing.MaxLimit = b.MaxLimit
+				existing.ResetDuration = b.ResetDuration
+				if b.SoftLimit != nil {
 					existing.SoftLimit = b.SoftLimit
-					if err := validateBudget(&existing); err != nil {
-						return err
-					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, existing)
-					matchedIDs[existing.ID] = true
-				} else {
-					budget := configstoreTables.TableBudget{
-						ID:            uuid.NewString(),
-						MaxLimit:      b.MaxLimit,
-						ResetDuration: b.ResetDuration,
-						LastReset:     budgetLastReset(false, b.ResetDuration),
-						CurrentUsage:  0,
-						ModelConfigID: &mc.ID,
-						SoftLimit:        b.SoftLimit,
-					}
+				}
+				if err := validateBudget(&existing); err != nil {
+					return err
+				}
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
+					return err
+				}
+				reconciledBudgets = append(reconciledBudgets, existing)
+				matchedIDs[existing.ID] = true
+			} else {
+				budget := configstoreTables.TableBudget{
+					ID:            uuid.NewString(),
+					MaxLimit:      b.MaxLimit,
+					ResetDuration: b.ResetDuration,
+					SoftLimit:     b.SoftLimit,
+					LastReset:     budgetLastReset(false, b.ResetDuration),
+					CurrentUsage:  0,
+					ModelConfigID: &mc.ID,
+				}
 					inheritUsageFromClosestShorterBudget(&budget, mc.Budgets, false)
 					if err := validateBudget(&budget); err != nil {
 						return err
@@ -2971,28 +2955,30 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 				if err != nil {
 					return err
 				}
-				if found {
-					existing.MaxLimit = b.MaxLimit
-					existing.ResetDuration = b.ResetDuration
+			if found {
+				existing.MaxLimit = b.MaxLimit
+				existing.ResetDuration = b.ResetDuration
+				if b.SoftLimit != nil {
 					existing.SoftLimit = b.SoftLimit
-					if err := validateBudget(&existing); err != nil {
-						return err
-					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
-						return err
-					}
-					reconciledBudgets = append(reconciledBudgets, existing)
-					matchedIDs[existing.ID] = true
-				} else {
-					budget := configstoreTables.TableBudget{
-						ID:            uuid.NewString(),
-						MaxLimit:      b.MaxLimit,
-						ResetDuration: b.ResetDuration,
-						LastReset:     budgetLastReset(false, b.ResetDuration),
-						CurrentUsage:  0,
-						ProviderID:    &providerID,
-						SoftLimit:        b.SoftLimit,
-					}
+				}
+				if err := validateBudget(&existing); err != nil {
+					return err
+				}
+				if err := h.cfg.StoreFromRequestCtx(ctx).UpdateBudget(ctx, &existing, tx); err != nil {
+					return err
+				}
+				reconciledBudgets = append(reconciledBudgets, existing)
+				matchedIDs[existing.ID] = true
+			} else {
+				budget := configstoreTables.TableBudget{
+					ID:            uuid.NewString(),
+					MaxLimit:      b.MaxLimit,
+					ResetDuration: b.ResetDuration,
+					SoftLimit:     b.SoftLimit,
+					LastReset:     budgetLastReset(false, b.ResetDuration),
+					CurrentUsage:  0,
+					ProviderID:    &providerID,
+				}
 					inheritUsageFromClosestShorterBudget(&budget, provider.Budgets, false)
 					if err := validateBudget(&budget); err != nil {
 						return err

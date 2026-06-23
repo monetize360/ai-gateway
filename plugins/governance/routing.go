@@ -508,9 +508,9 @@ func createCELEnvironment() (*cel.Env, error) {
 		cel.Variable("request", cel.DoubleType),
 		cel.Variable("budget_used", cel.DoubleType),
 
-		// Soft limit indicator: true when a soft budget or rate limit is >= 100%.
-		// Use in routing rules to switch models on exhaustion without blocking requests.
-		// Example: soft_limit_exceeded == true → route to fallback model
+		// True when any soft-limit budget or rate limit has crossed its threshold.
+		// Use this instead of budget_used/tokens_used/request >= 100 when you only
+		// want to act on soft limits and leave hard-limit behaviour unchanged.
 		cel.Variable("soft_limit_exceeded", cel.BoolType),
 	)
 }

@@ -24,15 +24,6 @@ const (
 	DecisionModelBlocked       Decision = "model_blocked"
 	DecisionProviderBlocked    Decision = "provider_blocked"
 	DecisionMCPToolBlocked     Decision = "mcp_tool_blocked"
-
-	// Soft-limit variants: limit is exceeded but the limit is marked soft_limit=true.
-	// Requests are allowed through; usage is still tracked and percentages are still reported.
-	// Use routing rules with `budget_used >= 100.0`, `tokens_used >= 100.0`,
-	// `request >= 100.0`, or `soft_limit_exceeded` to switch models on exhaustion.
-	DecisionRateLimitedSoft    Decision = "rate_limited_soft"
-	DecisionTokenLimitedSoft   Decision = "token_limited_soft"
-	DecisionRequestLimitedSoft Decision = "request_limited_soft"
-	DecisionBudgetExceededSoft Decision = "budget_exceeded_soft"
 )
 
 // EvaluationRequest contains the context for evaluating a request
@@ -97,54 +88,38 @@ func (r *BudgetResolver) EvaluateModelAndProviderRequest(ctx *schemas.BifrostCon
 	}
 	// 1. Check provider-level rate limits FIRST (before model-level checks)
 	if provider != "" {
-		if decision, err := r.store.CheckProviderRateLimit(ctx, request, nil, nil); err != nil || isAnyRateLimitViolation(decision) {
-			if isSoftRateLimitViolation(decision) {
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return &EvaluationResult{
-					Decision: decision,
-					Reason:   fmt.Sprintf("Provider-level rate limit check failed: %s", reasonFromErr(err, decision)),
-				}
+		if decision, err := r.store.CheckProviderRateLimit(ctx, request, nil, nil); err != nil || isRateLimitViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Provider-level rate limit check failed: %s", reasonFromErr(err, decision)),
 			}
 		}
 		// 2. Check provider-level budgets FIRST (before model-level checks)
-		if decision, err := r.store.CheckProviderBudget(ctx, request, nil); err != nil || isAnyBudgetViolation(decision) {
-			if isSoftBudgetViolation(decision) {
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return &EvaluationResult{
-					Decision: decision,
-					Reason:   fmt.Sprintf("Provider-level budget exceeded: %s", reasonFromErr(err, decision)),
-				}
+		if decision, err := r.store.CheckProviderBudget(ctx, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Provider-level budget exceeded: %s", reasonFromErr(err, decision)),
 			}
 		}
 	}
 	// 3. Check model-level rate limits (after provider-level checks)
 	if model != "" {
-		if decision, err := r.store.CheckModelRateLimit(ctx, request, nil, nil); err != nil || isAnyRateLimitViolation(decision) {
-			if isSoftRateLimitViolation(decision) {
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return &EvaluationResult{
-					Decision: decision,
-					Reason:   fmt.Sprintf("Model-level rate limit check failed: %s", reasonFromErr(err, decision)),
-				}
+		if decision, err := r.store.CheckModelRateLimit(ctx, request, nil, nil); err != nil || isRateLimitViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Model-level rate limit check failed: %s", reasonFromErr(err, decision)),
 			}
 		}
 
 		// 4. Check model-level budgets (after provider-level checks)
-		if decision, err := r.store.CheckModelBudget(ctx, request, nil); err != nil || isAnyBudgetViolation(decision) {
-			if isSoftBudgetViolation(decision) {
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return &EvaluationResult{
-					Decision: decision,
-					Reason:   fmt.Sprintf("Model-level budget exceeded: %s", reasonFromErr(err, decision)),
-				}
+		if decision, err := r.store.CheckModelBudget(ctx, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Model-level budget exceeded: %s", reasonFromErr(err, decision)),
 			}
 		}
 	}
-	// All provider-level and model-level checks passed (or only soft limits were exceeded)
+	// All provider-level and model-level checks passed
 	return &EvaluationResult{
 		Decision: DecisionAllow,
 		Reason:   "Request allowed by governance policy (provider-level and model-level checks passed)",
@@ -158,24 +133,16 @@ func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext
 			Reason:   "No org ID provided, skipping org-level checks",
 		}
 	}
-	if decision, err := r.store.CheckOrgHierarchyRateLimit(ctx, orgID, request, nil, nil); err != nil || isAnyRateLimitViolation(decision) {
-		if isSoftRateLimitViolation(decision) {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-		} else {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Org-level rate limit exceeded: %s", reasonFromErr(err, decision)),
-			}
+	if decision, err := r.store.CheckOrgHierarchyRateLimit(ctx, orgID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
+		return &EvaluationResult{
+			Decision: decision,
+			Reason:   fmt.Sprintf("Org-level rate limit exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
-	if decision, err := r.store.CheckOrgHierarchyBudget(ctx, orgID, request, nil); err != nil || isAnyBudgetViolation(decision) {
-		if isSoftBudgetViolation(decision) {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-		} else {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Org-level budget exceeded: %s", reasonFromErr(err, decision)),
-			}
+	if decision, err := r.store.CheckOrgHierarchyBudget(ctx, orgID, request, nil); err != nil || isBudgetViolation(decision) {
+		return &EvaluationResult{
+			Decision: decision,
+			Reason:   fmt.Sprintf("Org-level budget exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
 	return &EvaluationResult{
@@ -197,26 +164,18 @@ func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID
 	}
 
 	// Check user-level rate limits
-	if decision, err := r.store.CheckUserRateLimit(ctx, userID, request, nil, nil); err != nil || isAnyRateLimitViolation(decision) {
-		if isSoftRateLimitViolation(decision) {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-		} else {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("User-level rate limit exceeded: %s", reasonFromErr(err, decision)),
-			}
+	if decision, err := r.store.CheckUserRateLimit(ctx, userID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
+		return &EvaluationResult{
+			Decision: decision,
+			Reason:   fmt.Sprintf("User-level rate limit exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
 
 	// Check user-level budget
-	if decision, err := r.store.CheckUserBudget(ctx, userID, request, nil); err != nil || isAnyBudgetViolation(decision) {
-		if isSoftBudgetViolation(decision) {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-		} else {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("User-level budget exceeded: %s", reasonFromErr(err, decision)),
-			}
+	if decision, err := r.store.CheckUserBudget(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
+		return &EvaluationResult{
+			Decision: decision,
+			Reason:   fmt.Sprintf("User-level budget exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
 
@@ -286,22 +245,12 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	// 4. Check rate limits hierarchy (VK level)
 	if !skipRateLimitsAndBudgets {
 		if rateLimitResult := r.checkRateLimitHierarchy(ctx, vk, evaluationRequest); rateLimitResult != nil {
-			if isSoftRateLimitViolation(rateLimitResult.Decision) {
-				// Soft limit exceeded — mark context and continue evaluating
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return rateLimitResult
-			}
+			return rateLimitResult
 		}
 
-		// 5. Check budget hierarchy (VK → org ancestors)
+		// 5. Check budget hierarchy (VK → Team → Customer)
 		if budgetResult := r.checkBudgetHierarchy(ctx, vk, evaluationRequest); budgetResult != nil {
-			if isSoftBudgetViolation(budgetResult.Decision) {
-				// Soft limit exceeded — mark context and continue evaluating
-				ctx.SetValue(schemas.BifrostContextKeyGovernanceSoftLimitExceeded, true)
-			} else {
-				return budgetResult
-			}
+			return budgetResult
 		}
 	}
 
@@ -381,10 +330,9 @@ func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey
 	return false
 }
 
-// checkRateLimitHierarchy checks provider-level rate limits first, then VK rate limits using flexible approach.
-// Returns a non-nil EvaluationResult for both hard and soft violations — callers check isSoftRateLimitViolation.
+// checkRateLimitHierarchy checks provider-level rate limits first, then VK rate limits using flexible approach
 func (r *BudgetResolver) checkRateLimitHierarchy(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest) *EvaluationResult {
-	if decision, err := r.store.CheckVirtualKeyRateLimit(ctx, vk, request, nil, nil); err != nil || isAnyRateLimitViolation(decision) {
+	if decision, err := r.store.CheckVirtualKeyRateLimit(ctx, vk, request, nil, nil); err != nil || isRateLimitViolation(decision) {
 		// Check provider-level first (matching check order), then VK-level
 		var rateLimitInfo *configstoreTables.TableRateLimit
 		for _, pc := range vk.ProviderConfigs {
@@ -407,11 +355,11 @@ func (r *BudgetResolver) checkRateLimitHierarchy(ctx context.Context, vk *config
 	return nil // No rate limit violations
 }
 
-// checkBudgetHierarchy checks the budget hierarchy (VK → org ancestors).
-// Returns a non-nil EvaluationResult for both hard and soft violations — callers check isSoftBudgetViolation.
+// checkBudgetHierarchy checks the budget hierarchy atomically (VK → Team → Customer)
 func (r *BudgetResolver) checkBudgetHierarchy(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest) *EvaluationResult {
-	if decision, err := r.store.CheckVirtualKeyBudget(ctx, vk, request, nil); err != nil || isAnyBudgetViolation(decision) {
-		r.logger.Debug(fmt.Sprintf("Budget check result for VK %s (soft=%v): %s", vk.ID, isSoftBudgetViolation(decision), reasonFromErr(err, decision)))
+	// Use atomic budget checking to prevent race conditions
+	if decision, err := r.store.CheckVirtualKeyBudget(ctx, vk, request, nil); err != nil || isBudgetViolation(decision) {
+		r.logger.Debug(fmt.Sprintf("Atomic budget exceeded for VK %s: %s", vk.ID, reasonFromErr(err, decision)))
 		return &EvaluationResult{
 			Decision:   decision,
 			Reason:     fmt.Sprintf("Budget exceeded: %s", reasonFromErr(err, decision)),
@@ -466,36 +414,14 @@ func (r *BudgetResolver) isProviderRateLimitViolated(ctx context.Context, vk *co
 	return false
 }
 
-// isRateLimitViolation returns true if the decision indicates a hard rate limit violation.
+// isRateLimitViolation returns true if the decision indicates a rate limit violation
 func isRateLimitViolation(decision Decision) bool {
 	return decision == DecisionRateLimited || decision == DecisionTokenLimited || decision == DecisionRequestLimited
 }
 
-// isSoftRateLimitViolation returns true if the decision indicates a soft rate limit violation.
-// Soft violations allow the request through; usage is still tracked.
-func isSoftRateLimitViolation(decision Decision) bool {
-	return decision == DecisionRateLimitedSoft || decision == DecisionTokenLimitedSoft || decision == DecisionRequestLimitedSoft
-}
-
-// isAnyRateLimitViolation returns true for both hard and soft rate limit violations.
-func isAnyRateLimitViolation(decision Decision) bool {
-	return isRateLimitViolation(decision) || isSoftRateLimitViolation(decision)
-}
-
-// isBudgetViolation returns true if the decision indicates a hard budget violation.
+// isBudgetViolation returns true if the decision indicates a budget violation.
 func isBudgetViolation(decision Decision) bool {
 	return decision == DecisionBudgetExceeded
-}
-
-// isSoftBudgetViolation returns true if the decision indicates a soft budget violation.
-// Soft violations allow the request through; usage is still tracked.
-func isSoftBudgetViolation(decision Decision) bool {
-	return decision == DecisionBudgetExceededSoft
-}
-
-// isAnyBudgetViolation returns true for both hard and soft budget violations.
-func isAnyBudgetViolation(decision Decision) bool {
-	return isBudgetViolation(decision) || isSoftBudgetViolation(decision)
 }
 
 // reasonFromErr yields a non-nil-safe reason string. When the store returns a

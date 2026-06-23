@@ -27,11 +27,7 @@ type TableBudget struct {
 	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
 
-	// SoftLimit when true allows requests to proceed even when this budget is exceeded.
-	// Usage is still tracked and budget_used percentage is still reported.
-	// Pair with a routing rule using `budget_used >= 100.0` to switch models on exhaustion
-	// without ever blocking a request.
-	SoftLimit bool `gorm:"not null;default:false" json:"soft_limit,omitempty"`
+	SoftLimit *bool `gorm:"default:false" json:"soft_limit,omitempty"`
 
 	CalendarAlignedInput *bool `gorm:"-" json:"calendar_aligned,omitempty"`
 	IsCalendarAligned    bool  `gorm:"-" json:"-"`

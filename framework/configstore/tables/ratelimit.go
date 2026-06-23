@@ -29,11 +29,7 @@ type TableRateLimit struct {
 	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
 
-	// SoftLimit when true allows requests to proceed even when this rate limit is exceeded.
-	// Usage is still tracked and tokens_used/request percentage is still reported.
-	// Pair with a routing rule using `tokens_used >= 100.0` or `request >= 100.0` to switch
-	// models on exhaustion without blocking requests.
-	SoftLimit bool `gorm:"not null;default:false" json:"soft_limit,omitempty"`
+	SoftLimit *bool `gorm:"default:false" json:"soft_limit,omitempty"`
 
 	CalendarAlignedInput *bool `gorm:"-" json:"calendar_aligned,omitempty"`
 	IsCalendarAligned    bool  `gorm:"-" json:"-"`

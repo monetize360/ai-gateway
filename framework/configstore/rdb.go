@@ -3804,7 +3804,7 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 			}
 		}
 	}
-	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, configModels, virtualKeys)
+	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 
 	return &GovernanceConfig{
 		VirtualKeys:      virtualKeys,

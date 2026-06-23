@@ -11,10 +11,10 @@ func attachGovernanceFromReverseFK(
 	budgets []configstoreTables.TableBudget,
 	rateLimits []configstoreTables.TableRateLimit,
 	providers []configstoreTables.TableProvider,
-	configModels []configstoreTables.TableModel,
+	modelConfigs []configstoreTables.TableModelConfig,
 	virtualKeys []configstoreTables.TableVirtualKey,
 ) {
-	configstore.AttachGovernanceFromReverseFK(budgets, rateLimits, providers, configModels, virtualKeys)
+	configstore.AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 }
 
 func budgetID(b *configstoreTables.TableBudget) string {
@@ -23,150 +23,6 @@ func budgetID(b *configstoreTables.TableBudget) string {
 
 func rateLimitID(rl *configstoreTables.TableRateLimit) string {
 	return configstoreTables.RateLimitRefID(rl)
-}
-
-func collectBudgetIDsFromGovernanceRefreshDelta(delta *configstore.GovernanceRefreshDelta) map[string]struct{} {
-	ids := make(map[string]struct{})
-	if delta == nil {
-		return ids
-	}
-	for i := range delta.Budgets {
-		if id := delta.Budgets[i].ID; id != "" && !delta.Budgets[i].Deleted {
-			ids[id] = struct{}{}
-		}
-	}
-	for i := range delta.VirtualKeys {
-		vk := &delta.VirtualKeys[i]
-		if vk.Deleted {
-			continue
-		}
-		for j := range vk.Budgets {
-			if id := vk.Budgets[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-		for j := range vk.ProviderConfigs {
-			for k := range vk.ProviderConfigs[j].Budgets {
-				if id := vk.ProviderConfigs[j].Budgets[k].ID; id != "" {
-					ids[id] = struct{}{}
-				}
-			}
-		}
-	}
-	for i := range delta.Providers {
-		if delta.Providers[i].Deleted {
-			continue
-		}
-		for j := range delta.Providers[i].Budgets {
-			if id := delta.Providers[i].Budgets[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-	}
-	for i := range delta.ModelConfigs {
-		if delta.ModelConfigs[i].Deleted {
-			continue
-		}
-		for j := range delta.ModelConfigs[i].Budgets {
-			if id := delta.ModelConfigs[i].Budgets[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-	}
-	return ids
-}
-
-func collectRateLimitIDsFromGovernanceRefreshDelta(delta *configstore.GovernanceRefreshDelta) map[string]struct{} {
-	ids := make(map[string]struct{})
-	if delta == nil {
-		return ids
-	}
-	for i := range delta.RateLimits {
-		if id := delta.RateLimits[i].ID; id != "" && !delta.RateLimits[i].Deleted {
-			ids[id] = struct{}{}
-		}
-	}
-	for i := range delta.VirtualKeys {
-		vk := &delta.VirtualKeys[i]
-		if vk.Deleted {
-			continue
-		}
-		for j := range vk.RateLimits {
-			if id := vk.RateLimits[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-		for j := range vk.ProviderConfigs {
-			for k := range vk.ProviderConfigs[j].RateLimits {
-				if id := vk.ProviderConfigs[j].RateLimits[k].ID; id != "" {
-					ids[id] = struct{}{}
-				}
-			}
-		}
-	}
-	for i := range delta.Providers {
-		if delta.Providers[i].Deleted {
-			continue
-		}
-		for j := range delta.Providers[i].RateLimits {
-			if id := delta.Providers[i].RateLimits[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-	}
-	for i := range delta.ModelConfigs {
-		if delta.ModelConfigs[i].Deleted {
-			continue
-		}
-		for j := range delta.ModelConfigs[i].RateLimits {
-			if id := delta.ModelConfigs[i].RateLimits[j].ID; id != "" {
-				ids[id] = struct{}{}
-			}
-		}
-	}
-	return ids
-}
-
-// hydrateEmbeddedBudgetForParent returns the budget snapshot to attach on a parent
-// entity (VK, provider, model config). Existing budgets are read from the canonical
-// budgets map so association reloads cannot clobber config fields such as soft_limit.
-func hydrateEmbeddedBudgetForParent(gs *LocalGovernanceStore, ctx context.Context, incoming configstoreTables.TableBudget, calendarAligned bool) configstoreTables.TableBudget {
-	if incoming.ID == "" {
-		return incoming
-	}
-	if canonical := gs.LoadBudget(ctx, incoming.ID); canonical != nil {
-		out := *canonical
-		out.IsCalendarAligned = calendarAligned
-		return out
-	}
-	incoming.IsCalendarAligned = calendarAligned
-	gs.UpsertBudgetConfig(ctx, incoming.ID, &incoming)
-	if canonical := gs.LoadBudget(ctx, incoming.ID); canonical != nil {
-		out := *canonical
-		out.IsCalendarAligned = calendarAligned
-		return out
-	}
-	return incoming
-}
-
-// hydrateEmbeddedRateLimitForParent mirrors hydrateEmbeddedBudgetForParent for rate limits.
-func hydrateEmbeddedRateLimitForParent(gs *LocalGovernanceStore, ctx context.Context, incoming configstoreTables.TableRateLimit, calendarAligned bool) configstoreTables.TableRateLimit {
-	if incoming.ID == "" {
-		return incoming
-	}
-	if canonical := gs.LoadRateLimit(ctx, incoming.ID); canonical != nil {
-		out := *canonical
-		out.IsCalendarAligned = calendarAligned
-		return out
-	}
-	incoming.IsCalendarAligned = calendarAligned
-	gs.UpsertRateLimitConfig(ctx, incoming.ID, &incoming)
-	if canonical := gs.LoadRateLimit(ctx, incoming.ID); canonical != nil {
-		out := *canonical
-		out.IsCalendarAligned = calendarAligned
-		return out
-	}
-	return incoming
 }
 
 func loadLiveBudgets(gs *LocalGovernanceStore, ctx context.Context, budgets []configstoreTables.TableBudget) []*configstoreTables.TableBudget {
@@ -322,12 +178,13 @@ func applyRateLimitStatusFromSlice(gs *LocalGovernanceStore, rateLimits []config
 			if rateLimit, ok := rateLimitValue.(*configstoreTables.TableRateLimit); ok && rateLimit != nil {
 				tokensBaseline := tokenBaselines[rateLimit.ID]
 				requestsBaseline := requestBaselines[rateLimit.ID]
+				isSoftLimit := rateLimit.SoftLimit != nil && *rateLimit.SoftLimit
 				if rateLimit.TokenMaxLimit != nil && *rateLimit.TokenMaxLimit > 0 {
 					tokenPercent := float64(rateLimit.TokenCurrentUsage+tokensBaseline) / float64(*rateLimit.TokenMaxLimit) * 100
 					if tokenPercent > result.RateLimitTokenPercentUsed {
 						result.RateLimitTokenPercentUsed = tokenPercent
 					}
-					if tokenPercent >= 100.0 && rateLimit.SoftLimit {
+					if isSoftLimit && tokenPercent >= 100 {
 						result.SoftLimitExceeded = true
 					}
 				}
@@ -336,7 +193,7 @@ func applyRateLimitStatusFromSlice(gs *LocalGovernanceStore, rateLimits []config
 					if requestPercent > result.RateLimitRequestPercentUsed {
 						result.RateLimitRequestPercentUsed = requestPercent
 					}
-					if requestPercent >= 100.0 && rateLimit.SoftLimit {
+					if isSoftLimit && requestPercent >= 100 {
 						result.SoftLimitExceeded = true
 					}
 				}
@@ -355,7 +212,7 @@ func applyBudgetStatusFromSlice(gs *LocalGovernanceStore, budgets []configstoreT
 					if budgetPercent > result.BudgetPercentUsed {
 						result.BudgetPercentUsed = budgetPercent
 					}
-					if budgetPercent >= 100.0 && budget.SoftLimit {
+					if budget.SoftLimit != nil && *budget.SoftLimit && budgetPercent >= 100 {
 						result.SoftLimitExceeded = true
 					}
 				}
