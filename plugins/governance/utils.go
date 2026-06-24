@@ -78,8 +78,7 @@ func isModelBlockedByList(blacklist schemas.BlackList, model string) bool {
 	return false
 }
 
-// filterModelsForVirtualKey filters models based on virtual key's provider configs
-// Returns only models that are allowed by the virtual key's ProviderConfigs
+// filterModelsForVirtualKey filters models based on virtual key and org provider configs.
 func (p *GovernancePlugin) filterModelsForVirtualKey(
 	ctx context.Context,
 	models []schemas.Model,
@@ -92,55 +91,13 @@ func (p *GovernancePlugin) filterModelsForVirtualKey(
 	vk, exists := comp.store.GetVirtualKey(ctx, virtualKeyID)
 	if !exists {
 		p.logger.Warn("[Governance] Virtual key not found for list models filtering: %s", virtualKeyID)
-		return []schemas.Model{} // VK not found, return empty list
+		return []schemas.Model{}
 	}
 
-	// Empty ProviderConfigs means no provider-level restrictions (allow all models).
-	if len(vk.ProviderConfigs) == 0 {
-		return models
-	}
-
-	// Filter models based on ProviderConfigs
 	filteredModels := make([]schemas.Model, 0, len(models))
 	for _, model := range models {
 		provider, modelName := schemas.ParseModelString(model.ID, "")
-
-		// Pre-pass: if any matching config blacklists the model, block it entirely.
-		isBlocked := false
-		for _, pc := range vk.ProviderConfigs {
-			if pc.Provider == string(provider) && isModelBlockedByList(pc.BlacklistedModels, modelName) {
-				isBlocked = true
-				break
-			}
-		}
-		if isBlocked {
-			continue
-		}
-
-		// Allowlist check — model is allowed if any matching config permits it.
-		isAllowed := false
-		for _, pc := range vk.ProviderConfigs {
-			if pc.Provider == string(provider) {
-				if p.modelCatalog != nil && p.inMemoryStore != nil {
-					providerConfig, ok := p.inMemoryStore.GetConfiguredProviders()[provider]
-					providerConfigPtr := &providerConfig
-					if !ok {
-						providerConfigPtr = nil
-					}
-					if p.modelCatalog.IsModelAllowedForProvider(provider, modelName, providerConfigPtr, pc.AllowedModels) {
-						isAllowed = true
-						break
-					}
-				} else {
-					if pc.AllowedModels.IsAllowed(modelName) {
-						isAllowed = true
-						break
-					}
-				}
-			}
-		}
-
-		if isAllowed {
+		if comp.resolver.isModelAllowed(vk, provider, modelName) {
 			filteredModels = append(filteredModels, model)
 		}
 	}

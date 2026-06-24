@@ -734,7 +734,7 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Load balancing provider for model %s", modelStr))
 
 	// Get provider configs for this virtual key
-	providerConfigs := virtualKey.ProviderConfigs
+	providerConfigs := virtualKey.AllowedModelConfigs
 	if len(providerConfigs) == 0 {
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelWarn, fmt.Sprintf("No provider configs on virtual key %s for model %s, skipping load balancing", virtualKey.Name, modelStr))
 		// No provider configs, continue without modification
@@ -756,7 +756,7 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 		}
 	}
 
-	allowedProviderConfigs := make([]configstoreTables.TableVirtualKeyProviderConfig, 0)
+	allowedProviderConfigs := make([]configstoreTables.TableAllowedModelConfig, 0)
 	for _, config := range providerConfigs {
 		// Blacklist check wins over allowlist (same as provider-key enforcement)
 		if blacklistedProviders[config.Provider] {
@@ -812,7 +812,7 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 		return body, nil
 	}
 	// Separate providers with weight set (participate in routing) from those without (nil weight = excluded from routing)
-	weightedConfigs := make([]configstoreTables.TableVirtualKeyProviderConfig, 0, len(allowedProviderConfigs))
+	weightedConfigs := make([]configstoreTables.TableAllowedModelConfig, 0, len(allowedProviderConfigs))
 	for _, config := range allowedProviderConfigs {
 		if config.Weight != nil {
 			weightedConfigs = append(weightedConfigs, config)

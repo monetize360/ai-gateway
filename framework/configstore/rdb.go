@@ -92,7 +92,7 @@ func lockBudgetOwner(ctx context.Context, txDB *gorm.DB, budget tables.TableBudg
 			return err
 		}
 	case budget.ProviderConfigID != nil:
-		var providerConfig tables.TableVirtualKeyProviderConfig
+		var providerConfig tables.TableAllowedModelConfig
 		if err := dbForUpdate(txDB.WithContext(ctx)).First(&providerConfig, "id = ?", *budget.ProviderConfigID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
@@ -769,18 +769,18 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 	return nil
 }
 
-// deleteJoinRowsForRemovedProviderKeys removes join-table entries that reference keys
+// deleteJoinRowsForRemovedAllowedModelConfigKeys removes join-table entries that reference keys
 // that are being deleted by UpdateProvider. The caller MUST have already locked the
 // supplied VKPC rows (FOR UPDATE) before calling, so this helper performs no locking
 // of its own. This keeps the resource order config_providers -> VKPC -> config_keys
-// consistent with DeleteProvider and UpdateVirtualKeyProviderConfig.
-func (s *RDBConfigStore) deleteJoinRowsForRemovedProviderKeys(ctx context.Context, txDB *gorm.DB, lockedVKPCs []tables.TableVirtualKeyProviderConfig, removedKeyIDs []string) error {
+// consistent with DeleteProvider and UpdateAllowedModelConfig.
+func (s *RDBConfigStore) deleteJoinRowsForRemovedAllowedModelConfigKeys(ctx context.Context, txDB *gorm.DB, lockedVKPCs []tables.TableAllowedModelConfig, removedKeyIDs []string) error {
 	if len(removedKeyIDs) == 0 || len(lockedVKPCs) == 0 {
 		return nil
 	}
 
 	for _, providerConfig := range lockedVKPCs {
-		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfigKey{},
+		if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfigKey{},
 			"table_virtual_key_provider_config_id = ? AND table_key_id IN ?", providerConfig.ID, removedKeyIDs); err != nil {
 			return err
 		}
@@ -789,10 +789,10 @@ func (s *RDBConfigStore) deleteJoinRowsForRemovedProviderKeys(ctx context.Contex
 	return nil
 }
 
-func (s *RDBConfigStore) cleanupVirtualKeyProviderConfigsForDeletedProvider(ctx context.Context, txDB *gorm.DB, provider string) error {
+func (s *RDBConfigStore) cleanupAllowedModelConfigsForDeletedProvider(ctx context.Context, txDB *gorm.DB, provider string) error {
 	var providerConfigIDs []string
 	if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).
-		Model(&tables.TableVirtualKeyProviderConfig{}).
+		Model(&tables.TableAllowedModelConfig{}).
 		Where("provider = ?", provider).
 		Order("id ASC").
 		Pluck("id", &providerConfigIDs).Error; err != nil {
@@ -801,7 +801,7 @@ func (s *RDBConfigStore) cleanupVirtualKeyProviderConfigsForDeletedProvider(ctx 
 
 	sort.Strings(providerConfigIDs)
 	for _, providerConfigID := range providerConfigIDs {
-		if err := s.DeleteVirtualKeyProviderConfig(ctx, providerConfigID, txDB); err != nil {
+		if err := s.DeleteAllowedModelConfig(ctx, providerConfigID, txDB); err != nil {
 			return err
 		}
 	}
@@ -853,10 +853,10 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 	}
 
 	// Lock VKPC rows for this provider BEFORE locking config_keys so that the
-	// resource order matches DeleteProvider and concurrent UpdateVirtualKeyProviderConfig
+	// resource order matches DeleteProvider and concurrent UpdateAllowedModelConfig
 	// (which holds a VKPC row and then needs FK locks on config_keys via the join table).
 	// Without this pre-lock the two paths invert on config_keys vs. VKPC and deadlock (40P01).
-	var providerVKPCs []tables.TableVirtualKeyProviderConfig
+	var providerVKPCs []tables.TableAllowedModelConfig
 	if err := dbForUpdate(txDB.WithContext(ctx)).
 		Where("provider = ?", dbProvider.Name).
 		Order("id ASC").
@@ -969,7 +969,7 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 		removedProviderKeyIDs = append(removedProviderKeyIDs, keyToDelete.ID)
 	}
 	removedProviderKeyIDs = sortedStringCopy(removedProviderKeyIDs)
-	if err := s.deleteJoinRowsForRemovedProviderKeys(ctx, txDB, providerVKPCs, removedProviderKeyIDs); err != nil {
+	if err := s.deleteJoinRowsForRemovedAllowedModelConfigKeys(ctx, txDB, providerVKPCs, removedProviderKeyIDs); err != nil {
 		return err
 	}
 
@@ -1115,7 +1115,7 @@ func (s *RDBConfigStore) DeleteProvider(ctx context.Context, provider schemas.Mo
 		return err
 	}
 
-	if err := s.cleanupVirtualKeyProviderConfigsForDeletedProvider(ctx, txDB, dbProvider.Name); err != nil {
+	if err := s.cleanupAllowedModelConfigsForDeletedProvider(ctx, txDB, dbProvider.Name); err != nil {
 		return err
 	}
 
@@ -1379,7 +1379,7 @@ func (s *RDBConfigStore) DeleteProviderKey(ctx context.Context, provider schemas
 		}
 		return err
 	}
-	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfigKey{}, "table_key_id = ?", dbKey.ID); err != nil {
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfigKey{}, "table_key_id = ?", dbKey.ID); err != nil {
 		return err
 	}
 
@@ -2184,10 +2184,10 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 	return GovernanceActive(db).
 		Preload("Budgets", active("governance_budgets")).
 		Preload("RateLimits", active("governance_rate_limits")).
-		Preload("ProviderConfigs", active("governance_virtual_key_provider_configs")).
-		Preload("ProviderConfigs.Budgets", active("governance_budgets")).
-		Preload("ProviderConfigs.RateLimits", active("governance_rate_limits")).
-		Preload("ProviderConfigs.Keys", func(db *gorm.DB) *gorm.DB {
+		Preload("AllowedModelConfigs", active("governance_virtual_key_provider_configs")).
+		Preload("AllowedModelConfigs.Budgets", active("governance_budgets")).
+		Preload("AllowedModelConfigs.RateLimits", active("governance_rate_limits")).
+		Preload("AllowedModelConfigs.Keys", func(db *gorm.DB) *gorm.DB {
 			return db.Table("config_keys").
 				Where("config_keys.deleted = ?", false).
 				Joins("JOIN governance_virtual_key_provider_config_keys j ON j.table_key_id = config_keys.id AND j.deleted = ?", false).
@@ -2352,9 +2352,9 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 	baseQuery := s.DB().WithContext(ctx).
 		Preload("Budgets").
 		Preload("RateLimits").
-		Preload("ProviderConfigs").
-		Preload("ProviderConfigs.Budgets").
-		Preload("ProviderConfigs.RateLimits")
+		Preload("AllowedModelConfigs").
+		Preload("AllowedModelConfigs.Budgets").
+		Preload("AllowedModelConfigs.RateLimits")
 	if err := baseQuery.Session(&gorm.Session{}).Where("value_hash = ?", valueHash).First(&virtualKey).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Fallback: try plaintext lookup for rows not yet migrated
@@ -2458,19 +2458,19 @@ func (s *RDBConfigStore) getProviderIDByName(ctx context.Context, txDB *gorm.DB,
 	return providerID, nil
 }
 
-func (s *RDBConfigStore) resolveVirtualKeyProviderConfigKeys(
+func (s *RDBConfigStore) resolveAllowedModelConfigKeys(
 	ctx context.Context,
 	txDB *gorm.DB,
-	virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig,
+	allowedModelConfig *tables.TableAllowedModelConfig,
 	keysToAssociate []tables.TableKey,
 ) ([]tables.TableKey, error) {
 	if len(keysToAssociate) == 0 {
 		return keysToAssociate, nil
 	}
 
-	providerID, err := s.getProviderIDByName(ctx, txDB, virtualKeyProviderConfig.Provider)
+	providerID, err := s.getProviderIDByName(ctx, txDB, allowedModelConfig.Provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve provider %q: %w", virtualKeyProviderConfig.Provider, err)
+		return nil, fmt.Errorf("failed to resolve provider %q: %w", allowedModelConfig.Provider, err)
 	}
 
 	resolvedKeys := make([]tables.TableKey, 0, len(keysToAssociate))
@@ -2560,7 +2560,7 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 	}
 	if err := txDB.WithContext(ctx).Transaction(func(txDB *gorm.DB) error {
 		var virtualKey tables.TableVirtualKey
-		if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).Preload("ProviderConfigs", func(q *gorm.DB) *gorm.DB {
+		if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).Preload("AllowedModelConfigs", func(q *gorm.DB) *gorm.DB {
 			return GovernanceActive(q)
 		}).First(&virtualKey, "id = ?", id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -2570,11 +2570,11 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 		}
 
 		var providerConfigRateLimitIDs []string
-		sort.Slice(virtualKey.ProviderConfigs, func(i, j int) bool {
-			return virtualKey.ProviderConfigs[i].ID < virtualKey.ProviderConfigs[j].ID
+		sort.Slice(virtualKey.AllowedModelConfigs, func(i, j int) bool {
+			return virtualKey.AllowedModelConfigs[i].ID < virtualKey.AllowedModelConfigs[j].ID
 		})
-		for _, pc := range virtualKey.ProviderConfigs {
-			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfigKey{}, "table_virtual_key_provider_config_id = ?", pc.ID); err != nil {
+		for _, pc := range virtualKey.AllowedModelConfigs {
+			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfigKey{}, "table_virtual_key_provider_config_id = ?", pc.ID); err != nil {
 				return err
 			}
 			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "provider_config_id = ?", pc.ID); err != nil {
@@ -2585,7 +2585,7 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 					providerConfigRateLimitIDs = append(providerConfigRateLimitIDs, id)
 				}
 			}
-			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfig{}, "id = ?", pc.ID); err != nil {
+			if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfig{}, "id = ?", pc.ID); err != nil {
 				return err
 			}
 		}
@@ -2617,27 +2617,42 @@ func (s *RDBConfigStore) DeleteVirtualKey(ctx context.Context, id string, tx ...
 	return nil
 }
 
-// GetVirtualKeyProviderConfigs retrieves all virtual key provider configs from the database.
-func (s *RDBConfigStore) GetVirtualKeyProviderConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyProviderConfig, error) {
+// GetAllowedModelConfigs retrieves all virtual key provider configs from the database.
+func (s *RDBConfigStore) GetAllowedModelConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableAllowedModelConfig, error) {
 	var virtualKey tables.TableVirtualKey
 	if err := GovernanceActive(s.DB().WithContext(ctx)).First(&virtualKey, "id = ?", virtualKeyID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return []tables.TableVirtualKeyProviderConfig{}, nil
+			return []tables.TableAllowedModelConfig{}, nil
 		}
 		return nil, err
 	}
 	if virtualKey.ID == "" {
 		return nil, nil
 	}
-	var providerConfigs []tables.TableVirtualKeyProviderConfig
+	var providerConfigs []tables.TableAllowedModelConfig
 	if err := GovernanceActive(s.DB().WithContext(ctx)).Where("virtual_key_id = ?", virtualKey.ID).Find(&providerConfigs).Error; err != nil {
 		return nil, err
 	}
 	return providerConfigs, nil
 }
 
-// CreateVirtualKeyProviderConfig creates a new virtual key provider config in the database.
-func (s *RDBConfigStore) CreateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error {
+// GetOrgAllowedModelConfigs returns allowed model configs scoped to specific orgs
+// (matched against the scope_org_id column, virtual_key_id must be NULL).
+// When orgIDs is nil or empty all org-level configs are returned (used during full reload).
+func (s *RDBConfigStore) GetOrgAllowedModelConfigs(ctx context.Context, orgIDs []string) ([]tables.TableAllowedModelConfig, error) {
+	var configs []tables.TableAllowedModelConfig
+	q := GovernanceActive(s.DB().WithContext(ctx)).Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL")
+	if len(orgIDs) > 0 {
+		q = q.Where("scope_org_id IN ?", orgIDs)
+	}
+	if err := q.Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	return configs, nil
+}
+
+// CreateAllowedModelConfig creates a new allowed model config in the database.
+func (s *RDBConfigStore) CreateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
 	var txDB *gorm.DB
 	if len(tx) > 0 {
 		txDB = tx[0]
@@ -2645,12 +2660,12 @@ func (s *RDBConfigStore) CreateVirtualKeyProviderConfig(ctx context.Context, vir
 		txDB = s.DB()
 	}
 	// Store keys before create
-	keysToAssociate := virtualKeyProviderConfig.Keys
+	keysToAssociate := allowedModelConfig.Keys
 
 	// Resolve keys by name/key_id if they don't have database IDs
 	// This handles config file inputs that only specify name
 	if len(keysToAssociate) > 0 {
-		resolvedKeys, err := s.resolveVirtualKeyProviderConfigKeys(ctx, txDB, virtualKeyProviderConfig, keysToAssociate)
+		resolvedKeys, err := s.resolveAllowedModelConfigKeys(ctx, txDB, allowedModelConfig, keysToAssociate)
 		if err != nil {
 			return err
 		}
@@ -2660,37 +2675,37 @@ func (s *RDBConfigStore) CreateVirtualKeyProviderConfig(ctx context.Context, vir
 
 	// Clear Keys before Create to prevent GORM from auto-associating unresolved keys (with ID=0)
 	// We'll manually associate the resolved keys after Create
-	virtualKeyProviderConfig.Keys = nil
+	allowedModelConfig.Keys = nil
 
-	EnsureGovernanceRowID(&virtualKeyProviderConfig.ID)
-	ApplyAuditOnCreate(ctx, &virtualKeyProviderConfig.SystemColumns)
+	EnsureGovernanceRowID(&allowedModelConfig.ID)
+	ApplyAuditOnCreate(ctx, &allowedModelConfig.SystemColumns)
 
-	if err := txDB.WithContext(ctx).Create(virtualKeyProviderConfig).Error; err != nil {
+	if err := txDB.WithContext(ctx).Create(allowedModelConfig).Error; err != nil {
 		return s.parseGormError(err)
 	}
 
 	// Associate keys after the provider config has an ID
 	if len(keysToAssociate) > 0 {
-		if err := txDB.WithContext(ctx).Model(virtualKeyProviderConfig).Association("Keys").Append(keysToAssociate); err != nil {
+		if err := txDB.WithContext(ctx).Model(allowedModelConfig).Association("Keys").Append(keysToAssociate); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// UpdateVirtualKeyProviderConfig updates a virtual key provider config in the database.
-func (s *RDBConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error {
+// UpdateAllowedModelConfig updates a virtual key provider config in the database.
+func (s *RDBConfigStore) UpdateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
 	if len(tx) == 0 {
 		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-			return s.UpdateVirtualKeyProviderConfig(ctx, virtualKeyProviderConfig, transaction)
+			return s.UpdateAllowedModelConfig(ctx, allowedModelConfig, transaction)
 		})
 	}
 
 	var txDB *gorm.DB
 	txDB = tx[0]
-	if virtualKeyProviderConfig.ID != "" {
-		var existing tables.TableVirtualKeyProviderConfig
-		if err := dbForUpdate(txDB.WithContext(ctx)).First(&existing, "id = ?", virtualKeyProviderConfig.ID).Error; err != nil {
+	if allowedModelConfig.ID != "" {
+		var existing tables.TableAllowedModelConfig
+		if err := dbForUpdate(txDB.WithContext(ctx)).First(&existing, "id = ?", allowedModelConfig.ID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
@@ -2699,12 +2714,12 @@ func (s *RDBConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, vir
 	}
 
 	// Store keys before save
-	keysToAssociate := virtualKeyProviderConfig.Keys
+	keysToAssociate := allowedModelConfig.Keys
 
 	// Resolve keys by name/key_id if they don't have database IDs
 	// This handles config file inputs that only specify name
 	if len(keysToAssociate) > 0 {
-		resolvedKeys, err := s.resolveVirtualKeyProviderConfigKeys(ctx, txDB, virtualKeyProviderConfig, keysToAssociate)
+		resolvedKeys, err := s.resolveAllowedModelConfigKeys(ctx, txDB, allowedModelConfig, keysToAssociate)
 		if err != nil {
 			return err
 		}
@@ -2714,41 +2729,41 @@ func (s *RDBConfigStore) UpdateVirtualKeyProviderConfig(ctx context.Context, vir
 
 	// Clear Keys before Save to prevent GORM from auto-associating unresolved keys (with ID=0)
 	// We'll manually manage the association after Save
-	virtualKeyProviderConfig.Keys = nil
+	allowedModelConfig.Keys = nil
 
-	if err := txDB.WithContext(ctx).Save(virtualKeyProviderConfig).Error; err != nil {
+	if err := txDB.WithContext(ctx).Save(allowedModelConfig).Error; err != nil {
 		return s.parseGormError(err)
 	}
 
 	// Clear existing key associations and set new ones
-	if err := txDB.WithContext(ctx).Model(virtualKeyProviderConfig).Association("Keys").Clear(); err != nil {
+	if err := txDB.WithContext(ctx).Model(allowedModelConfig).Association("Keys").Clear(); err != nil {
 		return err
 	}
 	if len(keysToAssociate) > 0 {
-		if err := txDB.WithContext(ctx).Model(virtualKeyProviderConfig).Association("Keys").Append(keysToAssociate); err != nil {
+		if err := txDB.WithContext(ctx).Model(allowedModelConfig).Association("Keys").Append(keysToAssociate); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// DeleteVirtualKeyProviderConfig soft-deletes a virtual key provider config from the database.
-func (s *RDBConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
+// DeleteAllowedModelConfig soft-deletes a virtual key provider config from the database.
+func (s *RDBConfigStore) DeleteAllowedModelConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
 	if len(tx) == 0 {
 		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-			return s.DeleteVirtualKeyProviderConfig(ctx, id, transaction)
+			return s.DeleteAllowedModelConfig(ctx, id, transaction)
 		})
 	}
 
 	txDB := tx[0]
-	var providerConfig tables.TableVirtualKeyProviderConfig
+	var providerConfig tables.TableAllowedModelConfig
 	if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).First(&providerConfig, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfigKey{}, "table_virtual_key_provider_config_id = ?", id); err != nil {
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfigKey{}, "table_virtual_key_provider_config_id = ?", id); err != nil {
 		return err
 	}
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableBudget{}, "provider_config_id = ?", id); err != nil {
@@ -2757,7 +2772,7 @@ func (s *RDBConfigStore) DeleteVirtualKeyProviderConfig(ctx context.Context, id 
 	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableRateLimit{}, "provider_config_id = ?", id); err != nil {
 		return err
 	}
-	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableVirtualKeyProviderConfig{}, "id = ?", id); err != nil {
+	if err := MarkGovernanceDeleted(ctx, txDB, &tables.TableAllowedModelConfig{}, "id = ?", id); err != nil {
 		return err
 	}
 	return nil

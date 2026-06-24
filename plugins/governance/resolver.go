@@ -255,7 +255,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	}
 
 	// Find the provider config that matches the request's provider and apply key filtering
-	for _, pc := range vk.ProviderConfigs {
+	for _, pc := range vk.AllowedModelConfigs {
 		if schemas.ModelProvider(pc.Provider) == provider {
 			if !pc.AllowAllKeys {
 				// Restrict to specific keys (empty slice = no keys allowed)
@@ -278,23 +278,73 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 }
 
 // isModelAllowed checks if the requested model is allowed for this VK.
-// Blacklisted models win over allowed models (same semantics as provider-key enforcement).
-// Two-pass: blacklist scan across all matching configs first, then allowlist scan.
+// Enforcement is layered: org-level configs are checked first, then VK-level configs.
+// Within each layer blacklisted models win over allowed models (blacklist-wins semantics).
+//
+// Layer 1 — Org-level (OrgAllowedModelConfigs, populated from scope_org_id configs):
+//   - If any org config blacklists the model → block immediately (highest priority).
+//   - If org configs exist for this provider but none allow the model → block.
+//   - If no org configs exist for this provider → layer passes (no org restriction).
+//
+// Layer 2 — VK-level (AllowedModelConfigs):
+//   - Same blacklist-wins, then allowlist logic as before.
+//   - Empty VK configs means no VK-level restriction (allow all from this layer).
 func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
-	// Empty ProviderConfigs means no provider-level restrictions (allow all).
-	if len(vk.ProviderConfigs) == 0 {
+	// --- Layer 1: Org-level restrictions ---
+	if len(vk.OrgAllowedModelConfigs) > 0 {
+		orgHasConfigForProvider := false
+		for _, pc := range vk.OrgAllowedModelConfigs {
+			if pc.Provider == string(provider) {
+				orgHasConfigForProvider = true
+				// Blacklist wins immediately.
+				if isModelBlockedByList(pc.BlacklistedModels, model) {
+					return false
+				}
+			}
+		}
+		if orgHasConfigForProvider {
+			// At least one org config exists for this provider; check allowlist.
+			orgAllows := false
+			for _, pc := range vk.OrgAllowedModelConfigs {
+				if pc.Provider != string(provider) {
+					continue
+				}
+				if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
+					providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
+					providerConfigPtr := &providerConfig
+					if !ok {
+						providerConfigPtr = nil
+					}
+					if r.modelCatalog.IsModelAllowedForProvider(provider, model, providerConfigPtr, pc.AllowedModels) {
+						orgAllows = true
+						break
+					}
+				} else if pc.AllowedModels.IsAllowed(model) {
+					orgAllows = true
+					break
+				}
+			}
+			if !orgAllows {
+				return false
+			}
+		}
+	}
+
+	// --- Layer 2: VK-level restrictions ---
+	// Empty VK configs means no VK-level restriction.
+	if len(vk.AllowedModelConfigs) == 0 {
 		return true
 	}
 
-	// Pass 1: if any matching provider config blacklists the model, block immediately.
-	for _, pc := range vk.ProviderConfigs {
+	// Pass 1: if any matching VK config blacklists the model, block immediately.
+	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider == string(provider) && isModelBlockedByList(pc.BlacklistedModels, model) {
 			return false
 		}
 	}
 
-	// Pass 2: allowlist check — model is allowed if any matching config permits it.
-	for _, pc := range vk.ProviderConfigs {
+	// Pass 2: allowlist check — model is allowed if any matching VK config permits it.
+	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider == string(provider) {
 			if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
 				providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
@@ -314,14 +364,29 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 	return false
 }
 
-// isProviderAllowed checks if the requested provider is allowed for this VK
+// isProviderAllowed checks if the requested provider is allowed for this VK.
+// Org-level configs restrict which providers are accessible, followed by VK-level configs.
 func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) bool {
-	// Empty ProviderConfigs means no provider-level restrictions (allow all).
-	if len(vk.ProviderConfigs) == 0 {
+	// Org-level: if org has configs and none match this provider, block it.
+	if len(vk.OrgAllowedModelConfigs) > 0 {
+		orgPermitsProvider := false
+		for _, pc := range vk.OrgAllowedModelConfigs {
+			if pc.Provider == string(provider) {
+				orgPermitsProvider = true
+				break
+			}
+		}
+		if !orgPermitsProvider {
+			return false
+		}
+	}
+
+	// VK-level: empty means no restriction (all providers allowed at this layer).
+	if len(vk.AllowedModelConfigs) == 0 {
 		return true
 	}
 
-	for _, pc := range vk.ProviderConfigs {
+	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider == string(provider) {
 			return true
 		}
@@ -335,7 +400,7 @@ func (r *BudgetResolver) checkRateLimitHierarchy(ctx context.Context, vk *config
 	if decision, err := r.store.CheckVirtualKeyRateLimit(ctx, vk, request, nil, nil); err != nil || isRateLimitViolation(decision) {
 		// Check provider-level first (matching check order), then VK-level
 		var rateLimitInfo *configstoreTables.TableRateLimit
-		for _, pc := range vk.ProviderConfigs {
+		for _, pc := range vk.AllowedModelConfigs {
 			if pc.Provider == string(request.Provider) && len(pc.RateLimits) > 0 {
 				rateLimitInfo = &pc.RateLimits[0]
 				break
@@ -372,7 +437,7 @@ func (r *BudgetResolver) checkBudgetHierarchy(ctx context.Context, vk *configsto
 // Helper methods for provider config validation (used by TransportInterceptor)
 
 // isProviderBudgetViolated checks if a provider config's budget is violated
-func (r *BudgetResolver) isProviderBudgetViolated(ctx context.Context, vk *configstoreTables.TableVirtualKey, config configstoreTables.TableVirtualKeyProviderConfig) bool {
+func (r *BudgetResolver) isProviderBudgetViolated(ctx context.Context, vk *configstoreTables.TableVirtualKey, config configstoreTables.TableAllowedModelConfig) bool {
 	request := &EvaluationRequest{Provider: schemas.ModelProvider(config.Provider)}
 
 	// 1. Check global provider-level budget first
@@ -393,7 +458,7 @@ func (r *BudgetResolver) isProviderBudgetViolated(ctx context.Context, vk *confi
 }
 
 // isProviderRateLimitViolated checks if a provider config's rate limit is violated
-func (r *BudgetResolver) isProviderRateLimitViolated(ctx context.Context, vk *configstoreTables.TableVirtualKey, config configstoreTables.TableVirtualKeyProviderConfig) bool {
+func (r *BudgetResolver) isProviderRateLimitViolated(ctx context.Context, vk *configstoreTables.TableVirtualKey, config configstoreTables.TableAllowedModelConfig) bool {
 	request := &EvaluationRequest{Provider: schemas.ModelProvider(config.Provider)}
 
 	// 1. Check global provider-level rate limit first

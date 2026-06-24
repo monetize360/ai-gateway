@@ -146,8 +146,8 @@ func hydrateVirtualKeyRateLimits(vk *configstoreTables.TableVirtualKey, gs *Loca
 		return
 	}
 	vk.RateLimits = hydrateRateLimitSlice(vk.RateLimits, gs)
-	for i := range vk.ProviderConfigs {
-		vk.ProviderConfigs[i].RateLimits = hydrateRateLimitSlice(vk.ProviderConfigs[i].RateLimits, gs)
+	for i := range vk.AllowedModelConfigs {
+		vk.AllowedModelConfigs[i].RateLimits = hydrateRateLimitSlice(vk.AllowedModelConfigs[i].RateLimits, gs)
 	}
 }
 

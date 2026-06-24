@@ -581,9 +581,9 @@ func (gs *LocalGovernanceStore) GetGovernanceData(ctx context.Context) *Governan
 		if len(vk.RateLimits) > 0 {
 			hydrateVirtualKeyRateLimits(vk, gs)
 		}
-		if len(vk.ProviderConfigs) > 0 {
-			configs := make([]configstoreTables.TableVirtualKeyProviderConfig, len(vk.ProviderConfigs))
-			copy(configs, vk.ProviderConfigs)
+		if len(vk.AllowedModelConfigs) > 0 {
+			configs := make([]configstoreTables.TableAllowedModelConfig, len(vk.AllowedModelConfigs))
+			copy(configs, vk.AllowedModelConfigs)
 			for i := range configs {
 				// Hydrate provider config multi-budgets
 				if len(configs[i].Budgets) > 0 {
@@ -599,7 +599,7 @@ func (gs *LocalGovernanceStore) GetGovernanceData(ctx context.Context) *Governan
 				}
 				configs[i].RateLimits = hydrateRateLimitSlice(configs[i].RateLimits, gs)
 			}
-			vk.ProviderConfigs = configs
+			vk.AllowedModelConfigs = configs
 		}
 	}
 
@@ -1630,8 +1630,15 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load routing rules: %w", err)
 	}
 
+	// Load org-level allowed model configs (scope_org_id set, virtual_key_id null).
+	// These are loaded once and attached to VKs during rebuildInMemoryStructures.
+	orgAllowedModelConfigs, err := gs.configStore.GetOrgAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load org allowed model configs: %w", err)
+	}
+
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs)
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
@@ -1721,14 +1728,15 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	// Hydrate parent entities from ownership columns on budget/rate limit rows.
 	attachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 
-	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules)
+	// Rebuild in-memory structures (lock-free).
+	// Org-level allowed model configs are not available from config.json — pass nil.
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules, nil)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
@@ -1772,9 +1780,39 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 		gs.rateLimits.Store(rateLimit.ID, rateLimit)
 	}
 
-	// Build virtual keys map and track active VKs
+	// Index org-level allowed model configs by scope_org_id for fast VK attachment.
+	orgConfigsByOrgID := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	for i := range orgAllowedModelConfigs {
+		c := &orgAllowedModelConfigs[i]
+		if c.ScopeOrgID == nil || *c.ScopeOrgID == "" {
+			continue
+		}
+		orgConfigsByOrgID[*c.ScopeOrgID] = append(orgConfigsByOrgID[*c.ScopeOrgID], *c)
+	}
+
+	// Build virtual keys map and track active VKs.
+	// For each VK, collect org-level configs from its governance scope org and all ancestors.
 	for i := range virtualKeys {
 		vk := &virtualKeys[i]
+		vk.OrgAllowedModelConfigs = nil
+		if len(orgConfigsByOrgID) > 0 {
+			scopeOrgID := vk.GovernanceScopeOrgIDString()
+			if scopeOrgID != "" {
+				ancestorIDs := gs.CollectOrgAncestorIDs(scopeOrgID)
+				// Include the VK's own scope org plus all its ancestors.
+				allOrgIDs := append([]string{scopeOrgID}, ancestorIDs...)
+				seen := make(map[string]bool)
+				for _, orgID := range allOrgIDs {
+					for _, cfg := range orgConfigsByOrgID[orgID] {
+						key := cfg.Provider + ":" + orgID
+						if !seen[key] {
+							seen[key] = true
+							vk.OrgAllowedModelConfigs = append(vk.OrgAllowedModelConfigs, cfg)
+						}
+					}
+				}
+			}
+		}
 		gs.storeVirtualKey(vk)
 	}
 
@@ -1868,7 +1906,7 @@ func (gs *LocalGovernanceStore) collectRateLimitsFromHierarchy(ctx context.Conte
 	rateLimitsWithCategories := map[string][]*configstoreTables.TableRateLimit{}
 	seen := map[string]bool{}
 
-	for _, pc := range vk.ProviderConfigs {
+	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider == string(requestedProvider) {
 			appendLiveRateLimitsFromSlice(gs, rateLimitsWithCategories, pc.Provider, pc.RateLimits, seen)
 		}
@@ -1890,7 +1928,7 @@ func (gs *LocalGovernanceStore) collectBudgetsFromHierarchy(_ context.Context, v
 	entityWiseBudgets := make(EntityWiseBudgets)
 	// Collect all budgets in hierarchy order using lock-free sync.Map access (Provider Configs → VK → Team → Customer)
 	seen := make(map[string]bool)
-	for _, pc := range vk.ProviderConfigs {
+	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider != string(requestedProvider) {
 			continue
 		}
@@ -2035,9 +2073,9 @@ func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk
 	}
 
 	// Create provider config budgets and rate limits if they exist
-	if vk.ProviderConfigs != nil {
-		for i := range vk.ProviderConfigs {
-			pc := &vk.ProviderConfigs[i]
+	if vk.AllowedModelConfigs != nil {
+		for i := range vk.AllowedModelConfigs {
+			pc := &vk.AllowedModelConfigs[i]
 			for j := range pc.Budgets {
 				pc.Budgets[j].IsCalendarAligned = vk.CalendarAligned
 				gs.budgets.Store(pc.Budgets[j].ID, &pc.Budgets[j])
@@ -2076,9 +2114,9 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 		for i := range clone.Budgets {
 			allNewBudgetIDs[clone.Budgets[i].ID] = true
 		}
-		for i := range clone.ProviderConfigs {
-			for j := range clone.ProviderConfigs[i].Budgets {
-				allNewBudgetIDs[clone.ProviderConfigs[i].Budgets[j].ID] = true
+		for i := range clone.AllowedModelConfigs {
+			for j := range clone.AllowedModelConfigs[i].Budgets {
+				allNewBudgetIDs[clone.AllowedModelConfigs[i].Budgets[j].ID] = true
 			}
 		}
 
@@ -2105,9 +2143,9 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 		for i := range clone.RateLimits {
 			allNewRateLimitIDs[clone.RateLimits[i].ID] = true
 		}
-		for i := range clone.ProviderConfigs {
-			for j := range clone.ProviderConfigs[i].RateLimits {
-				allNewRateLimitIDs[clone.ProviderConfigs[i].RateLimits[j].ID] = true
+		for i := range clone.AllowedModelConfigs {
+			for j := range clone.AllowedModelConfigs[i].RateLimits {
+				allNewRateLimitIDs[clone.AllowedModelConfigs[i].RateLimits[j].ID] = true
 			}
 		}
 
@@ -2129,19 +2167,19 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 			}
 		}
 
-		if clone.ProviderConfigs != nil {
+		if clone.AllowedModelConfigs != nil {
 			// Create a map of existing provider configs by ID for fast lookup
-			existingProviderConfigs := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
-			if existingVK.ProviderConfigs != nil {
-				for _, existingPC := range existingVK.ProviderConfigs {
-					existingProviderConfigs[existingPC.ID] = existingPC
+			existingAllowedModelConfigs := make(map[string]configstoreTables.TableAllowedModelConfig)
+			if existingVK.AllowedModelConfigs != nil {
+				for _, existingPC := range existingVK.AllowedModelConfigs {
+					existingAllowedModelConfigs[existingPC.ID] = existingPC
 				}
 			}
 
 			// Process each new/updated provider config
-			for i := range clone.ProviderConfigs {
-				for j := range clone.ProviderConfigs[i].RateLimits {
-					rl := &clone.ProviderConfigs[i].RateLimits[j]
+			for i := range clone.AllowedModelConfigs {
+				for j := range clone.AllowedModelConfigs[i].RateLimits {
+					rl := &clone.AllowedModelConfigs[i].RateLimits[j]
 					if existingRateLimitValue, exists := gs.rateLimits.Load(rl.ID); exists && existingRateLimitValue != nil {
 						if existingRateLimit, ok := existingRateLimitValue.(*configstoreTables.TableRateLimit); ok && existingRateLimit != nil {
 							rl.TokenCurrentUsage = existingRateLimit.TokenCurrentUsage
@@ -2153,7 +2191,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 					rl.IsCalendarAligned = clone.CalendarAligned
 					gs.rateLimits.Store(rl.ID, rl)
 				}
-				if existingPC, exists := existingProviderConfigs[clone.ProviderConfigs[i].ID]; exists {
+				if existingPC, exists := existingAllowedModelConfigs[clone.AllowedModelConfigs[i].ID]; exists {
 					for _, oldRL := range existingPC.RateLimits {
 						if !allNewRateLimitIDs[oldRL.ID] {
 							gs.DeleteRateLimit(ctx, oldRL.ID)
@@ -2161,8 +2199,8 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 					}
 				}
 				// Update multi-budgets for provider config
-				for j := range clone.ProviderConfigs[i].Budgets {
-					b := &clone.ProviderConfigs[i].Budgets[j]
+				for j := range clone.AllowedModelConfigs[i].Budgets {
+					b := &clone.AllowedModelConfigs[i].Budgets[j]
 					if existingBudgetValue, exists := gs.budgets.Load(b.ID); exists && existingBudgetValue != nil {
 						if existingBudget, ok := existingBudgetValue.(*configstoreTables.TableBudget); ok && existingBudget != nil {
 							b.CurrentUsage = existingBudget.CurrentUsage
@@ -2173,7 +2211,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 					gs.budgets.Store(b.ID, b)
 				}
 				// Delete removed multi-budgets for this provider config
-				if existingPC, exists := existingProviderConfigs[clone.ProviderConfigs[i].ID]; exists {
+				if existingPC, exists := existingAllowedModelConfigs[clone.AllowedModelConfigs[i].ID]; exists {
 					for _, oldBudget := range existingPC.Budgets {
 						if !allNewBudgetIDs[oldBudget.ID] {
 							gs.DeleteBudget(ctx, oldBudget.ID)
@@ -2185,7 +2223,7 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 			// whose IDs changed (e.g., AP propagation replaces all configs with
 			// new DB row IDs). Without this, stale entries leak memory and
 			// pollute gossip baselines.
-			for _, oldPC := range existingVK.ProviderConfigs {
+			for _, oldPC := range existingVK.AllowedModelConfigs {
 				for _, oldRL := range oldPC.RateLimits {
 					if !allNewRateLimitIDs[oldRL.ID] {
 						gs.DeleteRateLimit(ctx, oldRL.ID)
@@ -2226,8 +2264,8 @@ func (gs *LocalGovernanceStore) DeleteVirtualKeyInMemory(ctx context.Context, vk
 	for _, rl := range vk.RateLimits {
 		gs.DeleteRateLimit(ctx, rl.ID)
 	}
-	if vk.ProviderConfigs != nil {
-		for _, pc := range vk.ProviderConfigs {
+	if vk.AllowedModelConfigs != nil {
+		for _, pc := range vk.AllowedModelConfigs {
 			for _, b := range pc.Budgets {
 				gs.DeleteBudget(ctx, b.ID)
 			}
@@ -2425,11 +2463,11 @@ func (gs *LocalGovernanceStore) updateBudgetReferences(ctx context.Context, rese
 			}
 		}
 		// Check provider config budgets
-		if vk.ProviderConfigs != nil {
-			for i := range clone.ProviderConfigs {
-				for j, b := range clone.ProviderConfigs[i].Budgets {
+		if vk.AllowedModelConfigs != nil {
+			for i := range clone.AllowedModelConfigs {
+				for j, b := range clone.AllowedModelConfigs[i].Budgets {
 					if b.ID == budgetID {
-						clone.ProviderConfigs[i].Budgets[j] = *resetBudget
+						clone.AllowedModelConfigs[i].Budgets[j] = *resetBudget
 						needsUpdate = true
 					}
 				}
@@ -2463,11 +2501,11 @@ func (gs *LocalGovernanceStore) updateRateLimitReferences(ctx context.Context, r
 		}
 
 		// Check provider config rate limits
-		if vk.ProviderConfigs != nil {
-			for i := range clone.ProviderConfigs {
-				for j, rl := range clone.ProviderConfigs[i].RateLimits {
+		if vk.AllowedModelConfigs != nil {
+			for i := range clone.AllowedModelConfigs {
+				for j, rl := range clone.AllowedModelConfigs[i].RateLimits {
 					if rl.ID == resetRateLimitID {
-						clone.ProviderConfigs[i].RateLimits[j] = *resetRateLimit
+						clone.AllowedModelConfigs[i].RateLimits[j] = *resetRateLimit
 						needsUpdate = true
 					}
 				}
@@ -2647,8 +2685,8 @@ func (gs *LocalGovernanceStore) GetBudgetAndRateLimitStatus(ctx context.Context,
 
 	// Check virtual key level provider-specific rate limits and budgets
 	if vk != nil {
-		if vk.ProviderConfigs != nil {
-			for _, pc := range vk.ProviderConfigs {
+		if vk.AllowedModelConfigs != nil {
+			for _, pc := range vk.AllowedModelConfigs {
 				if pc.Provider == string(provider) {
 					applyRateLimitStatusFromSlice(gs, pc.RateLimits, tokenBaselines, requestBaselines, result)
 					applyBudgetStatusFromSlice(gs, pc.Budgets, budgetBaselines, result)

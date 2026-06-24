@@ -221,7 +221,7 @@ func TestGovernanceStore_MultiBudget_AllUnderLimit(t *testing.T) {
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
 	// Add provider config so the resolver allows the provider
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -246,7 +246,7 @@ func TestGovernanceStore_MultiBudget_SmallBudgetExceeded(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -272,7 +272,7 @@ func TestGovernanceStore_MultiBudget_LargeBudgetExceeded(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -297,7 +297,7 @@ func TestGovernanceStore_MultiBudget_UsageUpdatesAllBudgets(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -379,7 +379,7 @@ func TestGovernanceStore_MultiBudget_VKAndProviderConfigCombined(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*vkMonthly})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{pc}
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{pc}
 
 	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
 		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
@@ -405,7 +405,7 @@ func TestGovernanceStore_MultiBudget_ResolverBlocksOnBudgetExceeded(t *testing.T
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -432,7 +432,7 @@ func TestGovernanceStore_MultiBudget_ResolverAllowsUnderLimit(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -460,7 +460,7 @@ func TestGovernanceStore_MultiBudget_UsageDrivesBlockAfterRequests(t *testing.T)
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*hourlyBudget, *dailyBudget})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -530,7 +530,7 @@ func TestGovernanceStore_MultiBudget_CalendarAligned(t *testing.T) {
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*dailyBudget, *monthlyBudget})
 	vk.CalendarAligned = true // VK-level setting applies to all budgets
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -562,7 +562,7 @@ func TestGovernanceStore_MultiBudget_InMemoryCreateAndDelete(t *testing.T) {
 
 	vk := buildVirtualKeyWithMultiBudgets("vk1", "sk-bf-test", "Test VK",
 		[]configstoreTables.TableBudget{*b1, *b2})
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 

@@ -148,11 +148,15 @@ type ConfigStore interface {
 	UpdateVirtualKey(ctx context.Context, virtualKey *tables.TableVirtualKey, tx ...*gorm.DB) error
 	DeleteVirtualKey(ctx context.Context, id string, tx ...*gorm.DB) error
 
-	// Virtual key provider config CRUD
-	GetVirtualKeyProviderConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyProviderConfig, error)
-	CreateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error
-	UpdateVirtualKeyProviderConfig(ctx context.Context, virtualKeyProviderConfig *tables.TableVirtualKeyProviderConfig, tx ...*gorm.DB) error
-	DeleteVirtualKeyProviderConfig(ctx context.Context, id string, tx ...*gorm.DB) error
+	// Allowed model config CRUD
+	GetAllowedModelConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableAllowedModelConfig, error)
+	// GetOrgAllowedModelConfigs returns configs scoped to an org (scope_org_id set, virtual_key_id null).
+	// When orgIDs is nil or empty all org-level configs are returned (full reload path).
+	// Pass specific org IDs for targeted lookup.
+	GetOrgAllowedModelConfigs(ctx context.Context, orgIDs []string) ([]tables.TableAllowedModelConfig, error)
+	CreateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
+	UpdateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
+	DeleteAllowedModelConfig(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Virtual key MCP config CRUD
 	GetVirtualKeyMCPConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyMCPConfig, error)

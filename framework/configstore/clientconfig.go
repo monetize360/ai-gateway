@@ -768,12 +768,12 @@ type VirtualKeyHashInput struct {
 	CustomerID  *string
 	RateLimitIDs []string
 	// ProviderConfigs and MCPConfigs are hashed separately as they contain nested data
-	ProviderConfigs []VirtualKeyProviderConfigHashInput
+	AllowedModelConfigs []AllowedModelConfigHashInput
 	MCPConfigs      []VirtualKeyMCPConfigHashInput
 }
 
-// VirtualKeyProviderConfigHashInput represents provider config fields for hashing
-type VirtualKeyProviderConfigHashInput struct {
+// AllowedModelConfigHashInput represents provider config fields for hashing
+type AllowedModelConfigHashInput struct {
 	Provider      string
 	Weight        *float64
 	AllowedModels []string
@@ -816,25 +816,25 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 		hash.Write([]byte("rateLimitIDs:" + ids))
 	}
 	// Hash ProviderConfigs
-	if len(vk.ProviderConfigs) > 0 {
+	if len(vk.AllowedModelConfigs) > 0 {
 		// Copy and sort provider configs for deterministic hashing
-		sortedProviderConfigs := make([]tables.TableVirtualKeyProviderConfig, len(vk.ProviderConfigs))
-		copy(sortedProviderConfigs, vk.ProviderConfigs)
-		sort.Slice(sortedProviderConfigs, func(i, j int) bool {
-			if sortedProviderConfigs[i].Provider != sortedProviderConfigs[j].Provider {
-				return sortedProviderConfigs[i].Provider < sortedProviderConfigs[j].Provider
+		sortedAllowedModelConfigs := make([]tables.TableAllowedModelConfig, len(vk.AllowedModelConfigs))
+		copy(sortedAllowedModelConfigs, vk.AllowedModelConfigs)
+		sort.Slice(sortedAllowedModelConfigs, func(i, j int) bool {
+			if sortedAllowedModelConfigs[i].Provider != sortedAllowedModelConfigs[j].Provider {
+				return sortedAllowedModelConfigs[i].Provider < sortedAllowedModelConfigs[j].Provider
 			}
 			ri, rj := "", ""
-			if len(sortedProviderConfigs[i].RateLimits) > 0 {
-				ri = tables.JoinRateLimitRefIDs(sortedProviderConfigs[i].RateLimits)
+			if len(sortedAllowedModelConfigs[i].RateLimits) > 0 {
+				ri = tables.JoinRateLimitRefIDs(sortedAllowedModelConfigs[i].RateLimits)
 			}
-			if len(sortedProviderConfigs[j].RateLimits) > 0 {
-				rj = tables.JoinRateLimitRefIDs(sortedProviderConfigs[j].RateLimits)
+			if len(sortedAllowedModelConfigs[j].RateLimits) > 0 {
+				rj = tables.JoinRateLimitRefIDs(sortedAllowedModelConfigs[j].RateLimits)
 			}
 			if ri != rj {
 				return ri < rj
 			}
-			wi, wj := sortedProviderConfigs[i].Weight, sortedProviderConfigs[j].Weight
+			wi, wj := sortedAllowedModelConfigs[i].Weight, sortedAllowedModelConfigs[j].Weight
 			if (wi == nil) != (wj == nil) {
 				return wi == nil
 			}
@@ -844,8 +844,8 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 			return false
 		})
 		// Filter out provider configs that are not available
-		providerConfigsForHash := make([]VirtualKeyProviderConfigHashInput, len(sortedProviderConfigs))
-		for i, pc := range sortedProviderConfigs {
+		allowedModelConfigsForHash := make([]AllowedModelConfigHashInput, len(sortedAllowedModelConfigs))
+		for i, pc := range sortedAllowedModelConfigs {
 			// Sort key IDs for deterministic hashing
 			keyIDs := make([]string, len(pc.Keys))
 			for j, k := range pc.Keys {
@@ -857,7 +857,7 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 			sortedAllowedModels := make([]string, len(pc.AllowedModels))
 			copy(sortedAllowedModels, pc.AllowedModels)
 			sort.Strings(sortedAllowedModels)
-			providerConfigsForHash[i] = VirtualKeyProviderConfigHashInput{
+			allowedModelConfigsForHash[i] = AllowedModelConfigHashInput{
 				Provider:      pc.Provider,
 				Weight:        pc.Weight,
 				AllowedModels: sortedAllowedModels,
@@ -865,7 +865,7 @@ func GenerateVirtualKeyHash(vk tables.TableVirtualKey) (string, error) {
 				KeyIDs:        keyIDs,
 			}
 		}
-		data, err := sonic.Marshal(providerConfigsForHash)
+		data, err := sonic.Marshal(allowedModelConfigsForHash)
 		if err != nil {
 			return "", err
 		}

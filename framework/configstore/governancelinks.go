@@ -26,10 +26,10 @@ func AttachGovernanceFromReverseFK(
 		vkByID[virtualKeys[i].ID] = &virtualKeys[i]
 	}
 
-	providerConfigByID := make(map[string]*tables.TableVirtualKeyProviderConfig)
+	providerConfigByID := make(map[string]*tables.TableAllowedModelConfig)
 	for i := range virtualKeys {
-		for j := range virtualKeys[i].ProviderConfigs {
-			pc := &virtualKeys[i].ProviderConfigs[j]
+		for j := range virtualKeys[i].AllowedModelConfigs {
+			pc := &virtualKeys[i].AllowedModelConfigs[j]
 			providerConfigByID[pc.ID] = pc
 		}
 	}

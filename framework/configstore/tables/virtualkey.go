@@ -10,27 +10,29 @@ import (
 	"gorm.io/gorm"
 )
 
-// TableVirtualKeyProviderConfigKey is the join table for the many2many relationship
-// between TableVirtualKeyProviderConfig and TableKey
-type TableVirtualKeyProviderConfigKey struct {
-	ID                              string `gorm:"primaryKey;type:uuid" json:"id"`
-	TableVirtualKeyProviderConfigID string `gorm:"type:uuid;not null;uniqueIndex:idx_vk_provider_config_key" json:"table_virtual_key_provider_config_id"`
-	TableKeyID                      string `gorm:"type:uuid;not null;uniqueIndex:idx_vk_provider_config_key" json:"table_key_id"`
+// TableAllowedModelConfigKey is the join table for the many2many relationship
+// between TableAllowedModelConfig and TableKey.
+type TableAllowedModelConfigKey struct {
+	ID                        string `gorm:"primaryKey;type:uuid" json:"id"`
+	TableAllowedModelConfigID string `gorm:"type:uuid;not null;uniqueIndex:idx_vk_provider_config_key;column:table_virtual_key_provider_config_id" json:"table_virtual_key_provider_config_id"`
+	TableKeyID                string `gorm:"type:uuid;not null;uniqueIndex:idx_vk_provider_config_key" json:"table_key_id"`
 
 	SystemColumns
 }
 
 // TableName sets the table name for the join table
-func (TableVirtualKeyProviderConfigKey) TableName() string {
+func (TableAllowedModelConfigKey) TableName() string {
 	return "governance_virtual_key_provider_config_keys"
 }
 
-// TableVirtualKeyProviderConfig represents a provider configuration for a virtual key
-type TableVirtualKeyProviderConfig struct {
-	ID                string            `gorm:"primaryKey;type:uuid" json:"id"`
-	VirtualKeyID      string            `gorm:"type:uuid;not null" json:"virtual_key_id"`
-	Provider          string            `gorm:"type:varchar(50);not null" json:"provider"`
-	Weight            *float64          `json:"weight"`
+// TableAllowedModelConfig represents a per-provider model allow/block configuration
+// scoped to a virtual key (VirtualKeyID set) or an organization (ScopeOrgID set).
+type TableAllowedModelConfig struct {
+	ID           string  `gorm:"primaryKey;type:uuid" json:"id"`
+	VirtualKeyID *string `gorm:"type:uuid" json:"virtual_key_id,omitempty"`
+	ScopeOrgID   *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
+	Provider     string  `gorm:"type:varchar(50);not null" json:"provider"`
+	Weight       *float64          `json:"weight"`
 	AllowedModels     schemas.WhiteList `gorm:"type:text;serializer:json" json:"allowed_models"`
 	BlacklistedModels schemas.BlackList `gorm:"type:text;serializer:json" json:"blacklisted_models"`
 	AllowAllKeys      bool              `gorm:"default:false" json:"allow_all_keys"`
@@ -38,19 +40,19 @@ type TableVirtualKeyProviderConfig struct {
 	// Relationships — budget/rate limit FK columns live on child rows
 	RateLimits []TableRateLimit `gorm:"foreignKey:ProviderConfigID;references:ID" json:"rate_limits,omitempty"`
 	Budgets    []TableBudget    `gorm:"foreignKey:ProviderConfigID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`
-	Keys      []TableKey      `gorm:"many2many:governance_virtual_key_provider_config_keys;constraint:OnDelete:CASCADE" json:"keys"`
+	Keys       []TableKey       `gorm:"many2many:governance_virtual_key_provider_config_keys;constraint:OnDelete:CASCADE" json:"keys"`
 
 	SystemColumns
 }
 
 // TableName sets the table name for each model
-func (TableVirtualKeyProviderConfig) TableName() string {
+func (TableAllowedModelConfig) TableName() string {
 	return "governance_virtual_key_provider_configs"
 }
 
 // UnmarshalJSON custom unmarshaller to handle "key_ids" ([]string) config-file format
-func (pc *TableVirtualKeyProviderConfig) UnmarshalJSON(data []byte) error {
-	type Alias TableVirtualKeyProviderConfig
+func (pc *TableAllowedModelConfig) UnmarshalJSON(data []byte) error {
+	type Alias TableAllowedModelConfig
 	type TempProviderConfig struct {
 		Alias
 		KeyIDs []string `json:"key_ids"` // Config file format: key identifiers (TableKey.KeyID); use ["*"] to allow all keys, empty denies all
@@ -62,7 +64,7 @@ func (pc *TableVirtualKeyProviderConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	// Copy all standard fields
-	*pc = TableVirtualKeyProviderConfig(temp.Alias)
+	*pc = TableAllowedModelConfig(temp.Alias)
 
 	// If key_ids is provided, convert to Keys or set AllowAllKeys
 	if len(temp.KeyIDs) > 0 && len(pc.Keys) == 0 {
@@ -82,20 +84,28 @@ func (pc *TableVirtualKeyProviderConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// BeforeSave validates WhiteList and BlackList fields before GORM persists the record.
-func (pc *TableVirtualKeyProviderConfig) BeforeSave(tx *gorm.DB) error {
+// BeforeSave validates scope association and list fields before GORM persists the record.
+func (pc *TableAllowedModelConfig) BeforeSave(tx *gorm.DB) error {
 	if err := pc.AllowedModels.Validate(); err != nil {
 		return fmt.Errorf("invalid allowed_models: %w", err)
 	}
 	if err := pc.BlacklistedModels.Validate(); err != nil {
 		return fmt.Errorf("invalid blacklisted_models: %w", err)
 	}
+	vkSet := isNonEmptyString(pc.VirtualKeyID)
+	orgSet := isNonEmptyString(pc.ScopeOrgID)
+	if vkSet && orgSet {
+		return fmt.Errorf("virtual_key_id and scope_org_id are mutually exclusive")
+	}
+	if !vkSet && !orgSet {
+		return fmt.Errorf("either virtual_key_id or scope_org_id must be set")
+	}
 	return nil
 }
 
 // MarshalJSON custom marshaller to ensure AllowedModels and BlacklistedModels are always arrays (never null)
-func (pc TableVirtualKeyProviderConfig) MarshalJSON() ([]byte, error) {
-	type Alias TableVirtualKeyProviderConfig
+func (pc TableAllowedModelConfig) MarshalJSON() ([]byte, error) {
+	type Alias TableAllowedModelConfig
 
 	// Ensure arrays are empty slices instead of nil
 	allowedModels := pc.AllowedModels
@@ -118,8 +128,8 @@ func (pc TableVirtualKeyProviderConfig) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// AfterFind hook for TableVirtualKeyProviderConfig to clear sensitive data from associated keys
-func (pc *TableVirtualKeyProviderConfig) AfterFind(tx *gorm.DB) error {
+// AfterFind hook for TableAllowedModelConfig to clear sensitive data from associated keys
+func (pc *TableAllowedModelConfig) AfterFind(tx *gorm.DB) error {
 	if pc.Keys != nil {
 		// Clear sensitive data from associated keys, keeping only key IDs and non-sensitive metadata
 		for i := range pc.Keys {
@@ -213,9 +223,10 @@ type TableVirtualKey struct {
 	Name            string                          `gorm:"uniqueIndex:idx_virtual_key_name;type:varchar(255);not null" json:"name"`
 	Description     string                          `gorm:"type:text" json:"description,omitempty"`
 	Value           string                          `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`           // The virtual key value
-	IsActive        *bool                           `gorm:"default:true" json:"is_active,omitempty"`                                     // Nil means true (DB default); false means inactive
-	ProviderConfigs []TableVirtualKeyProviderConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_configs"` // Empty means all providers allowed
-	MCPConfigs      []TableVirtualKeyMCPConfig      `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
+	IsActive             *bool                       `gorm:"default:true" json:"is_active,omitempty"`                                          // Nil means true (DB default); false means inactive
+	AllowedModelConfigs  []TableAllowedModelConfig   `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"allowed_model_configs"` // VK-scoped; empty means all providers/models allowed
+	OrgAllowedModelConfigs []TableAllowedModelConfig `gorm:"-" json:"-"`                                                                       // Org-scoped configs resolved at runtime by the governance store
+	MCPConfigs           []TableVirtualKeyMCPConfig  `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
 	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
@@ -309,8 +320,8 @@ func (vk *TableVirtualKey) AfterFind(tx *gorm.DB) error {
 	for i := range vk.RateLimits {
 		vk.RateLimits[i].IsCalendarAligned = vk.CalendarAligned
 	}
-	for i := range vk.ProviderConfigs {
-		pc := &vk.ProviderConfigs[i]
+	for i := range vk.AllowedModelConfigs {
+		pc := &vk.AllowedModelConfigs[i]
 		for j := range pc.Budgets {
 			pc.Budgets[j].IsCalendarAligned = vk.CalendarAligned
 		}
@@ -320,3 +331,7 @@ func (vk *TableVirtualKey) AfterFind(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+// Backward-compatible aliases for legacy provider-config naming.
+type TableVirtualKeyProviderConfig = TableAllowedModelConfig
+type TableVirtualKeyProviderConfigKey = TableAllowedModelConfigKey

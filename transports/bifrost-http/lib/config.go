@@ -446,22 +446,22 @@ func applyV1Compat(configData *ConfigData) {
 		vk := &configData.Governance.VirtualKeys[i]
 
 		// Provider configs: empty list → backfill all configured providers
-		if len(vk.ProviderConfigs) == 0 {
+		if len(vk.AllowedModelConfigs) == 0 {
 			providerNames := make([]string, 0, len(configData.Providers))
 			for providerName := range configData.Providers {
 				providerNames = append(providerNames, strings.ToLower(providerName))
 			}
 			sort.Strings(providerNames)
 			for _, providerName := range providerNames {
-				vk.ProviderConfigs = append(vk.ProviderConfigs, configstoreTables.TableVirtualKeyProviderConfig{
+				vk.AllowedModelConfigs = append(vk.AllowedModelConfigs, configstoreTables.TableAllowedModelConfig{
 					Provider:      providerName,
 					AllowedModels: schemas.WhiteList{"*"},
 					AllowAllKeys:  true,
 				})
 			}
 		} else {
-			for j := range vk.ProviderConfigs {
-				pc := &vk.ProviderConfigs[j]
+			for j := range vk.AllowedModelConfigs {
+				pc := &vk.AllowedModelConfigs[j]
 				if len(pc.AllowedModels) == 0 {
 					pc.AllowedModels = schemas.WhiteList{"*"}
 				}
@@ -499,8 +499,8 @@ func promoteDeprecatedCalendarAligned(configData *ConfigData) {
 	for i := range configData.Governance.VirtualKeys {
 		vk := &configData.Governance.VirtualKeys[i]
 		promoteCalendarAligned(&vk.CalendarAligned, vk.Budgets, vk.RateLimits)
-		for j := range vk.ProviderConfigs {
-			pc := &vk.ProviderConfigs[j]
+		for j := range vk.AllowedModelConfigs {
+			pc := &vk.AllowedModelConfigs[j]
 			promoteCalendarAligned(&vk.CalendarAligned, pc.Budgets, pc.RateLimits)
 		}
 	}
@@ -1994,17 +1994,18 @@ func updateGovernanceConfigInStore(
 		// Create virtual keys with explicit association handling
 		for i := range virtualKeysToAdd {
 			virtualKey := &virtualKeysToAdd[i]
-			providerConfigs := virtualKey.ProviderConfigs
+			providerConfigs := virtualKey.AllowedModelConfigs
 			mcpConfigs := virtualKey.MCPConfigs
-			virtualKey.ProviderConfigs = nil
+			virtualKey.AllowedModelConfigs = nil
 			virtualKey.MCPConfigs = nil
 			// Here we wll filter provider / keys that are not available
 			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
 				return fmt.Errorf("failed to create virtual key %s: %w", virtualKey.ID, err)
 			}
 			for j := range providerConfigs {
-				providerConfigs[j].VirtualKeyID = virtualKey.ID
-				if err := config.StoreFromContext(ctx).CreateVirtualKeyProviderConfig(ctx, &providerConfigs[j], tx); err != nil {
+				vkID := virtualKey.ID
+				providerConfigs[j].VirtualKeyID = &vkID
+				if err := config.StoreFromContext(ctx).CreateAllowedModelConfig(ctx, &providerConfigs[j], tx); err != nil {
 					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 				}
 			}
@@ -2015,13 +2016,13 @@ func updateGovernanceConfigInStore(
 				}
 			}
 
-			virtualKey.ProviderConfigs = providerConfigs
+			virtualKey.AllowedModelConfigs = providerConfigs
 			virtualKey.MCPConfigs = mcpConfigs
 		}
 
 		// Update virtual keys (config.json changed)
 		for _, virtualKey := range virtualKeysToUpdate {
-			if err := reconcileVirtualKeyAssociations(ctx, config.StoreFromContext(ctx), tx, virtualKey.ID, virtualKey.ProviderConfigs, virtualKey.MCPConfigs); err != nil {
+			if err := reconcileVirtualKeyAllowedModelConfigs(ctx, config.StoreFromContext(ctx), tx, virtualKey.ID, virtualKey.AllowedModelConfigs, virtualKey.MCPConfigs); err != nil {
 				return fmt.Errorf("failed to reconcile associations for virtual key %s: %w", virtualKey.ID, err)
 			}
 			if err := config.StoreFromContext(ctx).UpdateVirtualKey(ctx, &virtualKey, tx); err != nil {
@@ -2521,9 +2522,9 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			} else {
 				virtualKey.ConfigHash = vkHash
 			}
-			providerConfigs := virtualKey.ProviderConfigs
+			providerConfigs := virtualKey.AllowedModelConfigs
 			mcpConfigs := virtualKey.MCPConfigs
-			virtualKey.ProviderConfigs = nil
+			virtualKey.AllowedModelConfigs = nil
 			virtualKey.MCPConfigs = nil
 
 			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
@@ -2533,9 +2534,10 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			logger.Debug("created virtual key %s successfully", virtualKey.ID)
 
 			for _, pc := range providerConfigs {
-				pc.VirtualKeyID = virtualKey.ID
+				vkID := virtualKey.ID
+				pc.VirtualKeyID = &vkID
 				logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
-				if err := config.StoreFromContext(ctx).CreateVirtualKeyProviderConfig(ctx, &pc, tx); err != nil {
+				if err := config.StoreFromContext(ctx).CreateAllowedModelConfig(ctx, &pc, tx); err != nil {
 					logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
 					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 				}
@@ -2551,7 +2553,7 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 				}
 			}
 
-			virtualKey.ProviderConfigs = providerConfigs
+			virtualKey.AllowedModelConfigs = providerConfigs
 			virtualKey.MCPConfigs = mcpConfigs
 		}
 
@@ -3038,7 +3040,7 @@ func resolveMCPConfigClientIDs(
 	return resolvedConfigs
 }
 
-// reconcileVirtualKeyAssociations reconciles ProviderConfigs and MCPConfigs associations
+// reconcileVirtualKeyAllowedModelConfigs reconciles ProviderConfigs and MCPConfigs associations
 // for a virtual key when config.json changes (hash mismatch already detected at VK level).
 //
 // NOTE: This function is ONLY called when the virtual key's hash has changed,
@@ -3049,43 +3051,43 @@ func resolveMCPConfigClientIDs(
 // - Configs in both file and DB → update from file
 // - Configs only in file → create new
 // - Configs only in DB → DELETE (file is source of truth, extra configs are removed)
-func reconcileVirtualKeyAssociations(
+func reconcileVirtualKeyAllowedModelConfigs(
 	ctx context.Context,
 	store configstore.ConfigStore,
 	tx *gorm.DB,
 	vkID string,
-	newProviderConfigs []configstoreTables.TableVirtualKeyProviderConfig,
+	newAllowedModelConfigs []configstoreTables.TableAllowedModelConfig,
 	newMCPConfigs []configstoreTables.TableVirtualKeyMCPConfig,
 ) error {
 	// Reconcile ProviderConfigs
-	existingProviderConfigs, err := store.GetVirtualKeyProviderConfigs(ctx, vkID)
+	existingAllowedModelConfigs, err := store.GetAllowedModelConfigs(ctx, vkID)
 	if err != nil {
 		return fmt.Errorf("failed to get existing provider configs: %w", err)
 	}
 
 	// Build lookup map for existing configs by Provider (unique per VK)
-	existingByProvider := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
-	for _, pc := range existingProviderConfigs {
+	existingByProvider := make(map[string]configstoreTables.TableAllowedModelConfig)
+	for _, pc := range existingAllowedModelConfigs {
 		existingByProvider[pc.Provider] = pc
 	}
 
 	// Process provider configs from config.json
 	newProviderSet := make(map[string]bool)
-	for _, newPC := range newProviderConfigs {
+	for _, newPC := range newAllowedModelConfigs {
 		newProviderSet[newPC.Provider] = true
-		newPC.VirtualKeyID = vkID
+		newPC.VirtualKeyID = &vkID
 		if existing, found := existingByProvider[newPC.Provider]; found {
 			// Update existing provider config from file
 			existing.Weight = newPC.Weight
 			existing.AllowedModels = newPC.AllowedModels
 			existing.RateLimits = newPC.RateLimits
 			existing.Keys = newPC.Keys
-			if err := store.UpdateVirtualKeyProviderConfig(ctx, &existing, tx); err != nil {
+			if err := store.UpdateAllowedModelConfig(ctx, &existing, tx); err != nil {
 				return fmt.Errorf("failed to update provider config for %s: %w", newPC.Provider, err)
 			}
 		} else {
 			// Create new provider config from file
-			if err := store.CreateVirtualKeyProviderConfig(ctx, &newPC, tx); err != nil {
+			if err := store.CreateAllowedModelConfig(ctx, &newPC, tx); err != nil {
 				return fmt.Errorf("failed to create provider config for %s: %w", newPC.Provider, err)
 			}
 		}
@@ -3094,7 +3096,7 @@ func reconcileVirtualKeyAssociations(
 	// Delete provider configs that exist in DB but not in file
 	for provider, existing := range existingByProvider {
 		if !newProviderSet[provider] {
-			if err := store.DeleteVirtualKeyProviderConfig(ctx, existing.ID, tx); err != nil {
+			if err := store.DeleteAllowedModelConfig(ctx, existing.ID, tx); err != nil {
 				return fmt.Errorf("failed to delete provider config for %s: %w", provider, err)
 			}
 		}

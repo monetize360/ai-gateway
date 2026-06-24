@@ -19,7 +19,7 @@ func TestEvaluateGovernanceRequest_TenantJWTEnforcesVKRateLimit(t *testing.T) {
 	logger := NewMockLogger()
 	rateLimit := buildRateLimitWithUsage("rl1", 0, 0, 1, 1)
 	vk := buildVirtualKeyWithRateLimit("vk1", "vk1", "Test VK", rateLimit)
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("fakellm-openai", []string{"*"}),
 	}
 
@@ -61,7 +61,7 @@ func TestPostLLMHook_TenantJWTIncrementsVKRateLimitUsage(t *testing.T) {
 	logger := NewMockLogger()
 	rateLimit := buildRateLimitWithUsage("rl1", 0, 0, 1, 0)
 	vk := buildVirtualKeyWithRateLimit("vk1", "vk1", "Test VK", rateLimit)
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("fakellm-openai", []string{"*"}),
 	}
 
@@ -116,7 +116,7 @@ func TestEvaluateGovernanceRequest_EnterpriseUserAuthSkipsVKRateLimit(t *testing
 	logger := NewMockLogger()
 	rateLimit := buildRateLimitWithUsage("rl1", 0, 0, 1, 1)
 	vk := buildVirtualKeyWithRateLimit("vk1", "vk1", "Test VK", rateLimit)
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 

@@ -620,7 +620,7 @@ func seedGovernance(ctx context.Context, db *gorm.DB, prefix string, now time.Ti
 		if err := db.WithContext(ctx).Where("id = ?", vk.ID).Assign(vk).FirstOrCreate(&vk).Error; err != nil {
 			return err
 		}
-		pc := tables.TableVirtualKeyProviderConfig{VirtualKeyID: vk.ID, Provider: "openai", AllowedModels: schemas.WhiteList{"*"}, AllowAllKeys: true}
+		pc := tables.TableAllowedModelConfig{VirtualKeyID: vk.ID, Provider: "openai", AllowedModels: schemas.WhiteList{"*"}, AllowAllKeys: true}
 		if err := db.WithContext(ctx).Where("virtual_key_id = ? AND provider = ?", vk.ID, "openai").Assign(pc).FirstOrCreate(&pc).Error; err != nil {
 			return err
 		}

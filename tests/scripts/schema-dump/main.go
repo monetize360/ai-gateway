@@ -44,11 +44,11 @@ func main() {
 		&tables.TableGovernanceConfig{},
 		&tables.TablePricingOverride{},
 		&tables.TablePlugin{},
-		&tables.TableVirtualKeyProviderConfig{},
+		&tables.TableAllowedModelConfig{},
 		&tables.TableVirtualKeyMCPConfig{},
 		&tables.TableFrameworkConfig{},
 		&tables.SessionsTable{},
-		&tables.TableVirtualKeyProviderConfigKey{},
+		&tables.TableAllowedModelConfigKey{},
 		&tables.TableRoutingRule{},
 		&tables.TableFolder{},
 		&tables.TablePrompt{},
@@ -65,7 +65,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "auto migrate: %v\n", err)
 		os.Exit(1)
 	}
-	if err := db.SetupJoinTable(&tables.TableVirtualKeyProviderConfig{}, "Keys", &tables.TableVirtualKeyProviderConfigKey{}); err != nil {
+	if err := db.SetupJoinTable(&tables.TableAllowedModelConfig{}, "Keys", &tables.TableAllowedModelConfigKey{}); err != nil {
 		fmt.Fprintf(os.Stderr, "setup join table: %v\n", err)
 		os.Exit(1)
 	}

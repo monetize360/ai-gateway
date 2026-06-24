@@ -639,7 +639,7 @@ type modelListQuery struct {
 	// VK-based filtering: populated when a virtual key is found in request headers.
 	// HasVKFilter=true restricts providers/models to those allowed by the VK.
 	HasVKFilter       bool
-	VKProviderConfigs []tables.TableVirtualKeyProviderConfig
+	VKAllowedModelConfigs []tables.TableAllowedModelConfig
 }
 
 type listedModel struct {
@@ -788,7 +788,7 @@ func (h *ProviderHandler) parseModelListQuery(ctx *fasthttp.RequestCtx, defaultL
 
 		if vk != nil {
 			query.HasVKFilter = true
-			query.VKProviderConfigs = vk.ProviderConfigs
+			query.VKAllowedModelConfigs = vk.AllowedModelConfigs
 		}
 	}
 
@@ -810,9 +810,9 @@ func (h *ProviderHandler) listManagementModels(query modelListQuery) ([]listedMo
 
 	// When a virtual key has provider configs, restrict to those providers.
 	// Empty ProviderConfigs means no provider-level restrictions (allow all).
-	if query.HasVKFilter && len(query.VKProviderConfigs) > 0 {
+	if query.HasVKFilter && len(query.VKAllowedModelConfigs) > 0 {
 		providers = slices.DeleteFunc(providers, func(p schemas.ModelProvider) bool {
-			return !slices.ContainsFunc(query.VKProviderConfigs, func(pc tables.TableVirtualKeyProviderConfig) bool {
+			return !slices.ContainsFunc(query.VKAllowedModelConfigs, func(pc tables.TableAllowedModelConfig) bool {
 				return strings.EqualFold(pc.Provider, string(p))
 			})
 		})
@@ -843,11 +843,11 @@ func (h *ProviderHandler) listManagementModelsForProvider(
 
 	// Apply VK-level model whitelist when provider configs are present.
 	// AllowedModels=["*"] passes all; empty AllowedModels denies all (deny-by-default).
-	if query.HasVKFilter && len(query.VKProviderConfigs) > 0 {
-		if idx := slices.IndexFunc(query.VKProviderConfigs, func(pc tables.TableVirtualKeyProviderConfig) bool {
+	if query.HasVKFilter && len(query.VKAllowedModelConfigs) > 0 {
+		if idx := slices.IndexFunc(query.VKAllowedModelConfigs, func(pc tables.TableAllowedModelConfig) bool {
 			return strings.EqualFold(pc.Provider, string(provider))
 		}); idx >= 0 {
-			allowedModels := query.VKProviderConfigs[idx].AllowedModels
+			allowedModels := query.VKAllowedModelConfigs[idx].AllowedModels
 			models = slices.DeleteFunc(models, func(m string) bool { return !allowedModels.IsAllowed(m) })
 		}
 	}

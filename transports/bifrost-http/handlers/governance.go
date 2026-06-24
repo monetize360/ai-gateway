@@ -75,7 +75,7 @@ func NewGovernanceHandler(manager GovernanceManager, cfg *lib.Config) (*Governan
 type CreateVirtualKeyRequest struct {
 	Name            string `json:"name" validate:"required"`
 	Description     string `json:"description,omitempty"`
-	ProviderConfigs []struct {
+	AllowedModelConfigs []struct {
 		Provider          string                  `json:"provider" validate:"required"`
 		Weight            *float64                `json:"weight,omitempty"`
 		AllowedModels     schemas.WhiteList       `json:"allowed_models,omitempty"`     // ["*"] allows all models; empty denies all
@@ -83,7 +83,7 @@ type CreateVirtualKeyRequest struct {
 		Budgets           []CreateBudgetRequest   `json:"budgets,omitempty"`            // Multi-budget for provider config
 		RateLimits        []CreateRateLimitRequest `json:"rate_limits,omitempty"`
 		KeyIDs            schemas.WhiteList       `json:"key_ids,omitempty"`            // List of DBKey UUIDs to associate with this provider config
-	} `json:"provider_configs,omitempty"` // Empty means all providers allowed
+	} `json:"allowed_model_configs,omitempty"` // Empty means all providers allowed
 	MCPConfigs []struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
@@ -100,7 +100,7 @@ type CreateVirtualKeyRequest struct {
 type UpdateVirtualKeyRequest struct {
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
-	ProviderConfigs []struct {
+	AllowedModelConfigs []struct {
 		ID                *string                 `json:"id,omitempty"` // null for new entries
 		Provider          string                  `json:"provider" validate:"required"`
 		Weight            *float64                `json:"weight,omitempty"`
@@ -109,7 +109,7 @@ type UpdateVirtualKeyRequest struct {
 		Budgets           []CreateBudgetRequest   `json:"budgets,omitempty"`            // Multi-budget for provider config
 		RateLimits        []CreateRateLimitRequest  `json:"rate_limits,omitempty"`
 		KeyIDs            schemas.WhiteList       `json:"key_ids,omitempty"`            // List of DBKey UUIDs to associate with this provider config
-	} `json:"provider_configs,omitempty"`
+	} `json:"allowed_model_configs,omitempty"`
 	MCPConfigs []struct {
 		ID             *string           `json:"id,omitempty"` // null for new entries
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
@@ -418,7 +418,7 @@ func reconcileRateLimitRequests(
 }
 
 func collectProviderConfigDeleteIDs(
-	config configstoreTables.TableVirtualKeyProviderConfig,
+	config configstoreTables.TableAllowedModelConfig,
 	budgetIDs []string,
 	rateLimitIDs []string,
 ) ([]string, []string) {
@@ -687,7 +687,7 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 	}
 	// Fetch providers from DB to ensure up-to-date data in cluster mode.
 	providerSet := map[schemas.ModelProvider]struct{}{}
-	if req.ProviderConfigs != nil {
+	if req.AllowedModelConfigs != nil {
 		var err error
 		providerSet, err = h.getConfiguredProviderSet(ctx)
 		if err != nil {
@@ -740,8 +740,8 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 				}
 			}
 		}
-		if req.ProviderConfigs != nil {
-			for _, pc := range req.ProviderConfigs {
+		if req.AllowedModelConfigs != nil {
+			for _, pc := range req.AllowedModelConfigs {
 				providerName := schemas.ModelProvider(strings.TrimSpace(pc.Provider))
 				if providerName == "" {
 					return &badRequestError{err: fmt.Errorf("provider name is required")}
@@ -775,17 +775,16 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 					}
 				}
 
-				providerConfig := &configstoreTables.TableVirtualKeyProviderConfig{
-					VirtualKeyID:      vk.ID,
+				providerConfig := &configstoreTables.TableAllowedModelConfig{
+					VirtualKeyID:      &vk.ID,
 					Provider:          string(providerName),
-					Weight:            pc.Weight,
 					AllowedModels:     pc.AllowedModels,
 					BlacklistedModels: pc.BlacklistedModels,
 					AllowAllKeys:      allowAllKeys,
 					Keys:              keys,
 				}
 
-				if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfig(ctx, providerConfig, tx); err != nil {
 					return err
 				}
 
@@ -930,7 +929,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	providerSet := map[schemas.ModelProvider]struct{}{}
-	if len(req.ProviderConfigs) > 0 {
+	if len(req.AllowedModelConfigs) > 0 {
 		providerSet, err = h.getConfiguredProviderSet(ctx)
 		if err != nil {
 			SendError(ctx, 500, fmt.Sprintf("Failed to load providers: %v", err))
@@ -944,7 +943,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		if err := dbForUpdate(tx.WithContext(ctx)).
 			Preload("Budgets").
 			Preload("RateLimits").
-			Preload("ProviderConfigs").
+			Preload("AllowedModelConfigs").
 			First(&lockedVK, "id = ?", vkID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return configstore.ErrNotFound
@@ -1077,9 +1076,9 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		if err := h.cfg.StoreFromRequestCtx(ctx).UpdateVirtualKey(ctx, vk, tx); err != nil {
 			return err
 		}
-		if req.ProviderConfigs != nil {
+		if req.AllowedModelConfigs != nil {
 			// Get existing provider configs for comparison
-			var existingConfigs []configstoreTables.TableVirtualKeyProviderConfig
+			var existingConfigs []configstoreTables.TableAllowedModelConfig
 			if err := tx.Where("virtual_key_id = ?", vk.ID).
 				Preload("Budgets").
 				Preload("RateLimits").
@@ -1087,26 +1086,26 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 				return err
 			}
 			sort.Slice(existingConfigs, func(i, j int) bool { return existingConfigs[i].ID < existingConfigs[j].ID })
-			sort.Slice(req.ProviderConfigs, func(i, j int) bool {
-				if req.ProviderConfigs[i].ID == nil && req.ProviderConfigs[j].ID != nil {
+			sort.Slice(req.AllowedModelConfigs, func(i, j int) bool {
+				if req.AllowedModelConfigs[i].ID == nil && req.AllowedModelConfigs[j].ID != nil {
 					return false
 				}
-				if req.ProviderConfigs[i].ID != nil && req.ProviderConfigs[j].ID == nil {
+				if req.AllowedModelConfigs[i].ID != nil && req.AllowedModelConfigs[j].ID == nil {
 					return true
 				}
-				if req.ProviderConfigs[i].ID != nil && req.ProviderConfigs[j].ID != nil && *req.ProviderConfigs[i].ID != *req.ProviderConfigs[j].ID {
-					return *req.ProviderConfigs[i].ID < *req.ProviderConfigs[j].ID
+				if req.AllowedModelConfigs[i].ID != nil && req.AllowedModelConfigs[j].ID != nil && *req.AllowedModelConfigs[i].ID != *req.AllowedModelConfigs[j].ID {
+					return *req.AllowedModelConfigs[i].ID < *req.AllowedModelConfigs[j].ID
 				}
-				return req.ProviderConfigs[i].Provider < req.ProviderConfigs[j].Provider
+				return req.AllowedModelConfigs[i].Provider < req.AllowedModelConfigs[j].Provider
 			})
 			// Create maps for easier lookup
-			existingConfigsMap := make(map[string]configstoreTables.TableVirtualKeyProviderConfig)
+			existingConfigsMap := make(map[string]configstoreTables.TableAllowedModelConfig)
 			for _, config := range existingConfigs {
 				existingConfigsMap[config.ID] = config
 			}
 			requestConfigsMap := make(map[string]bool)
 			// Process new configs: create new ones and update existing ones
-			for _, pc := range req.ProviderConfigs {
+			for _, pc := range req.AllowedModelConfigs {
 				providerName := schemas.ModelProvider(strings.TrimSpace(pc.Provider))
 				if providerName == "" {
 					return &badRequestError{err: fmt.Errorf("provider name is required")}
@@ -1142,16 +1141,15 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 					}
 
 					// Create new provider config
-					providerConfig := &configstoreTables.TableVirtualKeyProviderConfig{
-						VirtualKeyID:      vk.ID,
+					providerConfig := &configstoreTables.TableAllowedModelConfig{
+						VirtualKeyID:      &vk.ID,
 						Provider:          string(providerName),
-						Weight:            pc.Weight,
 						AllowedModels:     pc.AllowedModels,
 						BlacklistedModels: pc.BlacklistedModels,
 						AllowAllKeys:      allowAllKeys,
 						Keys:              keys,
 					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).CreateVirtualKeyProviderConfig(ctx, providerConfig, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfig(ctx, providerConfig, tx); err != nil {
 						return err
 					}
 					if len(pc.RateLimits) > 0 {
@@ -1325,7 +1323,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						}
 						existing.RateLimits = reconciled
 					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateVirtualKeyProviderConfig(ctx, &existing, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateAllowedModelConfig(ctx, &existing, tx); err != nil {
 						return err
 					}
 				}
@@ -1343,7 +1341,7 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						providerBudgetIDsToDelete,
 						providerRateLimitIDsToDelete,
 					)
-					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteVirtualKeyProviderConfig(ctx, id, tx); err != nil {
+					if err := h.cfg.StoreFromRequestCtx(ctx).DeleteAllowedModelConfig(ctx, id, tx); err != nil {
 						return err
 					}
 				}
@@ -3594,6 +3592,6 @@ func (h *GovernanceHandler) getVirtualKeyQuota(ctx *fasthttp.RequestCtx) {
 		"is_active":        vk.IsActiveValue(),
 		"budgets":          vk.Budgets,
 		"rate_limits":      vk.RateLimits,
-		"provider_configs": vk.ProviderConfigs,
+		"allowed_model_configs": vk.AllowedModelConfigs,
 	})
 }

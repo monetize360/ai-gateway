@@ -17,7 +17,7 @@ import (
 func TestBudgetResolver_EvaluateRequest_AllowedRequest(t *testing.T) {
 	logger := NewMockLogger()
 	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
@@ -473,7 +473,7 @@ func TestBudgetResolver_ContextPopulation(t *testing.T) {
 	org := buildOrganization(orgID, "Org 1", nil)
 	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
 	vk.OrgID = &orgID
-	vk.ProviderConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
 		buildProviderConfig("openai", []string{"*"}),
 	}
 
