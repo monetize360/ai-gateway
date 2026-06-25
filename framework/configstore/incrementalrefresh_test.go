@@ -15,6 +15,9 @@ func TestGovernanceRefreshDeltaIsEmpty(t *testing.T) {
 	require.False(t, (&GovernanceRefreshDelta{
 		Organizations: []configstoreTables.TableOrganization{{ID: "org-1"}},
 	}).IsEmpty())
+	require.False(t, (&GovernanceRefreshDelta{
+		ReloadOrgAllowedModelConfigs: true,
+	}).IsEmpty())
 }
 
 func TestProviderConfigRefreshDeltaIsEmpty(t *testing.T) {

@@ -98,5 +98,15 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 	if err := migrateGovernanceOrgOwnership(db); err != nil {
 		return err
 	}
-	return migrateGovernanceModelConfigsToConfigModels(db)
+	if err := migrateGovernanceModelConfigsToConfigModels(db); err != nil {
+		return err
+	}
+	return setupConfigStoreJoinTables(db)
+}
+
+// setupConfigStoreJoinTables registers many2many join column names that differ from
+// GORM's defaults (legacy table_virtual_key_provider_config_id vs inferred
+// table_allowed_model_config_id). Required for tenant Postgres stores that skip AutoMigrate.
+func setupConfigStoreJoinTables(db *gorm.DB) error {
+	return db.SetupJoinTable(&tables.TableAllowedModelConfig{}, "Keys", &tables.TableAllowedModelConfigKey{})
 }

@@ -540,9 +540,11 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 			logger.Warn("governance plugin found but failed to get: %v", err)
 		} else {
 			// Update in memory and get back the potentially modified provider
-			govUpdated := governancePlugin.GetGovernanceStore(ctx).UpdateProviderInMemory(ctx, providerInfo)
-			if govUpdated != nil {
-				updatedProvider = govUpdated
+			if govStore := governancePlugin.GetGovernanceStore(ctx); govStore != nil {
+				govUpdated := govStore.UpdateProviderInMemory(ctx, providerInfo)
+				if govUpdated != nil {
+					updatedProvider = govUpdated
+				}
 			}
 
 			preloadedBudgets := make(map[string]tables.TableBudget, len(providerInfo.Budgets))

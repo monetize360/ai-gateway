@@ -17,13 +17,14 @@ const RefreshOverlap = 2 * time.Second
 
 // GovernanceRefreshDelta holds governance entities changed since the previous refresh.
 type GovernanceRefreshDelta struct {
-	Organizations []tables.TableOrganization
-	VirtualKeys   []tables.TableVirtualKey
-	Budgets       []tables.TableBudget
-	RateLimits    []tables.TableRateLimit
-	ModelConfigs  []tables.TableModelConfig
-	Providers     []tables.TableProvider
-	RoutingRules  []tables.TableRoutingRule
+	Organizations                  []tables.TableOrganization
+	VirtualKeys                    []tables.TableVirtualKey
+	Budgets                        []tables.TableBudget
+	RateLimits                     []tables.TableRateLimit
+	ModelConfigs                   []tables.TableModelConfig
+	Providers                      []tables.TableProvider
+	RoutingRules                   []tables.TableRoutingRule
+	ReloadOrgAllowedModelConfigs   bool
 }
 
 // IsEmpty reports whether the delta contains no changes.
@@ -31,7 +32,8 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 	if d == nil {
 		return true
 	}
-	return len(d.Organizations) == 0 &&
+	return !d.ReloadOrgAllowedModelConfigs &&
+		len(d.Organizations) == 0 &&
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
 		len(d.RateLimits) == 0 &&
@@ -141,6 +143,14 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	if err := appendDeletedRowsSince(db, since, &delta.VirtualKeys); err != nil {
 		return nil, err
 	}
+
+	var orgConfigChanges int64
+	if err := db.Table("governance_virtual_key_provider_configs").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL", since).
+		Count(&orgConfigChanges).Error; err != nil {
+		return nil, fmt.Errorf("org allowed model configs changed since: %w", err)
+	}
+	delta.ReloadOrgAllowedModelConfigs = orgConfigChanges > 0
 
 	return delta, nil
 }

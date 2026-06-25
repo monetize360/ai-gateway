@@ -761,10 +761,9 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 
 				// Get keys for this provider config if specified
 				var keys []configstoreTables.TableKey
-				allowAllKeys := false
-				if pc.KeyIDs.IsUnrestricted() {
-					allowAllKeys = true
-				} else if !pc.KeyIDs.IsEmpty() {
+				allowAllKeys := true
+				if !pc.KeyIDs.IsUnrestricted() && !pc.KeyIDs.IsEmpty() {
+					allowAllKeys = false
 					var err error
 					keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 					if err != nil {
@@ -775,31 +774,31 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 					}
 				}
 
-				providerConfig := &configstoreTables.TableAllowedModelConfig{
-					VirtualKeyID:      &vk.ID,
-					Provider:          string(providerName),
-					AllowedModels:     pc.AllowedModels,
-					BlacklistedModels: pc.BlacklistedModels,
-					AllowAllKeys:      allowAllKeys,
-					Keys:              keys,
-				}
+			providerConfig := &configstoreTables.TableAllowedModelConfig{
+				VirtualKeyID:      &vk.ID,
+				Provider:          string(providerName),
+				AllowedModels:     pc.AllowedModels,
+				BlacklistedModels: pc.BlacklistedModels,
+				AllowAllKeys:      allowAllKeys,
+				Keys:              keys,
+			}
 
-				if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfig(ctx, providerConfig, tx); err != nil {
+			if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfigExpanded(ctx, providerConfig, tx); err != nil {
+				return err
+			}
+
+			if len(pc.RateLimits) > 0 {
+				pcID := providerConfig.ID
+				reconciled, err := reconcileRateLimitRequests(ctx, h.cfg.StoreFromRequestCtx(ctx), tx, nil, pc.RateLimits, func(rl *configstoreTables.TableRateLimit) {
+					rl.ProviderConfigID = &pcID
+				})
+				if err != nil {
 					return err
 				}
-
-				if len(pc.RateLimits) > 0 {
-					pcID := providerConfig.ID
-					reconciled, err := reconcileRateLimitRequests(ctx, h.cfg.StoreFromRequestCtx(ctx), tx, nil, pc.RateLimits, func(rl *configstoreTables.TableRateLimit) {
-						rl.ProviderConfigID = &pcID
-					})
-					if err != nil {
-						return err
-					}
-					providerConfig.RateLimits = reconciled
-				}
-				// Create multi-budgets for provider config
-				if len(pc.Budgets) > 0 {
+				providerConfig.RateLimits = reconciled
+			}
+			// Create multi-budgets for provider config
+			if len(pc.Budgets) > 0 {
 					seenDurations := make(map[string]bool)
 					for _, b := range pc.Budgets {
 						if seenDurations[b.ResetDuration] {
@@ -1126,10 +1125,9 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 
 					// Get keys for this provider config if specified
 					var keys []configstoreTables.TableKey
-					allowAllKeys := false
-					if pc.KeyIDs.IsUnrestricted() {
-						allowAllKeys = true
-					} else if !pc.KeyIDs.IsEmpty() {
+					allowAllKeys := true
+					if !pc.KeyIDs.IsUnrestricted() && !pc.KeyIDs.IsEmpty() {
+						allowAllKeys = false
 						var err error
 						keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 						if err != nil {
@@ -1140,18 +1138,18 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						}
 					}
 
-					// Create new provider config
-					providerConfig := &configstoreTables.TableAllowedModelConfig{
-						VirtualKeyID:      &vk.ID,
-						Provider:          string(providerName),
-						AllowedModels:     pc.AllowedModels,
-						BlacklistedModels: pc.BlacklistedModels,
-						AllowAllKeys:      allowAllKeys,
-						Keys:              keys,
-					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfig(ctx, providerConfig, tx); err != nil {
-						return err
-					}
+				// Create new provider config
+				providerConfig := &configstoreTables.TableAllowedModelConfig{
+					VirtualKeyID:      &vk.ID,
+					Provider:          string(providerName),
+					AllowedModels:     pc.AllowedModels,
+					BlacklistedModels: pc.BlacklistedModels,
+					AllowAllKeys:      allowAllKeys,
+					Keys:              keys,
+				}
+				if err := h.cfg.StoreFromRequestCtx(ctx).CreateAllowedModelConfigExpanded(ctx, providerConfig, tx); err != nil {
+					return err
+				}
 					if len(pc.RateLimits) > 0 {
 						pcID := providerConfig.ID
 						reconciled, err := reconcileRateLimitRequests(ctx, h.cfg.StoreFromRequestCtx(ctx), tx, nil, pc.RateLimits, func(rl *configstoreTables.TableRateLimit) {
@@ -1214,10 +1212,9 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 
 					// Get keys for this provider config if specified
 					var keys []configstoreTables.TableKey
-					allowAllKeys := false
-					if pc.KeyIDs.IsUnrestricted() {
-						allowAllKeys = true
-					} else if !pc.KeyIDs.IsEmpty() {
+					allowAllKeys := true
+					if !pc.KeyIDs.IsUnrestricted() && !pc.KeyIDs.IsEmpty() {
+						allowAllKeys = false
 						var err error
 						keys, err = h.cfg.StoreFromRequestCtx(ctx).GetKeysByIDs(ctx, pc.KeyIDs)
 						if err != nil {
@@ -1323,12 +1320,12 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 						}
 						existing.RateLimits = reconciled
 					}
-					if err := h.cfg.StoreFromRequestCtx(ctx).UpdateAllowedModelConfig(ctx, &existing, tx); err != nil {
-						return err
-					}
+				if err := h.cfg.StoreFromRequestCtx(ctx).ReplaceAllowedModelConfigRows(ctx, &existing, tx); err != nil {
+					return err
 				}
 			}
-			// Delete provider configs that are not in the request
+		}
+		// Delete provider configs that are not in the request
 			configIDs := make([]string, 0, len(existingConfigsMap))
 			for id := range existingConfigsMap {
 				configIDs = append(configIDs, id)

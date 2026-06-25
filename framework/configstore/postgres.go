@@ -112,6 +112,11 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, pool Postgre
 	d := &RDBConfigStore{logger: logger}
 	d.db.Store(db)
 
+	if err := setupConfigStoreJoinTables(db); err != nil {
+		closeDbConn(db, logger)
+		return nil, fmt.Errorf("failed to setup configstore join tables: %w", err)
+	}
+
 	d.migrateOnFreshFn = func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error {
 		return fn(ctx, d.DB())
 	}
@@ -123,6 +128,10 @@ func NewPostgresConfigStoreFromDSN(ctx context.Context, dsn string, pool Postgre
 		if err := pool.apply(newDB); err != nil {
 			closeDbConn(newDB, logger)
 			return fmt.Errorf("failed to tune fresh runtime pool: %w", err)
+		}
+		if err := setupConfigStoreJoinTables(newDB); err != nil {
+			closeDbConn(newDB, logger)
+			return fmt.Errorf("failed to setup configstore join tables on refreshed pool: %w", err)
 		}
 		oldDB := d.db.Swap(newDB)
 		if oldDB != nil {

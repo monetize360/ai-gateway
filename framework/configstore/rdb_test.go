@@ -48,7 +48,7 @@ func setupRDBTestStore(t *testing.T) *RDBConfigStore {
 	require.NoError(t, err, "Failed to migrate test database")
 
 	// Setup join table
-	err = db.SetupJoinTable(&tables.TableVirtualKeyProviderConfig{}, "Keys", &tables.TableVirtualKeyProviderConfigKey{})
+	err = db.SetupJoinTable(&tables.TableAllowedModelConfig{}, "Keys", &tables.TableAllowedModelConfigKey{})
 	require.NoError(t, err, "Failed to setup join table")
 
 	s := &RDBConfigStore{logger: nil}
@@ -525,30 +525,32 @@ func TestCreateVirtualKey_WithBudgetAndRateLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create virtual key with references
-	rateLimitID := "rate-limit-for-vk"
 	vkID := "vk-with-refs"
 	vk := &tables.TableVirtualKey{
-		ID:          vkID,
-		Name:        "VK With References",
-		Value:       "vk-refs-value",
-		IsActive:    schemas.Ptr(true),
-		RateLimitID: &rateLimitID,
+		ID:       vkID,
+		Name:     "VK With References",
+		Value:    "vk-refs-value",
+		IsActive: schemas.Ptr(true),
 	}
 
 	err = store.CreateVirtualKey(ctx, vk)
 	require.NoError(t, err)
 
-	// Link the existing budget to the VK via FK
+	// Link the existing budget and rate limit to the VK via FK
 	budget.VirtualKeyID = &vkID
 	err = store.UpdateBudget(ctx, budget)
+	require.NoError(t, err)
+
+	rateLimit.VirtualKeyID = &vkID
+	err = store.UpdateRateLimit(ctx, rateLimit)
 	require.NoError(t, err)
 
 	result, err := store.GetVirtualKey(ctx, "vk-with-refs")
 	require.NoError(t, err)
 	assert.Len(t, result.Budgets, 1)
 	assert.Equal(t, "budget-for-vk", result.Budgets[0].ID)
-	assert.NotNil(t, result.RateLimitID)
-	assert.Equal(t, "rate-limit-for-vk", *result.RateLimitID)
+	assert.Len(t, result.RateLimits, 1)
+	assert.Equal(t, "rate-limit-for-vk", result.RateLimits[0].ID)
 }
 
 func TestCreateVirtualKey_DuplicateName(t *testing.T) {
@@ -657,17 +659,18 @@ func TestCreateVirtualKeyProviderConfig(t *testing.T) {
 
 	// Create provider config
 	weight := 1.0
+	vkID := "vk-for-pc"
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "vk-for-pc",
+		VirtualKeyID: schemas.Ptr(vkID),
 		Provider:     "openai",
 		Weight:       &weight,
 	}
 
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	require.NoError(t, err)
 
 	// Verify
-	configs, err := store.GetVirtualKeyProviderConfigs(ctx, "vk-for-pc")
+	configs, err := store.GetAllowedModelConfigs(ctx, vkID)
 	require.NoError(t, err)
 	assert.Len(t, configs, 1)
 	assert.Equal(t, "openai", configs[0].Provider)
@@ -700,8 +703,9 @@ func TestCreateVirtualKeyProviderConfig_WithKeys(t *testing.T) {
 
 	// Create provider config with key reference
 	weight := 1.0
+	vkID := "vk-with-keys"
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "vk-with-keys",
+		VirtualKeyID: schemas.Ptr(vkID),
 		Provider:     "openai",
 		Weight:       &weight,
 		Keys: []tables.TableKey{
@@ -709,11 +713,11 @@ func TestCreateVirtualKeyProviderConfig_WithKeys(t *testing.T) {
 		},
 	}
 
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	require.NoError(t, err)
 
 	// Verify keys are associated
-	configs, err := store.GetVirtualKeyProviderConfigs(ctx, "vk-with-keys")
+	configs, err := store.GetAllowedModelConfigs(ctx, vkID)
 	require.NoError(t, err)
 	assert.Len(t, configs, 1)
 
@@ -740,8 +744,9 @@ func TestCreateVirtualKeyProviderConfig_UnresolvedKeys(t *testing.T) {
 
 	// Try to create provider config with non-existent key
 	weight := 1.0
+	vkID := "vk-unresolved"
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "vk-unresolved",
+		VirtualKeyID: schemas.Ptr(vkID),
 		Provider:     "openai",
 		Weight:       &weight,
 		Keys: []tables.TableKey{
@@ -749,7 +754,7 @@ func TestCreateVirtualKeyProviderConfig_UnresolvedKeys(t *testing.T) {
 		},
 	}
 
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	assert.Error(t, err, "Should fail with unresolved keys")
 
 	var unresolvedErr *ErrUnresolvedKeys
@@ -781,15 +786,16 @@ func TestUpdateProvider_RemovesStaleVirtualKeyProviderConfigKeyAssociations(t *t
 	require.NoError(t, err)
 
 	weight := 1.0
+	vkID := "vk-update-provider-cleanup"
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "vk-update-provider-cleanup",
+		VirtualKeyID: schemas.Ptr(vkID),
 		Provider:     "openai",
 		Weight:       &weight,
 		Keys: []tables.TableKey{
 			{Name: "openai-key-b"},
 		},
 	}
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	require.NoError(t, err)
 
 	updatedProviderConfig := ProviderConfig{
@@ -800,12 +806,12 @@ func TestUpdateProvider_RemovesStaleVirtualKeyProviderConfigKeyAssociations(t *t
 	err = store.UpdateProvider(ctx, "openai", updatedProviderConfig)
 	require.NoError(t, err)
 
-	result, err := store.GetVirtualKey(ctx, "vk-update-provider-cleanup")
+	result, err := store.GetVirtualKey(ctx, vkID)
 	require.NoError(t, err)
-	require.Len(t, result.ProviderConfigs, 1)
-	assert.Equal(t, "openai", result.ProviderConfigs[0].Provider)
-	assert.False(t, result.ProviderConfigs[0].AllowAllKeys)
-	assert.Empty(t, result.ProviderConfigs[0].Keys)
+	require.Len(t, result.AllowedModelConfigs, 1)
+	assert.Equal(t, "openai", result.AllowedModelConfigs[0].Provider)
+	assert.True(t, result.AllowedModelConfigs[0].AllowAllKeys)
+	assert.Empty(t, result.AllowedModelConfigs[0].Keys)
 }
 
 func TestDeleteProvider_RemovesVirtualKeyProviderConfigs(t *testing.T) {
@@ -830,20 +836,21 @@ func TestDeleteProvider_RemovesVirtualKeyProviderConfigs(t *testing.T) {
 	require.NoError(t, err)
 
 	weight := 1.0
+	vkID := "vk-delete-provider-cleanup"
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "vk-delete-provider-cleanup",
+		VirtualKeyID: schemas.Ptr(vkID),
 		Provider:     "openai",
 		Weight:       &weight,
 	}
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	require.NoError(t, err)
 
 	err = store.DeleteProvider(ctx, "openai")
 	require.NoError(t, err)
 
-	result, err := store.GetVirtualKey(ctx, "vk-delete-provider-cleanup")
+	result, err := store.GetVirtualKey(ctx, vkID)
 	require.NoError(t, err)
-	assert.Empty(t, result.ProviderConfigs)
+	assert.Empty(t, result.AllowedModelConfigs)
 }
 
 // =============================================================================
@@ -1214,44 +1221,46 @@ func TestFullVirtualKeyFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 4: Create virtual key
-	rateLimitID := "integration-rate-limit"
 	integrationVKID := "integration-vk"
 	vk := &tables.TableVirtualKey{
-		ID:          integrationVKID,
-		Name:        "Integration Virtual Key",
-		Value:       "vk-integration-xyz",
-		IsActive:    schemas.Ptr(true),
-		RateLimitID: &rateLimitID,
+		ID:       integrationVKID,
+		Name:     "Integration Virtual Key",
+		Value:    "vk-integration-xyz",
+		IsActive: schemas.Ptr(true),
 	}
 	err = store.CreateVirtualKey(ctx, vk)
 	require.NoError(t, err)
 
-	// Link the existing budget to the VK via FK
+	// Link the existing budget and rate limit to the VK via FK
 	budget.VirtualKeyID = &integrationVKID
 	err = store.UpdateBudget(ctx, budget)
+	require.NoError(t, err)
+
+	rateLimit.VirtualKeyID = &integrationVKID
+	err = store.UpdateRateLimit(ctx, rateLimit)
 	require.NoError(t, err)
 
 	// Step 5: Create provider config with key reference
 	weight := 1.0
 	pc := &tables.TableVirtualKeyProviderConfig{
-		VirtualKeyID: "integration-vk",
+		VirtualKeyID: schemas.Ptr(integrationVKID),
 		Provider:     "openai",
 		Weight:       &weight,
 		Keys: []tables.TableKey{
 			{Name: "openai-main"},
 		},
 	}
-	err = store.CreateVirtualKeyProviderConfig(ctx, pc)
+	err = store.CreateAllowedModelConfig(ctx, pc)
 	require.NoError(t, err)
 
 	// Step 6: Verify complete setup
-	result, err := store.GetVirtualKey(ctx, "integration-vk")
+	result, err := store.GetVirtualKey(ctx, integrationVKID)
 	require.NoError(t, err)
 	assert.Equal(t, "Integration Virtual Key", result.Name)
 	assert.Len(t, result.Budgets, 1)
-	assert.NotNil(t, result.RateLimitID)
+	assert.Len(t, result.RateLimits, 1)
 
-	configs, err := store.GetVirtualKeyProviderConfigs(ctx, "integration-vk")
+	configs, err := store.GetAllowedModelConfigs(ctx, integrationVKID)
 	require.NoError(t, err)
 	assert.Len(t, configs, 1)
 	assert.Equal(t, "openai", configs[0].Provider)

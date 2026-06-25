@@ -784,16 +784,32 @@ func (s *RDBConfigStore) deleteJoinRowsForRemovedAllowedModelConfigKeys(ctx cont
 			"table_virtual_key_provider_config_id = ? AND table_key_id IN ?", providerConfig.ID, removedKeyIDs); err != nil {
 			return err
 		}
+
+		var remainingKeys int64
+		if err := GovernanceActive(txDB.WithContext(ctx)).
+			Model(&tables.TableAllowedModelConfigKey{}).
+			Where("table_virtual_key_provider_config_id = ?", providerConfig.ID).
+			Count(&remainingKeys).Error; err != nil {
+			return err
+		}
+		if remainingKeys == 0 {
+			if err := txDB.WithContext(ctx).
+				Model(&tables.TableAllowedModelConfig{}).
+				Where("id = ?", providerConfig.ID).
+				Update("allow_all_keys", true).Error; err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
 }
 
-func (s *RDBConfigStore) cleanupAllowedModelConfigsForDeletedProvider(ctx context.Context, txDB *gorm.DB, provider string) error {
+func (s *RDBConfigStore) cleanupAllowedModelConfigsForDeletedProvider(ctx context.Context, txDB *gorm.DB, providerID string) error {
 	var providerConfigIDs []string
 	if err := dbForUpdate(GovernanceActive(txDB.WithContext(ctx))).
 		Model(&tables.TableAllowedModelConfig{}).
-		Where("provider = ?", provider).
+		Where("provider_id = ?", providerID).
 		Order("id ASC").
 		Pluck("id", &providerConfigIDs).Error; err != nil {
 		return err
@@ -858,7 +874,7 @@ func (s *RDBConfigStore) UpdateProvider(ctx context.Context, provider schemas.Mo
 	// Without this pre-lock the two paths invert on config_keys vs. VKPC and deadlock (40P01).
 	var providerVKPCs []tables.TableAllowedModelConfig
 	if err := dbForUpdate(txDB.WithContext(ctx)).
-		Where("provider = ?", dbProvider.Name).
+		Where("provider_id = ?", dbProvider.ID).
 		Order("id ASC").
 		Find(&providerVKPCs).Error; err != nil {
 		return err
@@ -1115,7 +1131,7 @@ func (s *RDBConfigStore) DeleteProvider(ctx context.Context, provider schemas.Mo
 		return err
 	}
 
-	if err := s.cleanupAllowedModelConfigsForDeletedProvider(ctx, txDB, dbProvider.Name); err != nil {
+	if err := s.cleanupAllowedModelConfigsForDeletedProvider(ctx, txDB, dbProvider.ID); err != nil {
 		return err
 	}
 
@@ -2185,12 +2201,15 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 		Preload("Budgets", active("governance_budgets")).
 		Preload("RateLimits", active("governance_rate_limits")).
 		Preload("AllowedModelConfigs", active("governance_virtual_key_provider_configs")).
+		Preload("AllowedModelConfigs.ConfigProvider").
+		Preload("AllowedModelConfigs.AllowedModel").
+		Preload("AllowedModelConfigs.BlacklistedModel").
 		Preload("AllowedModelConfigs.Budgets", active("governance_budgets")).
 		Preload("AllowedModelConfigs.RateLimits", active("governance_rate_limits")).
 		Preload("AllowedModelConfigs.Keys", func(db *gorm.DB) *gorm.DB {
 			return db.Table("config_keys").
 				Where("config_keys.deleted = ?", false).
-				Joins("JOIN governance_virtual_key_provider_config_keys j ON j.table_key_id = config_keys.id AND j.deleted = ?", false).
+				Joins("JOIN governance_virtual_key_provider_config_keys j ON j.table_key_id = config_keys.id AND j.table_virtual_key_provider_config_id = governance_virtual_key_provider_configs.id AND j.deleted = ?", false).
 				Select("config_keys.id, config_keys.name, config_keys.key_id, config_keys.models_json, config_keys.provider_id")
 		}).
 		Preload("MCPConfigs", active("governance_virtual_key_mcp_configs")).
@@ -2211,6 +2230,9 @@ func (s *RDBConfigStore) GetVirtualKeys(ctx context.Context) ([]tables.TableVirt
 		Order("created_at ASC").
 		Find(&virtualKeys).Error; err != nil {
 		return nil, err
+	}
+	for i := range virtualKeys {
+		virtualKeys[i].AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKeys[i].AllowedModelConfigs)
 	}
 	return virtualKeys, nil
 }
@@ -2300,6 +2322,9 @@ func (s *RDBConfigStore) GetVirtualKeysPaginated(ctx context.Context, params Vir
 		Find(&virtualKeys).Error; err != nil {
 		return nil, 0, err
 	}
+	for i := range virtualKeys {
+		virtualKeys[i].AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKeys[i].AllowedModelConfigs)
+	}
 	return virtualKeys, totalCount, nil
 }
 
@@ -2319,6 +2344,7 @@ func (s *RDBConfigStore) GetVirtualKey(ctx context.Context, id string) (*tables.
 		}
 		return nil, err
 	}
+	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
 	return &virtualKey, nil
 }
 
@@ -2341,6 +2367,7 @@ func (s *RDBConfigStore) GetVirtualKeyByValue(ctx context.Context, value string)
 			return nil, err
 		}
 	}
+	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
 	return &virtualKey, nil
 }
 
@@ -2353,6 +2380,9 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 		Preload("Budgets").
 		Preload("RateLimits").
 		Preload("AllowedModelConfigs").
+		Preload("AllowedModelConfigs.ConfigProvider").
+		Preload("AllowedModelConfigs.AllowedModel").
+		Preload("AllowedModelConfigs.BlacklistedModel").
 		Preload("AllowedModelConfigs.Budgets").
 		Preload("AllowedModelConfigs.RateLimits")
 	if err := baseQuery.Session(&gorm.Session{}).Where("value_hash = ?", valueHash).First(&virtualKey).Error; err != nil {
@@ -2368,6 +2398,7 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 			return nil, err
 		}
 	}
+	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
 	return &virtualKey, nil
 }
 
@@ -2468,9 +2499,13 @@ func (s *RDBConfigStore) resolveAllowedModelConfigKeys(
 		return keysToAssociate, nil
 	}
 
-	providerID, err := s.getProviderIDByName(ctx, txDB, allowedModelConfig.Provider)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve provider %q: %w", allowedModelConfig.Provider, err)
+	providerID := allowedModelConfig.ProviderID
+	if providerID == "" {
+		var err error
+		providerID, err = s.getProviderIDByName(ctx, txDB, allowedModelConfig.Provider)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve provider %q: %w", allowedModelConfig.Provider, err)
+		}
 	}
 
 	resolvedKeys := make([]tables.TableKey, 0, len(keysToAssociate))
@@ -2630,10 +2665,15 @@ func (s *RDBConfigStore) GetAllowedModelConfigs(ctx context.Context, virtualKeyI
 		return nil, nil
 	}
 	var providerConfigs []tables.TableAllowedModelConfig
-	if err := GovernanceActive(s.DB().WithContext(ctx)).Where("virtual_key_id = ?", virtualKey.ID).Find(&providerConfigs).Error; err != nil {
+	if err := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id = ?", virtualKey.ID).
+		Preload("ConfigProvider").
+		Preload("AllowedModel").
+		Preload("BlacklistedModel").
+		Find(&providerConfigs).Error; err != nil {
 		return nil, err
 	}
-	return providerConfigs, nil
+	return AggregateAllowedModelConfigs(providerConfigs), nil
 }
 
 // GetOrgAllowedModelConfigs returns allowed model configs scoped to specific orgs
@@ -2641,14 +2681,18 @@ func (s *RDBConfigStore) GetAllowedModelConfigs(ctx context.Context, virtualKeyI
 // When orgIDs is nil or empty all org-level configs are returned (used during full reload).
 func (s *RDBConfigStore) GetOrgAllowedModelConfigs(ctx context.Context, orgIDs []string) ([]tables.TableAllowedModelConfig, error) {
 	var configs []tables.TableAllowedModelConfig
-	q := GovernanceActive(s.DB().WithContext(ctx)).Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL")
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL").
+		Preload("ConfigProvider").
+		Preload("AllowedModel").
+		Preload("BlacklistedModel")
 	if len(orgIDs) > 0 {
 		q = q.Where("scope_org_id IN ?", orgIDs)
 	}
 	if err := q.Find(&configs).Error; err != nil {
 		return nil, err
 	}
-	return configs, nil
+	return AggregateAllowedModelConfigs(configs), nil
 }
 
 // CreateAllowedModelConfig creates a new allowed model config in the database.
@@ -2659,6 +2703,16 @@ func (s *RDBConfigStore) CreateAllowedModelConfig(ctx context.Context, allowedMo
 	} else {
 		txDB = s.DB()
 	}
+
+	// Resolve ProviderID from the virtual Provider name when not already set.
+	if allowedModelConfig.ProviderID == "" && allowedModelConfig.Provider != "" {
+		providerID, err := s.getProviderIDByName(ctx, txDB, allowedModelConfig.Provider)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q: %w", allowedModelConfig.Provider, err)
+		}
+		allowedModelConfig.ProviderID = providerID
+	}
+
 	// Store keys before create
 	keysToAssociate := allowedModelConfig.Keys
 
@@ -2672,6 +2726,8 @@ func (s *RDBConfigStore) CreateAllowedModelConfig(ctx context.Context, allowedMo
 		keysToAssociate = resolvedKeys
 	}
 	sortTableKeysByID(keysToAssociate)
+
+	allowedModelConfig.AllowAllKeys = len(keysToAssociate) == 0
 
 	// Clear Keys before Create to prevent GORM from auto-associating unresolved keys (with ID=0)
 	// We'll manually associate the resolved keys after Create
@@ -2703,6 +2759,16 @@ func (s *RDBConfigStore) UpdateAllowedModelConfig(ctx context.Context, allowedMo
 
 	var txDB *gorm.DB
 	txDB = tx[0]
+
+	// Resolve ProviderID from the virtual Provider name when not already set.
+	if allowedModelConfig.ProviderID == "" && allowedModelConfig.Provider != "" {
+		providerID, err := s.getProviderIDByName(ctx, txDB, allowedModelConfig.Provider)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q: %w", allowedModelConfig.Provider, err)
+		}
+		allowedModelConfig.ProviderID = providerID
+	}
+
 	if allowedModelConfig.ID != "" {
 		var existing tables.TableAllowedModelConfig
 		if err := dbForUpdate(txDB.WithContext(ctx)).First(&existing, "id = ?", allowedModelConfig.ID).Error; err != nil {
@@ -2727,6 +2793,8 @@ func (s *RDBConfigStore) UpdateAllowedModelConfig(ctx context.Context, allowedMo
 	}
 	sortTableKeysByID(keysToAssociate)
 
+	allowedModelConfig.AllowAllKeys = len(keysToAssociate) == 0
+
 	// Clear Keys before Save to prevent GORM from auto-associating unresolved keys (with ID=0)
 	// We'll manually manage the association after Save
 	allowedModelConfig.Keys = nil
@@ -2745,6 +2813,155 @@ func (s *RDBConfigStore) UpdateAllowedModelConfig(ctx context.Context, allowedMo
 		}
 	}
 	return nil
+}
+
+// getModelIDByName resolves a model name to its config_models.id for the given provider.
+func (s *RDBConfigStore) getModelIDByName(ctx context.Context, txDB *gorm.DB, providerID, modelName string) (string, error) {
+	var modelID string
+	if err := ActiveRows(txDB.WithContext(ctx)).
+		Model(&tables.TableModel{}).
+		Where("provider_id = ? AND name = ?", providerID, modelName).
+		Select("id").
+		Scan(&modelID).Error; err != nil {
+		return "", err
+	}
+	if modelID == "" {
+		return "", fmt.Errorf("model %q not found for provider %s", modelName, providerID)
+	}
+	return modelID, nil
+}
+
+// createModelRefRows inserts additional rows for per-model allow/block entries after a header row
+// has already been created. The header row carries weight/keys/budgets/rate-limits; these
+// model-ref rows carry only (scope, provider, model ID).
+func (s *RDBConfigStore) createModelRefRows(
+	ctx context.Context,
+	txDB *gorm.DB,
+	header *tables.TableAllowedModelConfig,
+) error {
+	newRow := func(modelID string, allow bool) tables.TableAllowedModelConfig {
+		row := tables.TableAllowedModelConfig{
+			VirtualKeyID: header.VirtualKeyID,
+			ScopeOrgID:   header.ScopeOrgID,
+			ProviderID:   header.ProviderID,
+			AllowAllKeys: true,
+		}
+		EnsureGovernanceRowID(&row.ID)
+		ApplyAuditOnCreate(ctx, &row.SystemColumns)
+		if allow {
+			row.AllowedModelID = &modelID
+		} else {
+			row.BlacklistedModelID = &modelID
+		}
+		return row
+	}
+
+	for _, modelName := range header.AllowedModels {
+		if modelName == "*" {
+			continue
+		}
+		modelID, err := s.getModelIDByName(ctx, txDB, header.ProviderID, modelName)
+		if err != nil {
+			return fmt.Errorf("allowed_models: %w", err)
+		}
+		row := newRow(modelID, true)
+		if err := txDB.WithContext(ctx).Create(&row).Error; err != nil {
+			return s.parseGormError(err)
+		}
+	}
+
+	for _, modelName := range header.BlacklistedModels {
+		if modelName == "*" {
+			continue
+		}
+		modelID, err := s.getModelIDByName(ctx, txDB, header.ProviderID, modelName)
+		if err != nil {
+			return fmt.Errorf("blacklisted_models: %w", err)
+		}
+		row := newRow(modelID, false)
+		if err := txDB.WithContext(ctx).Create(&row).Error; err != nil {
+			return s.parseGormError(err)
+		}
+	}
+
+	return nil
+}
+
+// deleteModelRefRows soft-deletes all model-specific rows (AllowedModelID or BlacklistedModelID
+// non-null) for the given (VirtualKeyID|ScopeOrgID, ProviderID) scope inside txDB.
+func (s *RDBConfigStore) deleteModelRefRows(ctx context.Context, txDB *gorm.DB, header *tables.TableAllowedModelConfig) error {
+	q := GovernanceActive(txDB.WithContext(ctx)).
+		Model(&tables.TableAllowedModelConfig{}).
+		Where("provider_id = ? AND (allowed_model_id IS NOT NULL OR blacklisted_model_id IS NOT NULL)", header.ProviderID)
+
+	if header.VirtualKeyID != nil {
+		q = q.Where("virtual_key_id = ?", *header.VirtualKeyID)
+	} else if header.ScopeOrgID != nil {
+		q = q.Where("scope_org_id = ?", *header.ScopeOrgID)
+	}
+
+	if err := q.Update("deleted", true).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+// CreateAllowedModelConfigExpanded creates a header row (nil model IDs) carrying weight/keys/budgets
+// plus one additional row per entry in AllowedModels/BlacklistedModels virtual lists.
+// Use this instead of CreateAllowedModelConfig when the caller has populated the virtual lists.
+func (s *RDBConfigStore) CreateAllowedModelConfigExpanded(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
+	if len(tx) == 0 {
+		return s.DB().WithContext(ctx).Transaction(func(t *gorm.DB) error {
+			return s.CreateAllowedModelConfigExpanded(ctx, pc, t)
+		})
+	}
+	txDB := tx[0]
+	// Resolve ProviderID first so model-ref rows can use it.
+	if pc.ProviderID == "" && pc.Provider != "" {
+		providerID, err := s.getProviderIDByName(ctx, txDB, pc.Provider)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q: %w", pc.Provider, err)
+		}
+		pc.ProviderID = providerID
+	}
+	// Clear model IDs on the header row — it must not carry individual model refs.
+	pc.AllowedModelID = nil
+	pc.BlacklistedModelID = nil
+	if err := s.CreateAllowedModelConfig(ctx, pc, txDB); err != nil {
+		return err
+	}
+	return s.createModelRefRows(ctx, txDB, pc)
+}
+
+// ReplaceAllowedModelConfigRows updates the header row (by ID) and replaces all model-ref rows
+// for its scope. Use this for HTTP handler updates where the caller supplies the full new state.
+func (s *RDBConfigStore) ReplaceAllowedModelConfigRows(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
+	if len(tx) == 0 {
+		return s.DB().WithContext(ctx).Transaction(func(t *gorm.DB) error {
+			return s.ReplaceAllowedModelConfigRows(ctx, pc, t)
+		})
+	}
+	txDB := tx[0]
+	// Resolve ProviderID.
+	if pc.ProviderID == "" && pc.Provider != "" {
+		providerID, err := s.getProviderIDByName(ctx, txDB, pc.Provider)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q: %w", pc.Provider, err)
+		}
+		pc.ProviderID = providerID
+	}
+	// Delete stale model-ref rows for this scope.
+	if err := s.deleteModelRefRows(ctx, txDB, pc); err != nil {
+		return fmt.Errorf("failed to delete stale model-ref rows: %w", err)
+	}
+	// Update the header row (clear model ID fields to keep it a header).
+	pc.AllowedModelID = nil
+	pc.BlacklistedModelID = nil
+	if err := s.UpdateAllowedModelConfig(ctx, pc, txDB); err != nil {
+		return err
+	}
+	// Re-insert model-ref rows.
+	return s.createModelRefRows(ctx, txDB, pc)
 }
 
 // DeleteAllowedModelConfig soft-deletes a virtual key provider config from the database.

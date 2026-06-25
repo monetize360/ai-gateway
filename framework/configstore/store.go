@@ -157,6 +157,10 @@ type ConfigStore interface {
 	CreateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 	UpdateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 	DeleteAllowedModelConfig(ctx context.Context, id string, tx ...*gorm.DB) error
+	// CreateAllowedModelConfigExpanded creates a header row plus per-model rows from virtual AllowedModels/BlacklistedModels lists.
+	CreateAllowedModelConfigExpanded(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
+	// ReplaceAllowedModelConfigRows updates the header row and replaces all model-ref rows for its scope.
+	ReplaceAllowedModelConfigRows(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 
 	// Virtual key MCP config CRUD
 	GetVirtualKeyMCPConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyMCPConfig, error)

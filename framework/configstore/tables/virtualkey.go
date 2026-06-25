@@ -25,22 +25,51 @@ func (TableAllowedModelConfigKey) TableName() string {
 	return "governance_virtual_key_provider_config_keys"
 }
 
-// TableAllowedModelConfig represents a per-provider model allow/block configuration
-// scoped to a virtual key (VirtualKeyID set) or an organization (ScopeOrgID set).
+// TableAllowedModelConfig is a granular per-provider access rule scoped to a virtual key
+// (VirtualKeyID set) or an organisation (ScopeOrgID set).
+//
+// Each row carries at most one model reference:
+//   - AllowedModelID non-nil  → the named model is explicitly allowed.
+//   - BlacklistedModelID non-nil → the named model is explicitly blocked.
+//   - Both nil                → "header" row carrying weight / keys / budget / rate-limit.
+//
+// Multiple rows sharing the same (VirtualKeyID|ScopeOrgID, ProviderID) scope are
+// aggregated by AggregateAllowedModelConfigs into a single synthetic entry with
+// AllowedModels / BlacklistedModels virtual lists ready for the governance resolver.
 type TableAllowedModelConfig struct {
 	ID           string  `gorm:"primaryKey;type:uuid" json:"id"`
 	VirtualKeyID *string `gorm:"type:uuid" json:"virtual_key_id,omitempty"`
 	ScopeOrgID   *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
-	Provider     string  `gorm:"type:varchar(50);not null" json:"provider"`
-	Weight       *float64          `json:"weight"`
-	AllowedModels     schemas.WhiteList `gorm:"type:text;serializer:json" json:"allowed_models"`
-	BlacklistedModels schemas.BlackList `gorm:"type:text;serializer:json" json:"blacklisted_models"`
-	AllowAllKeys      bool              `gorm:"default:false" json:"allow_all_keys"`
+
+	// ProviderID is the FK to config_providers; populated automatically by
+	// CreateAllowedModelConfig / UpdateAllowedModelConfig from the Provider name.
+	ProviderID     string         `gorm:"type:uuid;not null;column:provider_id" json:"provider_id"`
+	// Provider is a virtual runtime field (not stored); populated from ConfigProvider.Name by AfterFind.
+	// Set this before calling Create/Update when ProviderID is unknown.
+	Provider       string         `gorm:"-" json:"provider"`
+	ConfigProvider *TableProvider `gorm:"foreignKey:ProviderID;references:ID" json:"-"`
+
+	// AllowedModelID is the FK to config_models for an explicit allow rule (nullable).
+	AllowedModelID     *string    `gorm:"type:uuid;column:allowed_model_id" json:"allowed_model_id,omitempty"`
+	AllowedModel       *TableModel `gorm:"foreignKey:AllowedModelID;references:ID" json:"-"`
+
+	// BlacklistedModelID is the FK to config_models for an explicit block rule (nullable).
+	BlacklistedModelID *string    `gorm:"type:uuid;column:blacklisted_model_id" json:"blacklisted_model_id,omitempty"`
+	BlacklistedModel   *TableModel `gorm:"foreignKey:BlacklistedModelID;references:ID" json:"-"`
+
+	// AllowedModels and BlacklistedModels are virtual runtime lists, NOT stored in DB.
+	// They are populated by AggregateAllowedModelConfigs after loading raw rows.
+	// When accepting config.json / API payloads, these fields drive row expansion.
+	AllowedModels     schemas.WhiteList `gorm:"-" json:"allowed_models"`
+	BlacklistedModels schemas.BlackList `gorm:"-" json:"blacklisted_models"`
+
+	Weight       *float64 `json:"weight"`
+	AllowAllKeys bool     `gorm:"default:true" json:"allow_all_keys"`
 
 	// Relationships — budget/rate limit FK columns live on child rows
 	RateLimits []TableRateLimit `gorm:"foreignKey:ProviderConfigID;references:ID" json:"rate_limits,omitempty"`
 	Budgets    []TableBudget    `gorm:"foreignKey:ProviderConfigID;constraint:OnDelete:CASCADE" json:"budgets,omitempty"`
-	Keys       []TableKey       `gorm:"many2many:governance_virtual_key_provider_config_keys;constraint:OnDelete:CASCADE" json:"keys"`
+	Keys       []TableKey       `gorm:"many2many:governance_virtual_key_provider_config_keys;joinForeignKey:table_virtual_key_provider_config_id;joinReferences:table_key_id;constraint:OnDelete:CASCADE" json:"keys"`
 
 	SystemColumns
 }
@@ -50,12 +79,17 @@ func (TableAllowedModelConfig) TableName() string {
 	return "governance_virtual_key_provider_configs"
 }
 
-// UnmarshalJSON custom unmarshaller to handle "key_ids" ([]string) config-file format
+// UnmarshalJSON accepts the config-file format which may specify:
+//   - "key_ids" ([]string) — resolved to Keys / AllowAllKeys at persist time.
+//   - "allowed_models" / "blacklisted_models" ([]string) — stored as virtual list fields;
+//     the write path expands them into individual DB rows via expandAllowedModelConfigToRows.
 func (pc *TableAllowedModelConfig) UnmarshalJSON(data []byte) error {
 	type Alias TableAllowedModelConfig
 	type TempProviderConfig struct {
 		Alias
-		KeyIDs []string `json:"key_ids"` // Config file format: key identifiers (TableKey.KeyID); use ["*"] to allow all keys, empty denies all
+		KeyIDs            []string `json:"key_ids"`            // use ["*"] to allow all keys
+		AllowedModels     []string `json:"allowed_models"`     // list-based compat; expanded on persist
+		BlacklistedModels []string `json:"blacklisted_models"` // list-based compat; expanded on persist
 	}
 
 	var temp TempProviderConfig
@@ -63,12 +97,18 @@ func (pc *TableAllowedModelConfig) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Copy all standard fields
 	*pc = TableAllowedModelConfig(temp.Alias)
+
+	// Preserve list-based model fields in virtual slots for the write path to expand.
+	if len(temp.AllowedModels) > 0 {
+		pc.AllowedModels = temp.AllowedModels
+	}
+	if len(temp.BlacklistedModels) > 0 {
+		pc.BlacklistedModels = temp.BlacklistedModels
+	}
 
 	// If key_ids is provided, convert to Keys or set AllowAllKeys
 	if len(temp.KeyIDs) > 0 && len(pc.Keys) == 0 {
-		// ["*"] means allow all keys
 		if len(temp.KeyIDs) == 1 && temp.KeyIDs[0] == "*" {
 			pc.AllowAllKeys = true
 			pc.Keys = nil
@@ -79,19 +119,15 @@ func (pc *TableAllowedModelConfig) UnmarshalJSON(data []byte) error {
 				pc.Keys[i] = TableKey{KeyID: keyID}
 			}
 		}
+	} else if len(pc.Keys) == 0 {
+		pc.AllowAllKeys = true
 	}
 
 	return nil
 }
 
-// BeforeSave validates scope association and list fields before GORM persists the record.
+// BeforeSave validates scope association and single-model-ref constraint before persisting.
 func (pc *TableAllowedModelConfig) BeforeSave(tx *gorm.DB) error {
-	if err := pc.AllowedModels.Validate(); err != nil {
-		return fmt.Errorf("invalid allowed_models: %w", err)
-	}
-	if err := pc.BlacklistedModels.Validate(); err != nil {
-		return fmt.Errorf("invalid blacklisted_models: %w", err)
-	}
 	vkSet := isNonEmptyString(pc.VirtualKeyID)
 	orgSet := isNonEmptyString(pc.ScopeOrgID)
 	if vkSet && orgSet {
@@ -100,14 +136,19 @@ func (pc *TableAllowedModelConfig) BeforeSave(tx *gorm.DB) error {
 	if !vkSet && !orgSet {
 		return fmt.Errorf("either virtual_key_id or scope_org_id must be set")
 	}
+	if pc.ProviderID == "" {
+		return fmt.Errorf("provider_id must be set (resolve via Provider name before saving)")
+	}
+	if pc.AllowedModelID != nil && pc.BlacklistedModelID != nil {
+		return fmt.Errorf("allowed_model_id and blacklisted_model_id are mutually exclusive per row")
+	}
 	return nil
 }
 
-// MarshalJSON custom marshaller to ensure AllowedModels and BlacklistedModels are always arrays (never null)
+// MarshalJSON emits the virtual AllowedModels / BlacklistedModels lists as non-null arrays.
 func (pc TableAllowedModelConfig) MarshalJSON() ([]byte, error) {
 	type Alias TableAllowedModelConfig
 
-	// Ensure arrays are empty slices instead of nil
 	allowedModels := pc.AllowedModels
 	if allowedModels == nil {
 		allowedModels = []string{}
@@ -128,8 +169,20 @@ func (pc TableAllowedModelConfig) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// AfterFind hook for TableAllowedModelConfig to clear sensitive data from associated keys
+// AfterFind populates virtual fields and clears sensitive key data.
 func (pc *TableAllowedModelConfig) AfterFind(tx *gorm.DB) error {
+	if pc.ConfigProvider != nil {
+		pc.Provider = pc.ConfigProvider.Name
+	}
+	// Hydrate virtual model name fields from preloaded relations so individual rows
+	// reflect their model ref; the runtime lists (AllowedModels/BlacklistedModels) are
+	// populated later by AggregateAllowedModelConfigs across all rows for the same scope.
+	if pc.AllowedModel != nil {
+		pc.AllowedModels = schemas.WhiteList{pc.AllowedModel.Name}
+	}
+	if pc.BlacklistedModel != nil {
+		pc.BlacklistedModels = schemas.BlackList{pc.BlacklistedModel.Name}
+	}
 	if pc.Keys != nil {
 		// Clear sensitive data from associated keys, keeping only key IDs and non-sensitive metadata
 		for i := range pc.Keys {

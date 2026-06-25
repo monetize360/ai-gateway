@@ -57,6 +57,10 @@ type LocalGovernanceStore struct {
 	// Incremental DB refresh watermark (UTC). Zero until the first full load completes.
 	refreshMu     sync.Mutex
 	lastRefreshAt time.Time
+
+	// Org-level allowed model configs indexed by scope_org_id for VK attachment.
+	orgConfigsMu      sync.RWMutex
+	orgConfigsByOrgID map[string][]configstoreTables.TableAllowedModelConfig
 }
 
 type GovernanceData struct {
@@ -1709,6 +1713,12 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 	for i := range delta.RoutingRules {
 		_ = gs.UpdateRoutingRuleInMemory(ctx, &delta.RoutingRules[i])
 	}
+
+	if delta.ReloadOrgAllowedModelConfigs {
+		if err := gs.reloadOrgAllowedModelConfigs(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload org allowed model configs: %v", err)
+		}
+	}
 }
 
 // loadFromConfigMemory loads all governance data from the config's memory into store's memory
@@ -1781,38 +1791,16 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	}
 
 	// Index org-level allowed model configs by scope_org_id for fast VK attachment.
-	orgConfigsByOrgID := make(map[string][]configstoreTables.TableAllowedModelConfig)
-	for i := range orgAllowedModelConfigs {
-		c := &orgAllowedModelConfigs[i]
-		if c.ScopeOrgID == nil || *c.ScopeOrgID == "" {
-			continue
-		}
-		orgConfigsByOrgID[*c.ScopeOrgID] = append(orgConfigsByOrgID[*c.ScopeOrgID], *c)
-	}
+	orgConfigsByOrgID := buildOrgConfigsByOrgID(orgAllowedModelConfigs)
+	gs.orgConfigsMu.Lock()
+	gs.orgConfigsByOrgID = orgConfigsByOrgID
+	gs.orgConfigsMu.Unlock()
 
 	// Build virtual keys map and track active VKs.
 	// For each VK, collect org-level configs from its governance scope org and all ancestors.
 	for i := range virtualKeys {
 		vk := &virtualKeys[i]
-		vk.OrgAllowedModelConfigs = nil
-		if len(orgConfigsByOrgID) > 0 {
-			scopeOrgID := vk.GovernanceScopeOrgIDString()
-			if scopeOrgID != "" {
-				ancestorIDs := gs.CollectOrgAncestorIDs(scopeOrgID)
-				// Include the VK's own scope org plus all its ancestors.
-				allOrgIDs := append([]string{scopeOrgID}, ancestorIDs...)
-				seen := make(map[string]bool)
-				for _, orgID := range allOrgIDs {
-					for _, cfg := range orgConfigsByOrgID[orgID] {
-						key := cfg.Provider + ":" + orgID
-						if !seen[key] {
-							seen[key] = true
-							vk.OrgAllowedModelConfigs = append(vk.OrgAllowedModelConfigs, cfg)
-						}
-					}
-				}
-			}
-		}
+		gs.attachOrgConfigsToVK(vk, orgConfigsByOrgID)
 		gs.storeVirtualKey(vk)
 	}
 
@@ -2087,7 +2075,83 @@ func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk
 		}
 	}
 
+	gs.attachOrgConfigsToVK(vk)
 	gs.storeVirtualKey(vk)
+}
+
+// buildOrgConfigsByOrgID indexes aggregated org-scoped provider configs by scope_org_id.
+func buildOrgConfigsByOrgID(configs []configstoreTables.TableAllowedModelConfig) map[string][]configstoreTables.TableAllowedModelConfig {
+	orgConfigsByOrgID := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	for i := range configs {
+		c := &configs[i]
+		if c.ScopeOrgID == nil || *c.ScopeOrgID == "" {
+			continue
+		}
+		orgConfigsByOrgID[*c.ScopeOrgID] = append(orgConfigsByOrgID[*c.ScopeOrgID], *c)
+	}
+	return orgConfigsByOrgID
+}
+
+// attachOrgConfigsToVK attaches org-level allowed model configs from the indexed map
+// based on the VK's governance scope org and its ancestors.
+func (gs *LocalGovernanceStore) attachOrgConfigsToVK(vk *configstoreTables.TableVirtualKey, orgConfigsByOrgID ...map[string][]configstoreTables.TableAllowedModelConfig) {
+	if vk == nil {
+		return
+	}
+	var index map[string][]configstoreTables.TableAllowedModelConfig
+	if len(orgConfigsByOrgID) > 0 && orgConfigsByOrgID[0] != nil {
+		index = orgConfigsByOrgID[0]
+	} else {
+		gs.orgConfigsMu.RLock()
+		index = gs.orgConfigsByOrgID
+		gs.orgConfigsMu.RUnlock()
+	}
+	vk.OrgAllowedModelConfigs = nil
+	if len(index) == 0 {
+		return
+	}
+	scopeOrgID := vk.GovernanceScopeOrgIDString()
+	if scopeOrgID == "" {
+		return
+	}
+	ancestorIDs := gs.CollectOrgAncestorIDs(scopeOrgID)
+	allOrgIDs := append([]string{scopeOrgID}, ancestorIDs...)
+	seen := make(map[string]bool)
+	for _, orgID := range allOrgIDs {
+		for _, cfg := range index[orgID] {
+			key := cfg.Provider + ":" + orgID
+			if !seen[key] {
+				seen[key] = true
+				vk.OrgAllowedModelConfigs = append(vk.OrgAllowedModelConfigs, cfg)
+			}
+		}
+	}
+}
+
+func (gs *LocalGovernanceStore) reloadOrgAllowedModelConfigs(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	configs, err := gs.configStore.GetOrgAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return err
+	}
+	orgConfigsByOrgID := buildOrgConfigsByOrgID(configs)
+	gs.orgConfigsMu.Lock()
+	gs.orgConfigsByOrgID = orgConfigsByOrgID
+	gs.orgConfigsMu.Unlock()
+
+	gs.virtualKeys.Range(func(_, value interface{}) bool {
+		vk, ok := value.(*configstoreTables.TableVirtualKey)
+		if !ok || vk == nil {
+			return true
+		}
+		clone := *vk
+		gs.attachOrgConfigsToVK(&clone, orgConfigsByOrgID)
+		gs.virtualKeys.Store(vk.ID, &clone)
+		return true
+	})
+	return nil
 }
 
 // UpdateVirtualKeyInMemory updates an existing virtual key in the in-memory store (lock-free)
@@ -2236,8 +2300,10 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 				}
 			}
 		}
+		gs.attachOrgConfigsToVK(&clone)
 		gs.storeVirtualKey(&clone)
 	} else {
+		gs.attachOrgConfigsToVK(vk)
 		gs.CreateVirtualKeyInMemory(ctx, vk)
 	}
 }

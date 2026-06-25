@@ -2002,13 +2002,13 @@ func updateGovernanceConfigInStore(
 			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
 				return fmt.Errorf("failed to create virtual key %s: %w", virtualKey.ID, err)
 			}
-			for j := range providerConfigs {
-				vkID := virtualKey.ID
-				providerConfigs[j].VirtualKeyID = &vkID
-				if err := config.StoreFromContext(ctx).CreateAllowedModelConfig(ctx, &providerConfigs[j], tx); err != nil {
-					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
-				}
+		for j := range providerConfigs {
+			vkID := virtualKey.ID
+			providerConfigs[j].VirtualKeyID = &vkID
+			if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &providerConfigs[j], tx); err != nil {
+				return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 			}
+		}
 			for j := range mcpConfigs {
 				mcpConfigs[j].VirtualKeyID = virtualKey.ID
 				if err := config.StoreFromContext(ctx).CreateVirtualKeyMCPConfig(ctx, &mcpConfigs[j], tx); err != nil {
@@ -2533,15 +2533,15 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			}
 			logger.Debug("created virtual key %s successfully", virtualKey.ID)
 
-			for _, pc := range providerConfigs {
-				vkID := virtualKey.ID
-				pc.VirtualKeyID = &vkID
-				logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
-				if err := config.StoreFromContext(ctx).CreateAllowedModelConfig(ctx, &pc, tx); err != nil {
-					logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
-					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
-				}
+		for _, pc := range providerConfigs {
+			vkID := virtualKey.ID
+			pc.VirtualKeyID = &vkID
+			logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
+			if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &pc, tx); err != nil {
+				logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
+				return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
 			}
+		}
 
 			// Resolve MCP client names to IDs for config file mcp_configs
 			mcpConfigs = resolveMCPConfigClientIDs(ctx, config.StoreFromContext(ctx), mcpConfigs, virtualKey.ID)
@@ -3077,17 +3077,19 @@ func reconcileVirtualKeyAllowedModelConfigs(
 		newProviderSet[newPC.Provider] = true
 		newPC.VirtualKeyID = &vkID
 		if existing, found := existingByProvider[newPC.Provider]; found {
-			// Update existing provider config from file
+			// Update existing header row and replace model-ref rows for this provider.
 			existing.Weight = newPC.Weight
 			existing.AllowedModels = newPC.AllowedModels
+			existing.BlacklistedModels = newPC.BlacklistedModels
 			existing.RateLimits = newPC.RateLimits
+			existing.AllowAllKeys = newPC.AllowAllKeys
 			existing.Keys = newPC.Keys
-			if err := store.UpdateAllowedModelConfig(ctx, &existing, tx); err != nil {
+			if err := store.ReplaceAllowedModelConfigRows(ctx, &existing, tx); err != nil {
 				return fmt.Errorf("failed to update provider config for %s: %w", newPC.Provider, err)
 			}
 		} else {
-			// Create new provider config from file
-			if err := store.CreateAllowedModelConfig(ctx, &newPC, tx); err != nil {
+			// Create header + model-ref rows for new provider config from file.
+			if err := store.CreateAllowedModelConfigExpanded(ctx, &newPC, tx); err != nil {
 				return fmt.Errorf("failed to create provider config for %s: %w", newPC.Provider, err)
 			}
 		}
