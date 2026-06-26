@@ -50,9 +50,11 @@ type TableRoutingRule struct {
 	// Execution
 	Priority int `gorm:"type:int;not null;default:0;index" json:"priority"` // Lower = evaluated first within scope
 
-	// Timestamps
+	// Timestamps and soft-delete (MPilot auditEnabled=true adds these columns via Liquibase;
+	// GORM AutoMigrate adds them for standalone Bifrost).
 	CreatedAt time.Time `gorm:"index;not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`
+	Deleted   bool      `gorm:"not null;default:false;index" json:"-"`
 }
 
 // TableName for TableRoutingRule

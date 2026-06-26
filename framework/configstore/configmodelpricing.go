@@ -69,6 +69,23 @@ func (idx *ConfigModelPricingIndex) CalculateTokenCost(provider, resolvedModel, 
 	return 0
 }
 
+// LookupCurrencyID returns the config_models.currency UUID for the given provider+model pair.
+// It tries resolvedModel then aliasModel, returning empty string when not found.
+func (idx *ConfigModelPricingIndex) LookupCurrencyID(provider, resolvedModel, aliasModel string) string {
+	if idx == nil {
+		return ""
+	}
+	for _, model := range []string{resolvedModel, aliasModel} {
+		if model == "" {
+			continue
+		}
+		if cm, ok := idx.byKey[configModelPricingKey(provider, model)]; ok && cm != nil && cm.CurrencyID != nil && *cm.CurrencyID != "" {
+			return *cm.CurrencyID
+		}
+	}
+	return ""
+}
+
 func (idx *ConfigModelPricingIndex) calculateForModel(provider, model string, promptTokens, completionTokens int) float64 {
 	if idx == nil {
 		return 0

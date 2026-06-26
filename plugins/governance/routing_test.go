@@ -2,6 +2,7 @@ package governance
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -198,20 +199,27 @@ func TestEvaluateRoutingRules_NilContext(t *testing.T) {
 func TestEvaluateRoutingRules_NoRulesMatch(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
 	require.NoError(t, err)
+	sourceProviderID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	sourceModelID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	store.providers.Store("openai", &configstoreTables.TableProvider{ID: sourceProviderID, Name: "openai"})
+	store.configModels.Store("openai:gpt-4o", &configstoreTables.TableModel{ID: sourceModelID, Name: "gpt-4o"})
 
 	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
 	require.NoError(t, err)
 
-	ctx := &RoutingContext{
+	routingCtx := &RoutingContext{
 		Provider:    schemas.OpenAI,
 		Model:       "gpt-4o",
 		Headers:     map[string]string{},
 		QueryParams: map[string]string{},
 	}
 
-	decision, err := engine.EvaluateRoutingRules(schemas.NewBifrostContext(context.Background(), time.Now()), ctx)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+	decision, err := engine.EvaluateRoutingRules(bgCtx, routingCtx)
 	assert.NoError(t, err)
 	assert.Nil(t, decision)
+	assert.Equal(t, sourceProviderID, bgCtx.Value(schemas.BifrostContextKeyGovernanceRoutingSourceProviderID))
+	assert.Equal(t, sourceModelID, bgCtx.Value(schemas.BifrostContextKeyGovernanceRoutingSourceModelID))
 }
 
 // TestEvaluateRoutingRules_GlobalRuleMatches tests global scope rule matching
@@ -1696,6 +1704,43 @@ func TestNormalizeMapKeysInCEL(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestStampRoutingQueryParamContext_MultipleKeys(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	variables := map[string]any{
+		"params": map[string]string{
+			"region": "us-east-1",
+			"env":    "prod",
+		},
+	}
+	stampRoutingQueryParamContext(ctx, `params["region"] == "us-east-1" && params["env"] == "prod"`, variables)
+	raw, ok := ctx.Value(schemas.BifrostContextKeyGovernanceRoutingQueryParams).(string)
+	require.True(t, ok)
+	require.NotEmpty(t, raw)
+	var parsed map[string]string
+	require.NoError(t, json.Unmarshal([]byte(raw), &parsed))
+	assert.Equal(t, "us-east-1", parsed["region"])
+	assert.Equal(t, "prod", parsed["env"])
+}
+
+func TestStampRoutingSourceModelIDsContext(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	sourceProviderID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	sourceModelID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	store.providers.Store("openai", &configstoreTables.TableProvider{ID: sourceProviderID, Name: "openai"})
+	store.configModels.Store("openai:gpt-4o", &configstoreTables.TableModel{ID: sourceModelID, Name: "gpt-4o"})
+	engine, err := NewRoutingEngine(store, NewMockLogger(), bifrost.Ptr(10))
+	require.NoError(t, err)
+	routingCtx := &RoutingContext{
+		Provider: schemas.ModelProvider("openai"),
+		Model:    "gpt-4o",
+	}
+	engine.stampRoutingSourceModelIDsContext(ctx, routingCtx)
+	assert.Equal(t, sourceProviderID, ctx.Value(schemas.BifrostContextKeyGovernanceRoutingSourceProviderID))
+	assert.Equal(t, sourceModelID, ctx.Value(schemas.BifrostContextKeyGovernanceRoutingSourceModelID))
 }
 
 // resolveRoutingWithFallback evaluates routing rules and returns decision with fallback chain

@@ -35,6 +35,34 @@ func NormalizeMapKeysInCEL(expr string) string {
 	return expr
 }
 
+// ExtractParamKeysFromCEL returns lowercase query-parameter keys referenced in a routing CEL expression.
+func ExtractParamKeysFromCEL(expr string) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	addKey := func(k string) {
+		k = strings.ToLower(strings.TrimSpace(k))
+		if k == "" {
+			return
+		}
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	for _, m := range paramKeyPattern.FindAllStringSubmatch(expr, -1) {
+		if len(m) > 1 {
+			addKey(m[1])
+		}
+	}
+	for _, m := range paramInPattern.FindAllStringSubmatch(expr, -1) {
+		if len(m) > 1 {
+			addKey(m[1])
+		}
+	}
+	return keys
+}
+
 // validateCELExpression performs basic validation on CEL expression format
 func ValidateCELExpression(expr string) error {
 	normalized := strings.TrimSpace(expr)

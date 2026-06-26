@@ -28,15 +28,16 @@ func isUniqueConstraintError(err error) bool {
 func (s *RDBConfigStore) GetFolders(ctx context.Context) ([]tables.TableFolder, error) {
 	var folders []tables.TableFolder
 	if err := s.DB().WithContext(ctx).
+		Where("deleted = ?", false).
 		Order("created_at DESC").
 		Find(&folders).Error; err != nil {
 		return nil, err
 	}
 
-	// Get prompts count for each folder
+	// Get prompts count for each folder (exclude soft-deleted prompts)
 	for i := range folders {
 		var count int64
-		if err := s.DB().WithContext(ctx).Model(&tables.TablePrompt{}).Where("folder_id = ?", folders[i].ID).Count(&count).Error; err != nil {
+		if err := s.DB().WithContext(ctx).Model(&tables.TablePrompt{}).Where("folder_id = ? AND deleted = ?", folders[i].ID, false).Count(&count).Error; err != nil {
 			return nil, err
 		}
 		folders[i].PromptsCount = int(count)
@@ -49,6 +50,7 @@ func (s *RDBConfigStore) GetFolders(ctx context.Context) ([]tables.TableFolder, 
 func (s *RDBConfigStore) GetFolderByID(ctx context.Context, id string) (*tables.TableFolder, error) {
 	var folder tables.TableFolder
 	if err := s.DB().WithContext(ctx).
+		Where("deleted = ?", false).
 		First(&folder, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -140,6 +142,7 @@ func (s *RDBConfigStore) GetPrompts(ctx context.Context, folderID *string) ([]ta
 	var prompts []tables.TablePrompt
 	query := s.ScopedDB(ctx).
 		Preload("Folder").
+		Where("prompts.deleted = ?", false).
 		Order("created_at DESC")
 
 	if folderID != nil {
@@ -150,12 +153,12 @@ func (s *RDBConfigStore) GetPrompts(ctx context.Context, folderID *string) ([]ta
 		return nil, err
 	}
 
-	// Get latest version for each prompt
+	// Get latest version for each prompt (exclude soft-deleted versions)
 	for i := range prompts {
 		var latestVersion tables.TablePromptVersion
 		if err := s.DB().WithContext(ctx).
-			Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
-			Where("prompt_id = ? AND is_latest = ?", prompts[i].ID, true).
+			Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
+			Where("prompt_id = ? AND is_latest = ? AND deleted = ?", prompts[i].ID, true, false).
 			First(&latestVersion).Error; err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, err
@@ -175,7 +178,7 @@ func (s *RDBConfigStore) GetPrompts(ctx context.Context, folderID *string) ([]ta
 // distinguish "hidden" from "absent".
 func (s *RDBConfigStore) GetPromptByID(ctx context.Context, id string) (*tables.TablePrompt, error) {
 	var prompt tables.TablePrompt
-	q := s.ScopedDB(ctx).Preload("Folder")
+	q := s.ScopedDB(ctx).Preload("Folder").Where("prompts.deleted = ?", false)
 	if err := q.First(&prompt, "prompts.id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -183,11 +186,11 @@ func (s *RDBConfigStore) GetPromptByID(ctx context.Context, id string) (*tables.
 		return nil, err
 	}
 
-	// Get latest version
+	// Get latest version (exclude soft-deleted versions)
 	var latestVersion tables.TablePromptVersion
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
-		Where("prompt_id = ? AND is_latest = ?", prompt.ID, true).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
+		Where("prompt_id = ? AND is_latest = ? AND deleted = ?", prompt.ID, true, false).
 		First(&latestVersion).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
@@ -268,10 +271,12 @@ func (s *RDBConfigStore) DeletePrompt(ctx context.Context, id string) error {
 // ============================================================================
 
 // GetAllPromptVersions returns every version across all prompts in a single query.
+// Soft-deleted versions are excluded.
 func (s *RDBConfigStore) GetAllPromptVersions(ctx context.Context) ([]tables.TablePromptVersion, error) {
 	var versions []tables.TablePromptVersion
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
+		Where("deleted = ?", false).
 		Order("prompt_id ASC, version_number DESC").
 		Find(&versions).Error; err != nil {
 		return nil, err
@@ -279,12 +284,12 @@ func (s *RDBConfigStore) GetAllPromptVersions(ctx context.Context) ([]tables.Tab
 	return versions, nil
 }
 
-// GetPromptVersions gets all versions for a prompt
+// GetPromptVersions gets all versions for a prompt. Soft-deleted versions are excluded.
 func (s *RDBConfigStore) GetPromptVersions(ctx context.Context, promptID string) ([]tables.TablePromptVersion, error) {
 	var versions []tables.TablePromptVersion
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
-		Where("prompt_id = ?", promptID).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
+		Where("prompt_id = ? AND deleted = ?", promptID, false).
 		Order("version_number DESC").
 		Find(&versions).Error; err != nil {
 		return nil, err
@@ -292,12 +297,13 @@ func (s *RDBConfigStore) GetPromptVersions(ctx context.Context, promptID string)
 	return versions, nil
 }
 
-// GetPromptVersionByID gets a version by ID
+// GetPromptVersionByID gets a version by ID. Returns ErrNotFound for soft-deleted versions.
 func (s *RDBConfigStore) GetPromptVersionByID(ctx context.Context, id uint) (*tables.TablePromptVersion, error) {
 	var version tables.TablePromptVersion
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
 		Preload("Prompt").
+		Where("deleted = ?", false).
 		First(&version, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -307,12 +313,12 @@ func (s *RDBConfigStore) GetPromptVersionByID(ctx context.Context, id uint) (*ta
 	return &version, nil
 }
 
-// GetLatestPromptVersion gets the latest version for a prompt
+// GetLatestPromptVersion gets the latest version for a prompt. Soft-deleted versions are excluded.
 func (s *RDBConfigStore) GetLatestPromptVersion(ctx context.Context, promptID string) (*tables.TablePromptVersion, error) {
 	var version tables.TablePromptVersion
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
-		Where("prompt_id = ? AND is_latest = ?", promptID, true).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
+		Where("prompt_id = ? AND is_latest = ? AND deleted = ?", promptID, true, false).
 		First(&version).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
@@ -422,13 +428,13 @@ func (s *RDBConfigStore) DeletePromptVersion(ctx context.Context, id uint) error
 // Prompt Repository - Sessions
 // ============================================================================
 
-// GetPromptSessions gets all sessions for a prompt
+// GetPromptSessions gets all sessions for a prompt. Soft-deleted sessions are excluded.
 func (s *RDBConfigStore) GetPromptSessions(ctx context.Context, promptID string) ([]tables.TablePromptSession, error) {
 	var sessions []tables.TablePromptSession
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
 		Preload("Version").
-		Where("prompt_id = ?", promptID).
+		Where("prompt_id = ? AND deleted = ?", promptID, false).
 		Order("created_at DESC").
 		Find(&sessions).Error; err != nil {
 		return nil, err
@@ -436,13 +442,14 @@ func (s *RDBConfigStore) GetPromptSessions(ctx context.Context, promptID string)
 	return sessions, nil
 }
 
-// GetPromptSessionByID gets a session by ID
+// GetPromptSessionByID gets a session by ID. Returns ErrNotFound for soft-deleted sessions.
 func (s *RDBConfigStore) GetPromptSessionByID(ctx context.Context, id uint) (*tables.TablePromptSession, error) {
 	var session tables.TablePromptSession
 	if err := s.DB().WithContext(ctx).
-		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Order("order_index ASC") }).
+		Preload("Messages", func(db *gorm.DB) *gorm.DB { return db.Where("deleted = ?", false).Order("order_index ASC") }).
 		Preload("Prompt").
 		Preload("Version").
+		Where("deleted = ?", false).
 		First(&session, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound

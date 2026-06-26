@@ -6,6 +6,7 @@ type TableModel struct {
 	ProviderID string `gorm:"type:uuid;index;not null;uniqueIndex:idx_provider_name" json:"provider_id"`
 	Name       string `gorm:"column:name;uniqueIndex:idx_provider_name" json:"name"`
 
+	CurrencyID         *string  `gorm:"column:currency;type:uuid" json:"currency,omitempty"` // FK to currency object (same column as ConfigModel.currency)
 	InputCostPerToken  *float64 `json:"input_cost_per_token,omitempty"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token,omitempty"`
 

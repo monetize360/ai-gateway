@@ -413,9 +413,13 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 
 	// Attach org context from the virtual key
 	if virtualKey != nil {
-		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
-		}
+		stampVirtualKeyOrgContext(ctx, virtualKey)
+	}
+
+	// Stamp source provider/model IDs from the original request model (before routing/LB).
+	if modelStr, ok := payload["model"].(string); ok && modelStr != "" {
+		provider, model := schemas.ParseModelString(modelStr, "")
+		stampRoutingSourceModelIDsContext(ctx, comp.store, provider, model)
 	}
 
 	//1. Apply routing rules only if we have rules or matched decision
@@ -507,10 +511,11 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 
 	// Attach org context from the virtual key
 	if virtualKey != nil {
-		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
-		}
+		stampVirtualKeyOrgContext(ctx, virtualKey)
 	}
+
+	provider, model := schemas.ParseModelString(originalModel, "")
+	stampRoutingSourceModelIDsContext(ctx, comp.store, provider, model)
 
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
 	if hasRoutingRules {
@@ -611,10 +616,11 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 
 	// Attach org context from the virtual key
 	if virtualKey != nil {
-		if scopeOrgID := virtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
-			ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
-		}
+		stampVirtualKeyOrgContext(ctx, virtualKey)
 	}
+
+	provider, model := schemas.ParseModelString(originalModel, "")
+	stampRoutingSourceModelIDsContext(ctx, comp.store, provider, model)
 
 	// Apply routing rules
 	if hasRoutingRules {
@@ -1249,6 +1255,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 
 	// Step 2: Org hierarchy budget/rate-limit when VK-level checks were skipped (user auth path).
 	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
+		stampVirtualKeyOrgContext(ctx, hierarchyVK)
 		if scopeOrgID := hierarchyVK.GovernanceScopeOrgID(); scopeOrgID != nil {
 			result = resolver.EvaluateOrgHierarchyRequest(ctx, *scopeOrgID, evaluationRequest)
 		}
@@ -1292,6 +1299,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			if _, ok := ctx.Value(governanceRejectedContextKey).(bool); !ok {
 				ctx.SetValue(governanceRejectedContextKey, true)
 			}
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceDecision, string(result.Decision))
 		}
 	}
 
@@ -1439,6 +1447,11 @@ func (p *GovernancePlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.
 		return req, &schemas.LLMPluginShortCircuit{
 			Error: bifrostError,
 		}, nil
+	}
+
+	comp := p.getComponentsForContext(ctx)
+	if comp != nil && model != "" {
+		stampRoutingSourceModelIDsContextIfUnset(ctx, comp.store, provider, model)
 	}
 
 	return req, nil, nil

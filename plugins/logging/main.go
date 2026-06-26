@@ -810,8 +810,13 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 	selectedKeyName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedKeyName)
 	virtualKeyID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)
 	virtualKeyName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyName)
+	governanceOrgID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID)
 	routingRuleID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingRuleID)
 	routingRuleName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingRuleName)
+	routingQueryParams := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingQueryParams)
+	routingSourceProviderID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingSourceProviderID)
+	routingSourceModelID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingSourceModelID)
+	governanceDecision := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceDecision)
 	selectedPromptName := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedPromptName)
 	selectedPromptVersion := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedPromptVersion)
 	selectedPromptID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedPromptID)
@@ -860,6 +865,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 			if nodeID, _ := p.clusterNodeID.Load().(string); nodeID != "" {
 				entry.ClusterNodeID = &nodeID
 			}
+			applyVirtualKeyOrgToEntry(entry, virtualKeyID, governanceOrgID)
 			applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
 			p.storeOrEnqueueEntry(ctx, entry, p.makePostWriteCallback(nil))
 		} else {
@@ -925,7 +931,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 			latency = *ef.CacheDebug.CacheHitLatency
 		}
 	}
-	applyOutputFieldsToEntry(entry, selectedKeyID, selectedKeyName, virtualKeyID, virtualKeyName, routingRuleID, routingRuleName, selectedPromptID, selectedPromptName, selectedPromptVersion, numberOfRetries, latency, attemptTrail)
+	applyOutputFieldsToEntry(entry, selectedKeyID, selectedKeyName, virtualKeyID, virtualKeyName, governanceOrgID, routingRuleID, routingRuleName, routingQueryParams, routingSourceProviderID, routingSourceModelID, governanceDecision, selectedPromptID, selectedPromptName, selectedPromptVersion, numberOfRetries, latency, attemptTrail)
 	// Attach cluster governance metadata for disconnected node usage recovery
 	if nodeID, _ := p.clusterNodeID.Load().(string); nodeID != "" {
 		entry.ClusterNodeID = &nodeID

@@ -190,6 +190,10 @@ type GovernanceStore interface {
 	// entities.
 	CollectApplicableGovernanceIDs(ctx context.Context, virtualKey string, provider schemas.ModelProvider, model string) (budgetIDs []string, rateLimitIDs []string)
 	CollectOrgAncestorIDs(orgID string) []string
+	// ResolveConfigProviderID maps a runtime provider key to config_providers.id.
+	ResolveConfigProviderID(provider schemas.ModelProvider) string
+	// ResolveConfigModelID maps provider + model name to config_models.id.
+	ResolveConfigModelID(provider schemas.ModelProvider, model string) string
 }
 
 // NewLocalGovernanceStore creates a new in-memory governance store
@@ -827,6 +831,39 @@ func (gs *LocalGovernanceStore) CalculateBudgetCost(provider schemas.ModelProvid
 		cost += float64(completionTokens) * *configModel.OutputCostPerToken
 	}
 	return cost
+}
+
+// ResolveConfigProviderID maps a runtime provider key to config_providers.id.
+func (gs *LocalGovernanceStore) ResolveConfigProviderID(provider schemas.ModelProvider) string {
+	if provider == "" {
+		return ""
+	}
+	value, ok := gs.providers.Load(string(provider))
+	if !ok || value == nil {
+		return ""
+	}
+	p, ok := value.(*configstoreTables.TableProvider)
+	if !ok || p == nil || p.ID == "" {
+		return ""
+	}
+	return p.ID
+}
+
+// ResolveConfigModelID maps provider + model name to config_models.id.
+func (gs *LocalGovernanceStore) ResolveConfigModelID(provider schemas.ModelProvider, model string) string {
+	if provider == "" || model == "" {
+		return ""
+	}
+	key := fmt.Sprintf("%s:%s", string(provider), model)
+	value, ok := gs.configModels.Load(key)
+	if !ok || value == nil {
+		return ""
+	}
+	m, ok := value.(*configstoreTables.TableModel)
+	if !ok || m == nil || m.ID == "" {
+		return ""
+	}
+	return m.ID
 }
 
 // Generic check budget method
@@ -1711,7 +1748,12 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 	}
 
 	for i := range delta.RoutingRules {
-		_ = gs.UpdateRoutingRuleInMemory(ctx, &delta.RoutingRules[i])
+		rule := &delta.RoutingRules[i]
+		if rule.Deleted {
+			gs.DeleteRoutingRuleInMemory(ctx, rule.ID)
+			continue
+		}
+		_ = gs.UpdateRoutingRuleInMemory(ctx, rule)
 	}
 
 	if delta.ReloadOrgAllowedModelConfigs {

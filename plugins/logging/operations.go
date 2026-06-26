@@ -140,8 +140,15 @@ func (p *LoggerPlugin) updateLogEntry(
 	latency int64,
 	virtualKeyID string,
 	virtualKeyName string,
+	governanceOrgID string,
 	routingRuleID string,
 	routingRuleName string,
+	routingQueryParams string,
+	routingSourceProviderID string,
+	routingSourceModelID string,
+	routingTargetProviderID string,
+	routingTargetModelID string,
+	governanceDecision string,
 	numberOfRetries int,
 	cacheDebug *schemas.BifrostCacheDebug,
 	routingEngineLogs string,
@@ -165,11 +172,32 @@ func (p *LoggerPlugin) updateLogEntry(
 	if virtualKeyName != "" {
 		updates["virtual_key_name"] = virtualKeyName
 	}
+	if virtualKeyID != "" && governanceOrgID != "" {
+		updates["scope_org_id"] = governanceOrgID
+	}
 	if routingRuleID != "" {
 		updates["routing_rule_id"] = routingRuleID
 	}
 	if routingRuleName != "" {
 		updates["routing_rule_name"] = routingRuleName
+	}
+	if routingQueryParams != "" {
+		updates["routing_query_params"] = routingQueryParams
+	}
+	if routingSourceProviderID != "" {
+		updates["routing_source_provider_id"] = routingSourceProviderID
+	}
+	if routingSourceModelID != "" {
+		updates["routing_source_model_id"] = routingSourceModelID
+	}
+	if routingTargetProviderID != "" {
+		updates["routing_target_provider_id"] = routingTargetProviderID
+	}
+	if routingTargetModelID != "" {
+		updates["routing_target_model_id"] = routingTargetModelID
+	}
+	if governanceDecision != "" {
+		updates["governance_decision"] = governanceDecision
 	}
 	if numberOfRetries != 0 {
 		updates["number_of_retries"] = numberOfRetries

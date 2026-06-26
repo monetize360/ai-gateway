@@ -74,13 +74,43 @@ func (m *TenantDBManager) ListTenantIDs() []string {
 	return ids
 }
 
-// SyncTenantsFromGlobalDB opens ConfigStores for tenants discovered in the global
-// tenants table that are not yet present in memory. Existing tenant connections
-// are left untouched.
+// SyncTenantsFromGlobalDB reconciles the in-memory tenant store map against the
+// global tenants table. It opens ConfigStores for newly added tenants and closes
+// stores for tenants that have been soft-deleted (i.e. no longer returned by
+// GetAllTenants which filters deleted = false).
 func (m *TenantDBManager) SyncTenantsFromGlobalDB(ctx context.Context) error {
 	tenantDSNs, err := m.globalDB.GetAllTenants(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load tenants from global DB: %w", err)
+	}
+
+	// Collect stores to evict before acquiring the write lock so Close() is not
+	// called while holding it.
+	m.mu.RLock()
+	var toEvict []struct {
+		id    string
+		store configstore.ConfigStore
+	}
+	for tenantID, store := range m.stores {
+		if _, active := tenantDSNs[tenantID]; !active {
+			toEvict = append(toEvict, struct {
+				id    string
+				store configstore.ConfigStore
+			}{tenantID, store})
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, entry := range toEvict {
+		if entry.store != nil {
+			if closeErr := entry.store.Close(ctx); closeErr != nil {
+				m.logger.Warn("error closing evicted tenant store %s: %v", entry.id, closeErr)
+			}
+		}
+		m.mu.Lock()
+		delete(m.stores, entry.id)
+		m.mu.Unlock()
+		m.logger.Info("tenant store evicted (soft-deleted): %s", entry.id)
 	}
 
 	m.mu.Lock()

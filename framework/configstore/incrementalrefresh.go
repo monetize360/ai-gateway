@@ -124,6 +124,9 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}); err != nil {
 		return nil, fmt.Errorf("routing rules changed since: %w", err)
 	}
+	if err := appendDeletedRowsSince(db, since, &delta.RoutingRules); err != nil {
+		return nil, fmt.Errorf("deleted routing rules since: %w", err)
+	}
 
 	vkIDs, err := s.collectVirtualKeyIDsChangedSince(ctx, since)
 	if err != nil {

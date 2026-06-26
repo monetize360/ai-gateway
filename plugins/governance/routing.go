@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/routing"
 )
 
 // DefaultRoutingChainMaxDepth is the default maximum depth for routing rule chain evaluation.
@@ -86,6 +88,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	}
 
 	re.logger.Debug("[RoutingEngine] Starting rule evaluation for provider=%s, model=%s", routingCtx.Provider, routingCtx.Model)
+	re.stampRoutingSourceModelIDsContext(ctx, routingCtx)
 
 	// Mutable provider/model that advances through the chain; all other context fields are immutable.
 	currentProvider := routingCtx.Provider
@@ -229,6 +232,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 					MatchedRuleID:   rule.ID,
 					MatchedRuleName: rule.Name,
 				}
+				stampRoutingQueryParamContext(ctx, rule.CelExpression, variables)
 				matchedRule = rule
 				break outerLoop
 			}
@@ -480,6 +484,45 @@ func extractMapKeysFromCEL(expr, mapName string) []string {
 		}
 	}
 	return keys
+}
+
+// stampRoutingQueryParamContext records all query param key/values referenced by a
+// matched routing rule's CEL expression (params[...] or "key" in params) as JSON.
+func stampRoutingQueryParamContext(ctx *schemas.BifrostContext, celExpression string, variables map[string]any) {
+	if ctx == nil {
+		return
+	}
+	paramKeys := routing.ExtractParamKeysFromCEL(celExpression)
+	if len(paramKeys) == 0 {
+		return
+	}
+	paramsMap, ok := variables["params"].(map[string]string)
+	if !ok || len(paramsMap) == 0 {
+		return
+	}
+	matched := make(map[string]string, len(paramKeys))
+	for _, key := range paramKeys {
+		if val, exists := paramsMap[key]; exists {
+			matched[key] = val
+		}
+	}
+	if len(matched) == 0 {
+		return
+	}
+	data, err := json.Marshal(matched)
+	if err != nil {
+		return
+	}
+	ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingQueryParams, string(data))
+}
+
+// stampRoutingSourceModelIDsContext records config_providers/config_models IDs for the
+// incoming request before routing. Target provider/model are stored on the log as provider/model.
+func (re *RoutingEngine) stampRoutingSourceModelIDsContext(ctx *schemas.BifrostContext, routingCtx *RoutingContext) {
+	if routingCtx == nil || re.store == nil {
+		return
+	}
+	stampRoutingSourceModelIDsContext(ctx, re.store, routingCtx.Provider, routingCtx.Model)
 }
 
 // createCELEnvironment creates a new CEL environment for routing rules

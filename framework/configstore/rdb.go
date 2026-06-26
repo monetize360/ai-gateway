@@ -2996,6 +2996,7 @@ func (s *RDBConfigStore) DeleteAllowedModelConfig(ctx context.Context, id string
 }
 
 // GetVirtualKeyMCPConfigs retrieves all virtual key MCP configs from the database.
+// Soft-deleted configs are excluded.
 func (s *RDBConfigStore) GetVirtualKeyMCPConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	var virtualKey tables.TableVirtualKey
 	if err := s.DB().WithContext(ctx).First(&virtualKey, "id = ?", virtualKeyID).Error; err != nil {
@@ -3008,7 +3009,7 @@ func (s *RDBConfigStore) GetVirtualKeyMCPConfigs(ctx context.Context, virtualKey
 		return nil, nil
 	}
 	var mcpConfigs []tables.TableVirtualKeyMCPConfig
-	if err := s.DB().WithContext(ctx).Preload("MCPClient").Where("virtual_key_id = ?", virtualKey.ID).Find(&mcpConfigs).Error; err != nil {
+	if err := GovernanceActive(s.DB().WithContext(ctx)).Preload("MCPClient").Where("virtual_key_id = ?", virtualKey.ID).Find(&mcpConfigs).Error; err != nil {
 		return nil, err
 	}
 	return mcpConfigs, nil
@@ -3024,12 +3025,13 @@ func (s *RDBConfigStore) GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Contex
 }
 
 // GetVirtualKeyMCPConfigsByMCPClientIDs retrieves all VK MCP configs for a set of MCP client IDs in one query.
+// Soft-deleted configs are excluded.
 func (s *RDBConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Context, mcpClientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	if len(mcpClientIDs) == 0 {
 		return nil, nil
 	}
 	var configs []tables.TableVirtualKeyMCPConfig
-	if err := s.DB().WithContext(ctx).Where("mcp_client_id IN ?", mcpClientIDs).Find(&configs).Error; err != nil {
+	if err := GovernanceActive(s.DB().WithContext(ctx)).Where("mcp_client_id IN ?", mcpClientIDs).Find(&configs).Error; err != nil {
 		return nil, err
 	}
 	return configs, nil
@@ -3037,14 +3039,15 @@ func (s *RDBConfigStore) GetVirtualKeyMCPConfigsByMCPClientIDs(ctx context.Conte
 
 // GetVirtualKeyMCPConfigsByMCPClientStringIDs retrieves all VK MCP configs for a set of string client IDs
 // (the ClientID varchar column, not the DB primary key) in one query.
+// Soft-deleted configs are excluded.
 func (s *RDBConfigStore) GetVirtualKeyMCPConfigsByMCPClientStringIDs(ctx context.Context, clientIDs []string) ([]tables.TableVirtualKeyMCPConfig, error) {
 	if len(clientIDs) == 0 {
 		return nil, nil
 	}
 	var configs []tables.TableVirtualKeyMCPConfig
-	err := s.DB().WithContext(ctx).
+	err := GovernanceActive(s.DB().WithContext(ctx)).
 		Preload("MCPClient").
-		Joins("JOIN config_mcp_clients ON config_mcp_clients.id = governance_virtual_key_mcp_configs.mcp_client_id").
+		Joins("JOIN config_mcp_clients ON config_mcp_clients.id = governance_virtual_key_mcp_configs.mcp_client_id AND config_mcp_clients.deleted = ?", false).
 		Where("config_mcp_clients.client_id IN ?", clientIDs).
 		Find(&configs).Error
 	if err != nil {
@@ -3729,8 +3732,10 @@ func (s *RDBConfigStore) UpdateRateLimitUsage(ctx context.Context, id string, to
 
 // loadRoutingRulesOrdered loads routing rules using consistent ordering:
 // priority ASC, created_at DESC, id ASC.
+// Soft-deleted rows (deleted = true) are always excluded.
 func (s *RDBConfigStore) loadRoutingRulesOrdered(ctx context.Context, dest *[]tables.TableRoutingRule, scopes ...func(*gorm.DB) *gorm.DB) error {
 	q := s.DB().WithContext(ctx).
+		Where("deleted = ?", false).
 		Order("priority ASC, created_at DESC, id ASC")
 	for _, scope := range scopes {
 		q = scope(q)
@@ -3753,7 +3758,7 @@ func (s *RDBConfigStore) GetRoutingRules(ctx context.Context) ([]tables.TableRou
 // caller is allowed to see; rules with scope='global' are always
 // included by the scope builder.
 func (s *RDBConfigStore) GetRoutingRulesPaginated(ctx context.Context, params RoutingRulesQueryParams) ([]tables.TableRoutingRule, int64, error) {
-	baseQuery := s.ScopedDB(ctx).Model(&tables.TableRoutingRule{})
+	baseQuery := s.ScopedDB(ctx).Model(&tables.TableRoutingRule{}).Where("deleted = ?", false)
 
 	if params.Search != "" {
 		search := "%" + strings.ToLower(params.Search) + "%"
@@ -3832,16 +3837,18 @@ func (s *RDBConfigStore) GetRoutingRule(ctx context.Context, id string) (*tables
 }
 
 // GetRedactedRoutingRules retrieves redacted routing rules from the database.
+// Soft-deleted rules are excluded.
 func (s *RDBConfigStore) GetRedactedRoutingRules(ctx context.Context, ids []string) ([]tables.TableRoutingRule, error) {
 	var routingRules []tables.TableRoutingRule
 
+	base := s.DB().WithContext(ctx).Select("id, name, description, enabled").Where("deleted = ?", false)
 	if len(ids) > 0 {
-		err := s.DB().WithContext(ctx).Select("id, name, description, enabled").Where("id IN ?", ids).Find(&routingRules).Error
+		err := base.Where("id IN ?", ids).Find(&routingRules).Error
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		err := s.DB().WithContext(ctx).Select("id, name, description, enabled").Find(&routingRules).Error
+		err := base.Find(&routingRules).Error
 		if err != nil {
 			return nil, err
 		}
@@ -3926,29 +3933,24 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 	}))
 }
 
-// DeleteRoutingRule deletes a routing rule from the database.
+// DeleteRoutingRule soft-deletes a routing rule from the database.
+// Soft delete is used (setting deleted = true) so that incremental refresh can
+// detect the change via updated_at and evict the rule from the in-memory store.
 func (s *RDBConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error {
 	database := s.DB()
 	if len(tx) > 0 && tx[0] != nil {
 		database = tx[0]
 	}
 
-	return s.parseGormError(database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.parseGormError(database.WithContext(ctx).Transaction(func(txDB *gorm.DB) error {
 		var existing tables.TableRoutingRule
-		if err := dbForUpdate(tx).First(&existing, "id = ?", id).Error; err != nil {
+		if err := dbForUpdate(txDB.Where("deleted = ?", false)).First(&existing, "id = ?", id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
 			return err
 		}
-		result := tx.Delete(&tables.TableRoutingRule{}, "id = ?", id)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return ErrNotFound
-		}
-		return nil
+		return MarkGovernanceDeleted(ctx, txDB, &tables.TableRoutingRule{}, "id = ?", id)
 	}))
 }
 

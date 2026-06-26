@@ -203,7 +203,7 @@ func TestUpdateLogEntryPreservesResponsesInputContentSummary(t *testing.T) {
 		}},
 	}
 
-	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update, true); err != nil {
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", "", "", "", "", "", "", "", 0, nil, "", update, true); err != nil {
 		t.Fatalf("updateLogEntry() error = %v", err)
 	}
 
@@ -249,7 +249,7 @@ func TestUpdateLogEntryUpdatesContentSummaryForChatOutput(t *testing.T) {
 		},
 	}
 
-	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update, true); err != nil {
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", "", "", "", "", "", "", "", 0, nil, "", update, true); err != nil {
 		t.Fatalf("updateLogEntry() error = %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestUpdateLogEntrySuppressesChatOutputWhenContentLoggingDisabled(t *testing
 		},
 	}
 
-	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update, false); err != nil {
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", "", "", "", "", "", "", "", 0, nil, "", update, false); err != nil {
 		t.Fatalf("updateLogEntry() error = %v", err)
 	}
 
@@ -848,7 +848,7 @@ func TestUpdateLogEntryPerRequestOverrideEnablesContent(t *testing.T) {
 	}
 
 	// Explicitly pass true — simulates the per-request ctx override enabling content logging
-	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update, true); err != nil {
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", "", "", "", "", "", "", "", 0, nil, "", update, true); err != nil {
 		t.Fatalf("updateLogEntry() error = %v", err)
 	}
 
@@ -891,7 +891,7 @@ func TestUpdateLogEntryPerRequestOverrideDisablesContent(t *testing.T) {
 	}
 
 	// Explicitly pass false — simulates x-bf-disable-content-logging: true on this request
-	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update, false); err != nil {
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", "", "", "", "", "", "", "", 0, nil, "", update, false); err != nil {
 		t.Fatalf("updateLogEntry() error = %v", err)
 	}
 

@@ -8,6 +8,7 @@ import (
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/valyala/fasthttp"
 )
 
@@ -37,6 +38,48 @@ func VirtualKeyIDFromFastHTTPContext(ctx *fasthttp.RequestCtx) string {
 		return id
 	}
 	return ""
+}
+
+// stampVirtualKeyOrgContext sets the resolved governance org (usage scope) on context.
+func stampVirtualKeyOrgContext(ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey) {
+	if ctx == nil || vk == nil {
+		return
+	}
+	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)
+	}
+}
+
+// configModelIDResolver resolves config provider/model UUIDs from runtime names.
+type configModelIDResolver interface {
+	ResolveConfigProviderID(provider schemas.ModelProvider) string
+	ResolveConfigModelID(provider schemas.ModelProvider, model string) string
+}
+
+// stampRoutingSourceModelIDsContext records config_providers/config_models IDs for the
+// incoming request before routing. Target provider/model are stored on the log as provider/model.
+func stampRoutingSourceModelIDsContext(ctx *schemas.BifrostContext, store configModelIDResolver, provider schemas.ModelProvider, model string) {
+	if ctx == nil || store == nil || model == "" {
+		return
+	}
+	if sourceProviderID := store.ResolveConfigProviderID(provider); sourceProviderID != "" {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingSourceProviderID, sourceProviderID)
+	}
+	if sourceModelID := store.ResolveConfigModelID(provider, model); sourceModelID != "" {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingSourceModelID, sourceModelID)
+	}
+}
+
+// stampRoutingSourceModelIDsContextIfUnset stamps source IDs only when not already on context
+// (e.g. PreLLMHook for SDK requests after HTTP transport may have already stamped).
+func stampRoutingSourceModelIDsContextIfUnset(ctx *schemas.BifrostContext, store configModelIDResolver, provider schemas.ModelProvider, model string) {
+	if ctx == nil {
+		return
+	}
+	if bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceRoutingSourceModelID) != "" {
+		return
+	}
+	stampRoutingSourceModelIDsContext(ctx, store, provider, model)
 }
 
 // getWeight safely dereferences a *float64 weight pointer, returning 1.0 as default if nil.

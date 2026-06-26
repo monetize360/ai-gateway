@@ -68,6 +68,17 @@ func (c *configModelPricingCache) calculateCost(
 	return index.CalculateTokenCost(provider, resolvedModel, aliasModel, promptTokens, completionTokens)
 }
 
+func (c *configModelPricingCache) lookupCurrencyID(
+	ctx context.Context,
+	provider, resolvedModel, aliasModel string,
+) string {
+	index := c.indexForContext(ctx)
+	if index == nil {
+		return ""
+	}
+	return index.LookupCurrencyID(provider, resolvedModel, aliasModel)
+}
+
 func aliasFromEntry(entry *logstore.Log) string {
 	if entry == nil || entry.Alias == nil {
 		return ""
@@ -93,15 +104,14 @@ func (p *LoggerPlugin) applyConfigModelCostToEntry(ctx *schemas.BifrostContext, 
 	if promptTokens == 0 && completionTokens == 0 {
 		return
 	}
-	cost := p.configModelPricing.calculateCost(
-		ctx,
-		string(entry.Provider),
-		entry.Model,
-		aliasFromEntry(entry),
-		promptTokens,
-		completionTokens,
-	)
+	provider := string(entry.Provider)
+	model := entry.Model
+	alias := aliasFromEntry(entry)
+	cost := p.configModelPricing.calculateCost(ctx, provider, model, alias, promptTokens, completionTokens)
 	if cost > 0 {
 		entry.Cost = &cost
+		if currencyID := p.configModelPricing.lookupCurrencyID(ctx, provider, model, alias); currencyID != "" {
+			entry.CostCurrencyID = &currencyID
+		}
 	}
 }

@@ -139,9 +139,14 @@ type Log struct {
 	AttemptTrail            string    `gorm:"type:text" json:"-"` // JSON serialized []schemas.KeyAttemptRecord
 	VirtualKeyID            *string   `gorm:"type:varchar(255);index:idx_logs_virtual_key_id" json:"virtual_key_id"`
 	VirtualKeyName          *string   `gorm:"type:varchar(255)" json:"virtual_key_name"`
+	ScopeOrgID              *string   `gorm:"type:uuid;index:idx_logs_scope_org_id" json:"scope_org_id,omitempty"`
 	RoutingEnginesUsedStr   *string   `gorm:"type:varchar(255);column:routing_engines_used" json:"-"` // Comma-separated routing engines
 	RoutingRuleID           *string   `gorm:"type:varchar(255);index:idx_logs_routing_rule_id" json:"routing_rule_id"`
 	RoutingRuleName         *string   `gorm:"type:varchar(255)" json:"routing_rule_name"`
+	RoutingQueryParams        *string `gorm:"type:text" json:"routing_query_params,omitempty"`
+	RoutingSourceProviderID   *string `gorm:"type:uuid;index:idx_logs_routing_source_provider_id" json:"routing_source_provider_id,omitempty"`
+	RoutingSourceModelID      *string `gorm:"type:uuid;index:idx_logs_routing_source_model_id" json:"routing_source_model_id,omitempty"`
+	GovernanceDecision        *string `gorm:"type:varchar(64);index:idx_logs_governance_decision" json:"governance_decision,omitempty"` // governance rejection decision: budget_exceeded, token_limited, request_limited, model_blocked, etc.
 	SelectedPromptName      *string   `gorm:"type:varchar(255)" json:"selected_prompt_name"`
 	SelectedPromptVersion   *string   `gorm:"type:varchar(64)" json:"selected_prompt_version"`
 	SelectedPromptID        *string   `gorm:"type:varchar(36)" json:"selected_prompt_id"`
@@ -174,7 +179,8 @@ type Log struct {
 	CacheDebug              string    `gorm:"type:text" json:"-"` // JSON serialized *schemas.BifrostCacheDebug
 	Latency                 *float64  `gorm:"index:idx_logs_latency" json:"latency,omitempty"`
 	TokenUsage              string    `gorm:"type:text" json:"-"`                                                                         // JSON serialized *schemas.LLMUsage
-	Cost                    *float64  `gorm:"index" json:"cost,omitempty"`                                                                // Cost in dollars (total cost of the request - includes cache lookup cost)
+	Cost                    *float64  `gorm:"index" json:"cost,omitempty"`
+	CostCurrencyID          *string   `gorm:"type:uuid" json:"cost_currency_id,omitempty"` // Currency of the cost field (from config_models.currency)                                                                // Cost in dollars (total cost of the request - includes cache lookup cost)
 	Status                  string    `gorm:"type:varchar(50);index;index:idx_logs_ts_provider_status,priority:3;not null" json:"status"` // "processing", "success", or "error"
 	StopReason              *string   `gorm:"type:varchar(50);index:idx_logs_stop_reason" json:"stop_reason,omitempty"`                   // Why the model stopped: "stop", "length", "content_filter", "tool_calls", etc.
 	ErrorDetails            string    `gorm:"type:text" json:"-"`                                                                         // JSON serialized *schemas.BifrostError

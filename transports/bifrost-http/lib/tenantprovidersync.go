@@ -82,6 +82,10 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 	if registry == nil {
 		return
 	}
+
+	// Snapshot the active tenant list before syncing so we can detect evictions.
+	prevIDs := registry.ListTenantIDs(ctx)
+
 	if err := registry.SyncTenants(ctx); err != nil {
 		logger.Warn("tenant provider sync: failed to refresh tenant registry: %v", err)
 	}
@@ -91,7 +95,20 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 		}
 	}
 
+	// Detect tenants evicted during this sync cycle (soft-deleted in MPilot) and
+	// remove their provider snapshot so stale configs are not retained in memory.
 	tenantIDs := registry.ListTenantIDs(ctx)
+	activeSet := make(map[string]struct{}, len(tenantIDs))
+	for _, id := range tenantIDs {
+		activeSet[id] = struct{}{}
+	}
+	for _, id := range prevIDs {
+		if _, stillActive := activeSet[id]; !stillActive {
+			cfg.setTenantProvidersSnapshot(id, nil)
+			logger.Info("tenant provider sync: provider snapshot cleared for evicted tenant %s", id)
+		}
+	}
+
 	for _, tenantID := range tenantIDs {
 		store := registry.GetStoreForTenant(ctx, tenantID)
 		if store == nil {

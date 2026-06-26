@@ -486,12 +486,24 @@ func applyModelAlias(entry *logstore.Log, requestedModel, resolvedModel string) 
 	}
 }
 
+// applyVirtualKeyOrgToEntry sets scope_org_id to the org governance usage is measured against.
+func applyVirtualKeyOrgToEntry(entry *logstore.Log, virtualKeyID, governanceOrgID string) {
+	if virtualKeyID == "" || governanceOrgID == "" {
+		return
+	}
+	entry.ScopeOrgID = &governanceOrgID
+}
+
 // applyOutputFieldsToEntry sets common output fields on a log entry.
 func applyOutputFieldsToEntry(
 	entry *logstore.Log,
 	selectedKeyID, selectedKeyName string,
 	virtualKeyID, virtualKeyName string,
+	governanceOrgID string,
 	routingRuleID, routingRuleName string,
+	routingQueryParams string,
+	routingSourceProviderID, routingSourceModelID string,
+	governanceDecision string,
 	selectedPromptID, selectedPromptName, selectedPromptVersion string,
 	numberOfRetries int,
 	latency int64,
@@ -505,11 +517,24 @@ func applyOutputFieldsToEntry(
 	if virtualKeyName != "" {
 		entry.VirtualKeyName = &virtualKeyName
 	}
+	applyVirtualKeyOrgToEntry(entry, virtualKeyID, governanceOrgID)
 	if routingRuleID != "" {
 		entry.RoutingRuleID = &routingRuleID
 	}
 	if routingRuleName != "" {
 		entry.RoutingRuleName = &routingRuleName
+	}
+	if routingQueryParams != "" {
+		entry.RoutingQueryParams = &routingQueryParams
+	}
+	if routingSourceProviderID != "" {
+		entry.RoutingSourceProviderID = &routingSourceProviderID
+	}
+	if routingSourceModelID != "" {
+		entry.RoutingSourceModelID = &routingSourceModelID
+	}
+	if governanceDecision != "" {
+		entry.GovernanceDecision = &governanceDecision
 	}
 	if selectedPromptID != "" {
 		entry.SelectedPromptID = &selectedPromptID

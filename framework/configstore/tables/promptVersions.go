@@ -23,9 +23,10 @@ type TablePromptVersion struct {
 	Model            string       `gorm:"type:varchar(100)" json:"model"`
 	VariablesJSON    *string         `gorm:"type:text;column:variables_json" json:"-"`
 	Variables        PromptVariables `gorm:"-" json:"variables,omitempty"` // {key: value} map for Jinja2 variables
-	IsLatest         bool            `gorm:"not null;default:false" json:"is_latest"`
-	CreatedAt        time.Time    `gorm:"not null" json:"created_at"`
-	// No UpdatedAt - versions are immutable
+	IsLatest  bool      `gorm:"not null;default:false" json:"is_latest"`
+	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	// Soft-delete: MPilot auditEnabled=true adds this column; GORM AutoMigrate adds it for standalone Bifrost.
+	Deleted bool `gorm:"not null;default:false;index" json:"-"`
 
 	// Relationships
 	Messages []TablePromptVersionMessage `gorm:"foreignKey:VersionID;constraint:OnDelete:CASCADE" json:"messages,omitempty"`
@@ -89,6 +90,8 @@ type TablePromptVersionMessage struct {
 	OrderIndex  int                 `gorm:"not null;uniqueIndex:idx_version_order" json:"order_index"`
 	MessageJSON string              `gorm:"type:text;not null;column:message_json" json:"-"`
 	Message     PromptMessage       `gorm:"-" json:"message"`
+	// Soft-delete: MPilot auditEnabled=true adds this column; GORM AutoMigrate adds it for standalone Bifrost.
+	Deleted bool `gorm:"not null;default:false;index" json:"-"`
 }
 
 // TableName for TablePromptVersionMessage
