@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
@@ -99,6 +100,14 @@ type BudgetAndRateLimitStatus struct {
 	SoftLimitExceeded bool `json:"soft_limit_exceeded"`
 }
 
+// BudgetResetSnapshot pairs a post-reset budget with the pre-reset usage and
+// period start so the ledger can record what was spent in the completed window.
+type BudgetResetSnapshot struct {
+	Budget        *configstoreTables.TableBudget // post-reset state (CurrentUsage=0, LastReset=new)
+	PrevUsage     float64                        // current_usage before reset
+	PrevLastReset time.Time                      // last_reset before reset (= period start)
+}
+
 // GovernanceStore defines the interface for governance data access and policy evaluation.
 //
 // Error semantics contract:
@@ -138,10 +147,10 @@ type GovernanceStore interface {
 	UpdateVirtualKeyRateLimitUsageInMemory(ctx context.Context, vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
 	// In-memory reset checks (return items that need DB sync)
 	ResetExpiredRateLimitsInMemory(ctx context.Context) []*configstoreTables.TableRateLimit
-	ResetExpiredBudgetsInMemory(ctx context.Context) []*configstoreTables.TableBudget
+	ResetExpiredBudgetsInMemory(ctx context.Context) []BudgetResetSnapshot
 	// DB sync for expired items
 	ResetExpiredRateLimits(ctx context.Context, resetRateLimits []*configstoreTables.TableRateLimit) error
-	ResetExpiredBudgets(ctx context.Context, resetBudgets []*configstoreTables.TableBudget) error
+	ResetExpiredBudgets(ctx context.Context, snapshots []BudgetResetSnapshot) error
 	// Provider and model-level usage updates (combined)
 	UpdateProviderAndModelBudgetUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, cost float64) error
 	UpdateProviderAndModelRateLimitUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
@@ -1278,9 +1287,9 @@ func (gs *LocalGovernanceStore) UpdateUserRateLimitUsageInMemory(ctx context.Con
 // Decision of whether to reset is computed per-budget from the snapshot observed via Range; the
 // actual CAS is delegated to ResetBudgetAt, which skips already-reset snapshots and never drops
 // a concurrent usage increment.
-func (gs *LocalGovernanceStore) ResetExpiredBudgetsInMemory(ctx context.Context) []*configstoreTables.TableBudget {
+func (gs *LocalGovernanceStore) ResetExpiredBudgetsInMemory(ctx context.Context) []BudgetResetSnapshot {
 	now := time.Now()
-	var resetBudgets []*configstoreTables.TableBudget
+	var snapshots []BudgetResetSnapshot
 	gs.budgets.Range(func(key, value any) bool {
 		budget, ok := value.(*configstoreTables.TableBudget)
 		if !ok || budget == nil {
@@ -1310,23 +1319,28 @@ func (gs *LocalGovernanceStore) ResetExpiredBudgetsInMemory(ctx context.Context)
 		if !shouldReset {
 			return true
 		}
+		prevUsage := budget.CurrentUsage
+		prevLastReset := budget.LastReset
 		resetBudget, ok := gs.ResetBudgetAt(ctx, budget.ID, newLastReset)
 		if !ok {
 			// Another resetter got there first, or a concurrent usage update
 			// already advanced LastReset past ours; nothing to do.
 			return true
 		}
-		oldUsage := budget.CurrentUsage
 		gs.LastDBUsagesBudgetsMu.Lock()
 		gs.LastDBUsagesBudgets[resetBudget.ID] = 0
 		gs.LastDBUsagesBudgetsMu.Unlock()
-		resetBudgets = append(resetBudgets, resetBudget)
+		snapshots = append(snapshots, BudgetResetSnapshot{
+			Budget:        resetBudget,
+			PrevUsage:     prevUsage,
+			PrevLastReset: prevLastReset,
+		})
 		gs.updateBudgetReferences(ctx, resetBudget)
 		gs.logger.Debug(fmt.Sprintf("Reset budget %s (was %.2f, reset to 0)",
-			resetBudget.ID, oldUsage))
+			resetBudget.ID, prevUsage))
 		return true
 	})
-	return resetBudgets
+	return snapshots
 }
 
 // ResetExpiredRateLimitsInMemory performs background reset of expired rate limits for both provider-level and VK-level.
@@ -1397,14 +1411,14 @@ func (gs *LocalGovernanceStore) ResetExpiredRateLimitsInMemory(ctx context.Conte
 	return resetRateLimits
 }
 
-// ResetExpiredBudgets checks and resets budgets that have exceeded their reset duration in database
-func (gs *LocalGovernanceStore) ResetExpiredBudgets(ctx context.Context, resetBudgets []*configstoreTables.TableBudget) error {
-	// Persist to database if any resets occurred using direct UPDATE to avoid overwriting config fields
-	if len(resetBudgets) > 0 && gs.configStore != nil {
+// ResetExpiredBudgets persists budget resets to the database and writes a ledger
+// entry for each reset capturing the completed period's usage.
+func (gs *LocalGovernanceStore) ResetExpiredBudgets(ctx context.Context, snapshots []BudgetResetSnapshot) error {
+	if len(snapshots) > 0 && gs.configStore != nil {
 		if err := gs.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
-			for _, budget := range resetBudgets {
-				// Direct UPDATE only resets current_usage and last_reset
-				// This prevents overwriting max_limit or reset_duration that may have been changed by other nodes/requests
+			now := time.Now()
+			for _, snap := range snapshots {
+				budget := snap.Budget
 				result := tx.WithContext(ctx).
 					Session(&gorm.Session{SkipHooks: true}).
 					Model(&configstoreTables.TableBudget{}).
@@ -1413,9 +1427,22 @@ func (gs *LocalGovernanceStore) ResetExpiredBudgets(ctx context.Context, resetBu
 						"current_usage": budget.CurrentUsage,
 						"last_reset":    budget.LastReset,
 					})
-
 				if result.Error != nil {
 					return fmt.Errorf("failed to reset budget %s: %w", budget.ID, result.Error)
+				}
+
+				ledgerEntry := configstoreTables.TableBudgetLedger{
+					ID:            uuid.NewString(),
+					BudgetID:      budget.ID,
+					Usage:         snap.PrevUsage,
+					MaxLimit:      budget.MaxLimit,
+					ResetDuration: budget.ResetDuration,
+					PeriodStart:   snap.PrevLastReset,
+					PeriodEnd:     budget.LastReset,
+					CreatedAt:     now,
+				}
+				if err := tx.WithContext(ctx).Create(&ledgerEntry).Error; err != nil {
+					return fmt.Errorf("failed to insert budget ledger for budget %s: %w", budget.ID, err)
 				}
 			}
 			return nil
