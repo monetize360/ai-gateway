@@ -102,6 +102,12 @@ const mcpConfigSchema = z.object({
 	tools_to_execute: z.array(z.string()).optional(),
 });
 
+const providerAccessSchema = z.object({
+	provider: z.string().optional(),
+	access_type: z.enum(["allowed", "blocked"]),
+	is_wildcard: z.boolean().optional(),
+});
+
 // Main form schema
 const formSchema = z
 	.object({
@@ -109,6 +115,7 @@ const formSchema = z
 		description: z.string().optional(),
 		providerConfigs: z.array(providerConfigSchema).optional(),
 		mcpConfigs: z.array(mcpConfigSchema).optional(),
+		providerAccess: z.array(providerAccessSchema).optional(),
 		entityType: z.enum(["team", "customer", "none"]),
 		teamId: z.string().optional(),
 		customerId: z.string().optional(),
@@ -237,6 +244,12 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, defaultT
 					mcp_client_name: config.mcp_client?.name || "",
 					tools_to_execute: config.tools_to_execute || [],
 				})) || [],
+			providerAccess:
+				virtualKey?.provider_access?.map((pa) => ({
+					provider: pa.config_provider?.name || "",
+					access_type: pa.access_type as "allowed" | "blocked",
+					is_wildcard: pa.is_wildcard || false,
+				})) || [],
 			entityType: virtualKey?.team_id ? "team" : virtualKey?.customer_id ? "customer" : !isEditing && defaultTeamId ? "team" : "none",
 			teamId: virtualKey?.team_id || (!isEditing ? defaultTeamId || "" : ""),
 			customerId: virtualKey?.customer_id || "",
@@ -302,6 +315,24 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, defaultT
 
 	// Get current MCP configs from form
 	const mcpConfigs = form.watch("mcpConfigs") || [];
+
+	// Get current provider access rules from form
+	const providerAccessRules = form.watch("providerAccess") || [];
+
+	const handleAddProviderAccess = (provider: string, accessType: "allowed" | "blocked", isWildcard: boolean) => {
+		if (!isWildcard && !provider) return;
+		const duplicate = providerAccessRules.find(
+			(r) => r.provider === provider && r.access_type === accessType && r.is_wildcard === isWildcard,
+		);
+		if (duplicate) return;
+		form.setValue("providerAccess", [...providerAccessRules, { provider: isWildcard ? undefined : provider, access_type: accessType, is_wildcard: isWildcard }], {
+			shouldDirty: true,
+		});
+	};
+
+	const handleRemoveProviderAccess = (index: number) => {
+		form.setValue("providerAccess", providerAccessRules.filter((_, i) => i !== index), { shouldDirty: true });
+	};
 
 	// Watch budget/rate-limit fields for conditional rendering of reset buttons
 	const watchedBudgets = form.watch("budgets");
@@ -651,6 +682,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, defaultT
 					description: data.description,
 					provider_configs: normalizedProviderConfigs,
 					mcp_configs: data.mcpConfigs,
+					provider_access: data.providerAccess && data.providerAccess.length > 0 ? data.providerAccess : undefined,
 					team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
 					customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
 					is_active: data.isActive,
@@ -697,6 +729,7 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, defaultT
 					description: data.description || undefined,
 					provider_configs: normalizedProviderConfigs,
 					mcp_configs: data.mcpConfigs,
+					provider_access: data.providerAccess && data.providerAccess.length > 0 ? data.providerAccess : undefined,
 					team_id: data.entityType === "team" && data.teamId && data.teamId.trim() !== "" ? data.teamId : undefined,
 					customer_id: data.entityType === "customer" && data.customerId && data.customerId.trim() !== "" ? data.customerId : undefined,
 					is_active: data.isActive,
@@ -1531,6 +1564,94 @@ export default function VirtualKeySheet({ virtualKey, teams, customers, defaultT
 										)}
 									</div>
 								)}
+								<DottedSeparator className="mt-6 mb-5" />
+								{/* Provider Access Rules */}
+								<div className="space-y-4">
+									<Label className="text-sm font-medium">Provider Access Rules</Label>
+									<p className="text-muted-foreground text-xs">
+										Control which providers are allowed or blocked at the virtual key level.
+									</p>
+									<div className="flex gap-2 items-end">
+										<div className="flex-1">
+											<ComboboxSelect
+												options={availableProviders.map((p) => ({
+													value: p.name,
+													label: ProviderLabels[p.name as ProviderName] || p.name,
+												}))}
+												value=""
+												onValueChange={(val) => {
+													if (val) handleAddProviderAccess(val, "allowed", false);
+												}}
+												placeholder="Add allowed provider..."
+												className="w-full"
+											/>
+										</div>
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onClick={() => handleAddProviderAccess("", "allowed", true)}
+											disabled={providerAccessRules.some((r) => r.is_wildcard && r.access_type === "allowed")}
+										>
+											Allow All (*)
+										</Button>
+									</div>
+									<div className="flex gap-2 items-end">
+										<div className="flex-1">
+											<ComboboxSelect
+												options={availableProviders.map((p) => ({
+													value: p.name,
+													label: ProviderLabels[p.name as ProviderName] || p.name,
+												}))}
+												value=""
+												onValueChange={(val) => {
+													if (val) handleAddProviderAccess(val, "blocked", false);
+												}}
+												placeholder="Add blocked provider..."
+												className="w-full"
+											/>
+										</div>
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onClick={() => handleAddProviderAccess("", "blocked", true)}
+											disabled={providerAccessRules.some((r) => r.is_wildcard && r.access_type === "blocked")}
+										>
+											Block All (*)
+										</Button>
+									</div>
+									{providerAccessRules.length > 0 && (
+										<div className="rounded-md border">
+											<Table>
+												<TableHeader>
+													<TableRow>
+														<TableHead>Provider</TableHead>
+														<TableHead>Access</TableHead>
+														<TableHead className="w-12" />
+													</TableRow>
+												</TableHeader>
+												<TableBody>
+													{providerAccessRules.map((rule, index) => (
+														<TableRow key={index}>
+															<TableCell>{rule.is_wildcard ? "* (All Providers)" : (ProviderLabels[rule.provider as ProviderName] || rule.provider)}</TableCell>
+															<TableCell>
+																<span className={cn("text-xs font-medium px-2 py-0.5 rounded-full", rule.access_type === "allowed" ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" : "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200")}>
+																	{rule.access_type}
+																</span>
+															</TableCell>
+															<TableCell>
+																<Button type="button" variant="ghost" size="sm" onClick={() => handleRemoveProviderAccess(index)}>
+																	<Trash2 className="h-4 w-4" />
+																</Button>
+															</TableCell>
+														</TableRow>
+													))}
+												</TableBody>
+											</Table>
+										</div>
+									)}
+								</div>
 								<DottedSeparator className="mt-6 mb-5" />
 								{/* Budget Configuration */}
 								<div className="space-y-4">

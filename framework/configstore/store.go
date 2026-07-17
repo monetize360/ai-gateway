@@ -162,6 +162,16 @@ type ConfigStore interface {
 	// ReplaceAllowedModelConfigRows updates the header row and replaces all model-ref rows for its scope.
 	ReplaceAllowedModelConfigRows(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 
+	// Provider access CRUD (scope-level provider allow/block rules)
+	GetProviderAccessByVirtualKeyID(ctx context.Context, vkID string) ([]tables.TableProviderAccess, error)
+	GetProviderAccessByScopeOrgID(ctx context.Context, orgID string) ([]tables.TableProviderAccess, error)
+	// GetOrgProviderAccess returns provider access rows scoped to orgs (scope_org_id set, virtual_key_id null).
+	// When orgIDs is nil or empty all org-level rows are returned (full reload path).
+	GetOrgProviderAccess(ctx context.Context, orgIDs []string) ([]tables.TableProviderAccess, error)
+	ReplaceProviderAccessForVirtualKey(ctx context.Context, vkID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
+	ReplaceProviderAccessForScopeOrg(ctx context.Context, orgID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
+	DeleteProviderAccess(ctx context.Context, id string, tx ...*gorm.DB) error
+
 	// Virtual key MCP config CRUD
 	GetVirtualKeyMCPConfigs(ctx context.Context, virtualKeyID string) ([]tables.TableVirtualKeyMCPConfig, error)
 	GetVirtualKeyMCPConfigsByMCPClientID(ctx context.Context, mcpClientID string) ([]tables.TableVirtualKeyMCPConfig, error)

@@ -90,6 +90,7 @@ func autoMigrateConfigTables(db *gorm.DB) error {
 		&tables.TablePromptSessionMessage{},
 		&tables.TableAccessKeyToken{},
 		&tables.TableBudgetLedger{},
+		&tables.TableProviderAccess{},
 	); err != nil {
 		return err
 	}

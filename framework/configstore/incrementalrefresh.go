@@ -25,6 +25,7 @@ type GovernanceRefreshDelta struct {
 	Providers                      []tables.TableProvider
 	RoutingRules                   []tables.TableRoutingRule
 	ReloadOrgAllowedModelConfigs   bool
+	ReloadOrgProviderAccess        bool
 }
 
 // IsEmpty reports whether the delta contains no changes.
@@ -33,6 +34,7 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		return true
 	}
 	return !d.ReloadOrgAllowedModelConfigs &&
+		!d.ReloadOrgProviderAccess &&
 		len(d.Organizations) == 0 &&
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
@@ -155,6 +157,16 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 	delta.ReloadOrgAllowedModelConfigs = orgConfigChanges > 0
 
+	var orgPAChanges int64
+	if err := db.Table("governance_provider_access").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL", since).
+		Count(&orgPAChanges).Error; err != nil {
+		if !errors.Is(err, gorm.ErrUnsupportedDriver) {
+			return nil, fmt.Errorf("org provider access changed since: %w", err)
+		}
+	}
+	delta.ReloadOrgProviderAccess = orgPAChanges > 0
+
 	return delta, nil
 }
 
@@ -201,9 +213,12 @@ func (s *RDBConfigStore) collectVirtualKeyIDsChangedSince(ctx context.Context, s
 				INNER JOIN governance_virtual_key_provider_config_keys j
 					ON j.table_virtual_key_provider_config_id = pc.id
 				WHERE j.updated_at >= ? AND pc.virtual_key_id IS NOT NULL
+			UNION
+			SELECT virtual_key_id AS id FROM governance_provider_access
+				WHERE updated_at >= ? AND virtual_key_id IS NOT NULL
 		) changed_vks
 		WHERE id IS NOT NULL
-	`, since, since, since, since, since, since, since, since).Scan(&rows).Error
+	`, since, since, since, since, since, since, since, since, since).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("collect changed virtual key ids: %w", err)
 	}

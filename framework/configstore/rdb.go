@@ -2213,7 +2213,9 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 				Select("config_keys.id, config_keys.name, config_keys.key_id, config_keys.models_json, config_keys.provider_id")
 		}).
 		Preload("MCPConfigs", active("governance_virtual_key_mcp_configs")).
-		Preload("MCPConfigs.MCPClient")
+		Preload("MCPConfigs.MCPClient").
+		Preload("ProviderAccess", active("governance_provider_access")).
+		Preload("ProviderAccess.ConfigProvider")
 }
 
 // preloadVirtualKeyDetailRelations preloads the detail relationships for a virtual key.
@@ -2233,6 +2235,7 @@ func (s *RDBConfigStore) GetVirtualKeys(ctx context.Context) ([]tables.TableVirt
 	}
 	for i := range virtualKeys {
 		virtualKeys[i].AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKeys[i].AllowedModelConfigs)
+		virtualKeys[i].ProviderAccessPolicy = AggregateProviderAccess(virtualKeys[i].ProviderAccess)
 	}
 	return virtualKeys, nil
 }
@@ -2324,6 +2327,7 @@ func (s *RDBConfigStore) GetVirtualKeysPaginated(ctx context.Context, params Vir
 	}
 	for i := range virtualKeys {
 		virtualKeys[i].AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKeys[i].AllowedModelConfigs)
+		virtualKeys[i].ProviderAccessPolicy = AggregateProviderAccess(virtualKeys[i].ProviderAccess)
 	}
 	return virtualKeys, totalCount, nil
 }
@@ -2345,6 +2349,7 @@ func (s *RDBConfigStore) GetVirtualKey(ctx context.Context, id string) (*tables.
 		return nil, err
 	}
 	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
+	virtualKey.ProviderAccessPolicy = AggregateProviderAccess(virtualKey.ProviderAccess)
 	return &virtualKey, nil
 }
 
@@ -2368,6 +2373,7 @@ func (s *RDBConfigStore) GetVirtualKeyByValue(ctx context.Context, value string)
 		}
 	}
 	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
+	virtualKey.ProviderAccessPolicy = AggregateProviderAccess(virtualKey.ProviderAccess)
 	return &virtualKey, nil
 }
 
@@ -2384,7 +2390,9 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 		Preload("AllowedModelConfigs.AllowedModel").
 		Preload("AllowedModelConfigs.BlacklistedModel").
 		Preload("AllowedModelConfigs.Budgets").
-		Preload("AllowedModelConfigs.RateLimits")
+		Preload("AllowedModelConfigs.RateLimits").
+		Preload("ProviderAccess", func(db *gorm.DB) *gorm.DB { return GovernanceActive(db) }).
+		Preload("ProviderAccess.ConfigProvider")
 	if err := baseQuery.Session(&gorm.Session{}).Where("value_hash = ?", valueHash).First(&virtualKey).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Fallback: try plaintext lookup for rows not yet migrated
@@ -2399,6 +2407,7 @@ func (s *RDBConfigStore) GetVirtualKeyQuotaByValue(ctx context.Context, value st
 		}
 	}
 	virtualKey.AllowedModelConfigs = AggregateAllowedModelConfigs(virtualKey.AllowedModelConfigs)
+	virtualKey.ProviderAccessPolicy = AggregateProviderAccess(virtualKey.ProviderAccess)
 	return &virtualKey, nil
 }
 
@@ -2693,6 +2702,121 @@ func (s *RDBConfigStore) GetOrgAllowedModelConfigs(ctx context.Context, orgIDs [
 		return nil, err
 	}
 	return AggregateAllowedModelConfigs(configs), nil
+}
+
+// ── Provider access CRUD ───────────────────────────────────────────────────
+
+func (s *RDBConfigStore) GetProviderAccessByVirtualKeyID(ctx context.Context, vkID string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	if err := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id = ?", vkID).
+		Preload("ConfigProvider").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetProviderAccessByScopeOrgID(ctx context.Context, orgID string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	if err := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("scope_org_id = ?", orgID).
+		Preload("ConfigProvider").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetOrgProviderAccess(ctx context.Context, orgIDs []string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL").
+		Preload("ConfigProvider")
+	if len(orgIDs) > 0 {
+		q = q.Where("scope_org_id IN ?", orgIDs)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ReplaceProviderAccessForVirtualKey replaces all provider access rows for a given VK.
+func (s *RDBConfigStore) ReplaceProviderAccessForVirtualKey(ctx context.Context, vkID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error {
+	txDB := s.DB()
+	if len(tx) > 0 {
+		txDB = tx[0]
+	}
+	// Soft-delete existing rows
+	if err := MarkDeleted(ctx, txDB, &tables.TableProviderAccess{}, "virtual_key_id = ?", vkID); err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].VirtualKeyID = &vkID
+		rows[i].ScopeOrgID = nil
+		EnsureGovernanceRowID(&rows[i].ID)
+		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
+		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
+			return err
+		}
+		if err := txDB.WithContext(ctx).Create(&rows[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceProviderAccessForScopeOrg replaces all provider access rows for a given org scope.
+func (s *RDBConfigStore) ReplaceProviderAccessForScopeOrg(ctx context.Context, orgID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error {
+	txDB := s.DB()
+	if len(tx) > 0 {
+		txDB = tx[0]
+	}
+	if err := MarkDeleted(ctx, txDB, &tables.TableProviderAccess{}, "scope_org_id = ?", orgID); err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].ScopeOrgID = &orgID
+		rows[i].VirtualKeyID = nil
+		EnsureGovernanceRowID(&rows[i].ID)
+		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
+		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
+			return err
+		}
+		if err := txDB.WithContext(ctx).Create(&rows[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *RDBConfigStore) DeleteProviderAccess(ctx context.Context, id string, tx ...*gorm.DB) error {
+	txDB := s.DB()
+	if len(tx) > 0 {
+		txDB = tx[0]
+	}
+	return MarkDeleted(ctx, txDB, &tables.TableProviderAccess{}, "id = ?", id)
+}
+
+// resolveProviderAccessProviderID resolves a provider name (stored on
+// ConfigProvider) into the ProviderID FK when it's not already set.
+func (s *RDBConfigStore) resolveProviderAccessProviderID(ctx context.Context, txDB *gorm.DB, row *tables.TableProviderAccess) error {
+	if row.IsWildcard {
+		row.ProviderID = nil
+		return nil
+	}
+	if row.ProviderID != nil && *row.ProviderID != "" {
+		return nil
+	}
+	if row.ConfigProvider != nil && row.ConfigProvider.Name != "" {
+		id, err := s.getProviderIDByName(ctx, txDB, row.ConfigProvider.Name)
+		if err != nil {
+			return fmt.Errorf("failed to resolve provider %q: %w", row.ConfigProvider.Name, err)
+		}
+		row.ProviderID = &id
+	}
+	return nil
 }
 
 // CreateAllowedModelConfig creates a new allowed model config in the database.

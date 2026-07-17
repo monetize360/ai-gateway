@@ -62,6 +62,10 @@ type LocalGovernanceStore struct {
 	// Org-level allowed model configs indexed by scope_org_id for VK attachment.
 	orgConfigsMu      sync.RWMutex
 	orgConfigsByOrgID map[string][]configstoreTables.TableAllowedModelConfig
+
+	// Org-level provider access rows indexed by scope_org_id for VK attachment.
+	orgProviderAccessMu      sync.RWMutex
+	orgProviderAccessByOrgID map[string][]configstoreTables.TableProviderAccess
 }
 
 type GovernanceData struct {
@@ -1705,8 +1709,13 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load org allowed model configs: %w", err)
 	}
 
+	orgProviderAccess, err := gs.configStore.GetOrgProviderAccess(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load org provider access: %w", err)
+	}
+
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
@@ -1788,6 +1797,12 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			gs.logger.Warn("governance refresh: failed to reload org allowed model configs: %v", err)
 		}
 	}
+
+	if delta.ReloadOrgProviderAccess {
+		if err := gs.reloadOrgProviderAccess(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload org provider access: %v", err)
+		}
+	}
 }
 
 // loadFromConfigMemory loads all governance data from the config's memory into store's memory
@@ -1808,14 +1823,14 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	attachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 
 	// Rebuild in-memory structures (lock-free).
-	// Org-level allowed model configs are not available from config.json — pass nil.
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules, nil)
+	// Org-level allowed model configs and provider access are not available from config.json — pass nil.
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
@@ -1865,11 +1880,18 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	gs.orgConfigsByOrgID = orgConfigsByOrgID
 	gs.orgConfigsMu.Unlock()
 
+	// Index org-level provider access rows by scope_org_id for fast VK attachment.
+	orgPAByOrgID := buildOrgProviderAccessByOrgID(orgProviderAccessRows)
+	gs.orgProviderAccessMu.Lock()
+	gs.orgProviderAccessByOrgID = orgPAByOrgID
+	gs.orgProviderAccessMu.Unlock()
+
 	// Build virtual keys map and track active VKs.
 	// For each VK, collect org-level configs from its governance scope org and all ancestors.
 	for i := range virtualKeys {
 		vk := &virtualKeys[i]
 		gs.attachOrgConfigsToVK(vk, orgConfigsByOrgID)
+		gs.attachOrgProviderAccessToVK(vk, orgPAByOrgID)
 		gs.storeVirtualKey(vk)
 	}
 
@@ -2145,6 +2167,7 @@ func (gs *LocalGovernanceStore) CreateVirtualKeyInMemory(ctx context.Context, vk
 	}
 
 	gs.attachOrgConfigsToVK(vk)
+	gs.attachOrgProviderAccessToVK(vk)
 	gs.storeVirtualKey(vk)
 }
 
@@ -2217,6 +2240,88 @@ func (gs *LocalGovernanceStore) reloadOrgAllowedModelConfigs(ctx context.Context
 		}
 		clone := *vk
 		gs.attachOrgConfigsToVK(&clone, orgConfigsByOrgID)
+		gs.virtualKeys.Store(vk.ID, &clone)
+		return true
+	})
+	return nil
+}
+
+// buildOrgProviderAccessByOrgID indexes org-scoped provider access rows by scope_org_id.
+func buildOrgProviderAccessByOrgID(rows []configstoreTables.TableProviderAccess) map[string][]configstoreTables.TableProviderAccess {
+	index := make(map[string][]configstoreTables.TableProviderAccess)
+	for i := range rows {
+		r := &rows[i]
+		if r.ScopeOrgID == nil || *r.ScopeOrgID == "" {
+			continue
+		}
+		index[*r.ScopeOrgID] = append(index[*r.ScopeOrgID], *r)
+	}
+	return index
+}
+
+// attachOrgProviderAccessToVK aggregates org-level provider access policies from the VK's
+// governance scope org and all its ancestors, merges them using most-restrictive-wins
+// semantics, and stores the result on vk.OrgProviderAccessPolicy.
+func (gs *LocalGovernanceStore) attachOrgProviderAccessToVK(vk *configstoreTables.TableVirtualKey, indexOverride ...map[string][]configstoreTables.TableProviderAccess) {
+	if vk == nil {
+		return
+	}
+	var index map[string][]configstoreTables.TableProviderAccess
+	if len(indexOverride) > 0 && indexOverride[0] != nil {
+		index = indexOverride[0]
+	} else {
+		gs.orgProviderAccessMu.RLock()
+		index = gs.orgProviderAccessByOrgID
+		gs.orgProviderAccessMu.RUnlock()
+	}
+	vk.OrgProviderAccessPolicy = nil
+	if len(index) == 0 {
+		return
+	}
+	scopeOrgID := vk.GovernanceScopeOrgIDString()
+	if scopeOrgID == "" {
+		return
+	}
+	ancestorIDs := gs.CollectOrgAncestorIDs(scopeOrgID)
+	allOrgIDs := append([]string{scopeOrgID}, ancestorIDs...)
+
+	var perOrgPolicies []*configstore.ProviderAccessPolicy
+	for _, orgID := range allOrgIDs {
+		orgRows := index[orgID]
+		if len(orgRows) == 0 {
+			continue
+		}
+		policy := configstore.AggregateProviderAccess(orgRows)
+		if policy != nil {
+			perOrgPolicies = append(perOrgPolicies, policy)
+		}
+	}
+	if len(perOrgPolicies) == 0 {
+		return
+	}
+	vk.OrgProviderAccessPolicy = configstore.MergeProviderAccessPolicies(perOrgPolicies...)
+}
+
+func (gs *LocalGovernanceStore) reloadOrgProviderAccess(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	rows, err := gs.configStore.GetOrgProviderAccess(ctx, nil)
+	if err != nil {
+		return err
+	}
+	index := buildOrgProviderAccessByOrgID(rows)
+	gs.orgProviderAccessMu.Lock()
+	gs.orgProviderAccessByOrgID = index
+	gs.orgProviderAccessMu.Unlock()
+
+	gs.virtualKeys.Range(func(_, value interface{}) bool {
+		vk, ok := value.(*configstoreTables.TableVirtualKey)
+		if !ok || vk == nil {
+			return true
+		}
+		clone := *vk
+		gs.attachOrgProviderAccessToVK(&clone, index)
 		gs.virtualKeys.Store(vk.ID, &clone)
 		return true
 	})
@@ -2370,9 +2475,11 @@ func (gs *LocalGovernanceStore) UpdateVirtualKeyInMemory(ctx context.Context, vk
 			}
 		}
 		gs.attachOrgConfigsToVK(&clone)
+		gs.attachOrgProviderAccessToVK(&clone)
 		gs.storeVirtualKey(&clone)
 	} else {
 		gs.attachOrgConfigsToVK(vk)
+		gs.attachOrgProviderAccessToVK(vk)
 		gs.CreateVirtualKeyInMemory(ctx, vk)
 	}
 }

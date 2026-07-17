@@ -281,6 +281,13 @@ type TableVirtualKey struct {
 	OrgAllowedModelConfigs []TableAllowedModelConfig `gorm:"-" json:"-"`                                                                       // Org-scoped configs resolved at runtime by the governance store
 	MCPConfigs           []TableVirtualKeyMCPConfig  `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
+	// Provider access rules (VK-scoped allow/block rows from governance_provider_access)
+	ProviderAccess       []TableProviderAccess       `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_access,omitempty"`
+	// ProviderAccessPolicy is the aggregated VK-level provider allow/block policy (runtime only).
+	ProviderAccessPolicy *ProviderAccessPolicyRT     `gorm:"-" json:"provider_access_policy,omitempty"`
+	// OrgProviderAccessPolicy is the merged org-level provider allow/block policy (runtime only).
+	OrgProviderAccessPolicy *ProviderAccessPolicyRT  `gorm:"-" json:"-"`
+
 	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	// ScopeOrgID is the org used for budget, rate limit, and routing scope at runtime.

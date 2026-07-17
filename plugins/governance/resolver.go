@@ -217,7 +217,17 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 			Reason:   "Virtual key is inactive",
 		}
 	}
-	// 2. Check provider filtering
+	// 2a. Check provider access policy (org-level then VK-level allow/block rules)
+	if requestType != schemas.MCPToolExecutionRequest {
+		if allowed, reason := isProviderAllowedByAccessPolicy(vk, provider); !allowed {
+			return &EvaluationResult{
+				Decision:   DecisionProviderBlocked,
+				Reason:     reason,
+				VirtualKey: vk,
+			}
+		}
+	}
+	// 2b. Check provider filtering (legacy provider config check)
 	if requestType != schemas.MCPToolExecutionRequest && !r.isProviderAllowed(vk, provider) {
 		return &EvaluationResult{
 			Decision:   DecisionProviderBlocked,
@@ -364,6 +374,39 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 
 // isProviderAllowed checks if the requested provider is allowed for this VK.
 // Org-level configs restrict which providers are accessible, followed by VK-level configs.
+// isProviderAllowedByAccessPolicy evaluates the provider access policy (the new
+// governance_provider_access table) for a VK. It checks org-level first, then
+// VK-level, with blacklist-wins semantics.
+//
+// Returns (true, "") when the provider is permitted, or (false, reason) when blocked.
+func isProviderAllowedByAccessPolicy(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) (bool, string) {
+	providerName := string(provider)
+
+	// Layer 1: org-level provider access policy
+	if vk.OrgProviderAccessPolicy != nil && !vk.OrgProviderAccessPolicy.IsEmpty() {
+		p := vk.OrgProviderAccessPolicy
+		if p.BlacklistedProviders.IsBlocked(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is blocked by organization policy", provider)
+		}
+		if len(p.AllowedProviders) > 0 && !p.AllowedProviders.IsAllowed(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is not in the organization allow list", provider)
+		}
+	}
+
+	// Layer 2: VK-level provider access policy
+	if vk.ProviderAccessPolicy != nil && !vk.ProviderAccessPolicy.IsEmpty() {
+		p := vk.ProviderAccessPolicy
+		if p.BlacklistedProviders.IsBlocked(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is blocked for this virtual key", provider)
+		}
+		if len(p.AllowedProviders) > 0 && !p.AllowedProviders.IsAllowed(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is not in the virtual key allow list", provider)
+		}
+	}
+
+	return true, ""
+}
+
 func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) bool {
 	// Org-level: if org has configs and none match this provider, block it.
 	if len(vk.OrgAllowedModelConfigs) > 0 {

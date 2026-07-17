@@ -88,12 +88,20 @@ type CreateVirtualKeyRequest struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"` // Empty means no MCP clients allowed (deny-by-default)
+	ProviderAccess  []ProviderAccessRequest  `json:"provider_access,omitempty"`
 	OrgID           *string                  `json:"org_id,omitempty"`
 	ScopeOrgID      *string                  `json:"scope_org_id,omitempty"`
 	Budgets         []CreateBudgetRequest    `json:"budgets,omitempty"`     // Multi-budget: each must have a unique reset_duration
 	RateLimits      []CreateRateLimitRequest `json:"rate_limits,omitempty"`
 	IsActive        *bool                    `json:"is_active,omitempty"`
 	CalendarAligned bool                    `json:"calendar_aligned,omitempty"` // When true, all budgets reset at clean calendar boundaries
+}
+
+// ProviderAccessRequest represents a single provider allow/block rule in API requests.
+type ProviderAccessRequest struct {
+	Provider   string `json:"provider,omitempty"`   // Provider name (omit when is_wildcard=true)
+	AccessType string `json:"access_type" validate:"required"` // "allowed" | "blocked" (or picklist item UUID)
+	IsWildcard bool   `json:"is_wildcard,omitempty"`
 }
 
 // UpdateVirtualKeyRequest represents the request body for updating a virtual key
@@ -115,6 +123,7 @@ type UpdateVirtualKeyRequest struct {
 		MCPClientName  string            `json:"mcp_client_name" validate:"required"`
 		ToolsToExecute schemas.WhiteList `json:"tools_to_execute,omitempty"`
 	} `json:"mcp_configs,omitempty"`
+	ProviderAccess   []ProviderAccessRequest `json:"provider_access,omitempty"`
 	OrgID            *string                 `json:"org_id,omitempty"`
 	ScopeOrgID       *string                 `json:"scope_org_id,omitempty"`
 	Budgets          []CreateBudgetRequest   `json:"budgets,omitempty"` // Multi-budget: replaces all VK-level budgets
@@ -533,6 +542,10 @@ func (h *GovernanceHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 	r.PUT("/api/governance/providers/{provider_name}", lib.ChainMiddlewares(h.updateProviderGovernance, middlewares...))
 	r.DELETE("/api/governance/providers/{provider_name}", lib.ChainMiddlewares(h.deleteProviderGovernance, middlewares...))
 
+	// Org-level provider access CRUD
+	r.GET("/api/governance/orgs/{org_id}/provider-access", lib.ChainMiddlewares(h.getOrgProviderAccess, middlewares...))
+	r.PUT("/api/governance/orgs/{org_id}/provider-access", lib.ChainMiddlewares(h.replaceOrgProviderAccess, middlewares...))
+
 	// Self-service endpoint — no admin auth, VK in header is the credential.
 	// Registered without admin middlewares; only common middlewares (telemetry) are applied.
 	r.GET("/api/governance/virtual-keys/quota", h.getVirtualKeyQuota)
@@ -849,6 +862,15 @@ func (h *GovernanceHandler) createVirtualKey(ctx *fasthttp.RequestCtx) {
 				}, tx); err != nil {
 					return err
 				}
+			}
+		}
+		if len(req.ProviderAccess) > 0 {
+			rows, err := buildProviderAccessRows(req.ProviderAccess)
+			if err != nil {
+				return &badRequestError{err: err}
+			}
+			if err := h.cfg.StoreFromRequestCtx(ctx).ReplaceProviderAccessForVirtualKey(ctx, vk.ID, rows, tx); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -1432,6 +1454,16 @@ func (h *GovernanceHandler) updateVirtualKey(ctx *fasthttp.RequestCtx) {
 		sort.Strings(providerRateLimitIDsToDelete)
 		for _, id := range providerRateLimitIDsToDelete {
 			if err := h.cfg.StoreFromRequestCtx(ctx).DeleteRateLimit(ctx, id, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+				return err
+			}
+		}
+
+		if req.ProviderAccess != nil {
+			rows, err := buildProviderAccessRows(req.ProviderAccess)
+			if err != nil {
+				return &badRequestError{err: err}
+			}
+			if err := h.cfg.StoreFromRequestCtx(ctx).ReplaceProviderAccessForVirtualKey(ctx, vk.ID, rows, tx); err != nil {
 				return err
 			}
 		}
@@ -3590,5 +3622,75 @@ func (h *GovernanceHandler) getVirtualKeyQuota(ctx *fasthttp.RequestCtx) {
 		"budgets":          vk.Budgets,
 		"rate_limits":      vk.RateLimits,
 		"allowed_model_configs": vk.AllowedModelConfigs,
+		"provider_access_policy": vk.ProviderAccessPolicy,
+	})
+}
+
+// buildProviderAccessRows converts API request objects into TableProviderAccess rows.
+func buildProviderAccessRows(reqs []ProviderAccessRequest) ([]configstoreTables.TableProviderAccess, error) {
+	rows := make([]configstoreTables.TableProviderAccess, 0, len(reqs))
+	for _, r := range reqs {
+		accessTypeID, ok := configstoreTables.NormalizeAccessTypeToPicklistItem(r.AccessType)
+		if !ok {
+			return nil, fmt.Errorf("invalid access_type %q; must be 'allowed' or 'blocked' (or picklist item id)", r.AccessType)
+		}
+		accessTypeCode, _ := configstoreTables.AccessTypeNameFromPicklistItem(accessTypeID)
+		row := configstoreTables.TableProviderAccess{
+			AccessType:     accessTypeID,
+			AccessTypeCode: accessTypeCode,
+			IsWildcard:     r.IsWildcard,
+		}
+		if r.IsWildcard {
+			row.ProviderID = nil
+		} else {
+			providerName := strings.TrimSpace(r.Provider)
+			if providerName == "" {
+				return nil, fmt.Errorf("provider name is required when is_wildcard is false")
+			}
+			row.ConfigProvider = &configstoreTables.TableProvider{Name: providerName}
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// getOrgProviderAccess handles GET /api/governance/orgs/{org_id}/provider-access
+func (h *GovernanceHandler) getOrgProviderAccess(ctx *fasthttp.RequestCtx) {
+	orgID := ctx.UserValue("org_id").(string)
+	rows, err := h.cfg.StoreFromRequestCtx(ctx).GetProviderAccessByScopeOrgID(ctx, orgID)
+	if err != nil {
+		SendError(ctx, 500, fmt.Sprintf("Failed to load org provider access: %v", err))
+		return
+	}
+	policy := configstore.AggregateProviderAccess(rows)
+	SendJSON(ctx, map[string]any{
+		"org_id":          orgID,
+		"provider_access": rows,
+		"policy":          policy,
+	})
+}
+
+// replaceOrgProviderAccess handles PUT /api/governance/orgs/{org_id}/provider-access
+func (h *GovernanceHandler) replaceOrgProviderAccess(ctx *fasthttp.RequestCtx) {
+	orgID := ctx.UserValue("org_id").(string)
+	var req struct {
+		ProviderAccess []ProviderAccessRequest `json:"provider_access"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		SendError(ctx, 400, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+	rows, err := buildProviderAccessRows(req.ProviderAccess)
+	if err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if err := h.cfg.StoreFromRequestCtx(ctx).ReplaceProviderAccessForScopeOrg(ctx, orgID, rows); err != nil {
+		SendError(ctx, 500, fmt.Sprintf("Failed to replace org provider access: %v", err))
+		return
+	}
+	SendJSON(ctx, map[string]any{
+		"message": "Org provider access updated successfully",
+		"org_id":  orgID,
 	})
 }

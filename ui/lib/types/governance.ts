@@ -63,6 +63,22 @@ export interface RedactedDBKey {
 	weight: number;
 }
 
+export interface ProviderAccessRow {
+	id: string;
+	provider_id?: string;
+	config_provider?: { id: string; name: string };
+	/** Logical name; API always returns "allowed" | "blocked". */
+	access_type: "allowed" | "blocked";
+	/** Picklist item UUID when returned from DB (optional). */
+	access_type_id?: string;
+	is_wildcard: boolean;
+}
+
+export interface ProviderAccessPolicy {
+	allowed_providers?: string[];
+	blacklisted_providers?: string[];
+}
+
 export interface VirtualKey {
 	id: string;
 	name: string;
@@ -70,6 +86,8 @@ export interface VirtualKey {
 	description?: string;
 	provider_configs?: VirtualKeyProviderConfig[];
 	mcp_configs?: VirtualKeyMCPConfig[];
+	provider_access?: ProviderAccessRow[];
+	provider_access_policy?: ProviderAccessPolicy;
 	team_id?: string;
 	customer_id?: string;
 	rate_limit_id?: string;
@@ -152,12 +170,19 @@ export interface VirtualKeyProviderConfigUpdateRequest {
 	key_ids?: string[]; // List of DBKey UUIDs to associate with this provider config
 }
 
+export interface ProviderAccessRequest {
+	provider?: string;
+	access_type: "allowed" | "blocked";
+	is_wildcard?: boolean;
+}
+
 // Request types for API calls
 export interface CreateVirtualKeyRequest {
 	name: string;
 	description?: string;
 	provider_configs?: VirtualKeyProviderConfigRequest[];
 	mcp_configs?: VirtualKeyMCPConfigRequest[];
+	provider_access?: ProviderAccessRequest[];
 	team_id?: string;
 	customer_id?: string;
 	budgets?: CreateBudgetRequest[];
@@ -171,6 +196,7 @@ export interface UpdateVirtualKeyRequest {
 	description?: string;
 	provider_configs?: VirtualKeyProviderConfigUpdateRequest[];
 	mcp_configs?: VirtualKeyMCPConfigRequest[];
+	provider_access?: ProviderAccessRequest[];
 	team_id?: string;
 	customer_id?: string;
 	budgets?: CreateBudgetRequest[];

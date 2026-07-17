@@ -296,6 +296,7 @@ func parseMigrationOrder(migrationsPath string) ([]MigrationAction, error) {
 		"TablePlugin":                  "plugins",
 		"TableFrameworkConfig":         "framework_configs",
 		"TableAllowedModelConfig": "governance_virtual_key_provider_configs",
+		"TableProviderAccess":          "governance_provider_access",
 		"TableVirtualKeyMCPConfig":     "governance_virtual_key_mcp_configs",
 		"SessionsTable":                "sessions",
 		"TableDistributedLock":         "distributed_locks",
