@@ -123,6 +123,28 @@ export const baseRoutingFields: CELFieldDefinition[] = [
 			"Total character count of the input text in the current request. Use to route long-context requests to larger deployments.",
 	},
 	{
+		name: "input_cost_per_token",
+		label: "Input Cost Per Token",
+		placeholder: "e.g., 0.003",
+		inputType: "text",
+		valueEditorType: "number",
+		operators: ["=", "!=", ">", "<", ">=", "<="],
+		defaultOperator: ">",
+		description:
+			"Input cost per token for the requested model (from config_models). Use to block requests to expensive models.",
+	},
+	{
+		name: "output_cost_per_token",
+		label: "Output Cost Per Token",
+		placeholder: "e.g., 0.015",
+		inputType: "text",
+		valueEditorType: "number",
+		operators: ["=", "!=", ">", "<", ">=", "<="],
+		defaultOperator: ">",
+		description:
+			"Output cost per token for the requested model (from config_models). Use to block requests to expensive models.",
+	},
+	{
 		name: "params",
 		label: "Query Parameter",
 		placeholder: "e.g., api_key, user_id",

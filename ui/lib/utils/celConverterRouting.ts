@@ -214,6 +214,18 @@ function convertRuleToCEL(rule: RuleType): string {
 		}
 	}
 
+	// Handle input_cost_per_token and output_cost_per_token — double numeric comparison
+	if (field === "input_cost_per_token" || field === "output_cost_per_token") {
+		const costValue = String(value).trim();
+		if (costValue) {
+			const numValue = parseFloat(costValue);
+			if (!isNaN(numValue)) {
+				const formatted = numValue % 1 === 0 ? `${numValue}.0` : `${numValue}`;
+				return `${field} ${celOperator} ${formatted}`;
+			}
+		}
+	}
+
 	// Handle tokens_used, request, and budget_used
 	// Structure: tokens_used > 80.0 or request >= 75.0 or budget_used > 50.0
 	// These are simple numeric comparisons against percent_used values from GetBudgetAndRateLimitStatus

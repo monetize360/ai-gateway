@@ -430,6 +430,20 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		if err != nil {
 			return nil, err
 		}
+		// Block the request if the matched routing rule has block=true
+		if routingDecision != nil && routingDecision.Block {
+			blockMsg := fmt.Sprintf("Request blocked by routing rule '%s': model %s blocked by cost ceiling policy",
+				routingDecision.MatchedRuleName, ctx.GetModel())
+			p.logger.Info("[HTTPTransport] %s (rule_id=%s)", blockMsg, routingDecision.MatchedRuleID)
+			return nil, &schemas.BifrostError{
+				IsBifrostError: true,
+				Type:           bifrost.Ptr("routing_rule_blocked"),
+				StatusCode:     bifrost.Ptr(403),
+				Error: &schemas.ErrorField{
+					Message: blockMsg,
+				},
+			}
+		}
 		// Mark for marshal if a routing rule matched
 		if routingDecision != nil {
 			needsMarshal = true
@@ -986,6 +1000,9 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 		}
 	}
 
+	// Look up model cost-per-token rates for cost ceiling CEL variables
+	inputCost, outputCost := comp.store.GetModelCostPerToken(provider, model)
+
 	// Build routing context
 	routingCtx := &RoutingContext{
 		VirtualKey:               virtualKey,
@@ -996,6 +1013,8 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 		QueryParams:              req.Query,
 		BudgetAndRateLimitStatus: comp.store.GetBudgetAndRateLimitStatus(ctx, model, provider, virtualKey, nil, nil, nil),
 		InputTokenContextLength:  estimateInputContextLength(body),
+		InputCostPerToken:        inputCost,
+		OutputCostPerToken:       outputCost,
 	}
 
 	p.logger.Debug("[HTTPTransport] Built routing context: provider=%s, model=%s, requestType=%s, vk=%v, headerCount=%d, paramCount=%d",

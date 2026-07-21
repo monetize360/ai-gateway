@@ -31,6 +31,7 @@ type RoutingDecision struct {
 	Fallbacks       []string // Fallback chain: ["provider/model", ...]
 	MatchedRuleID   string   // ID of the rule that matched
 	MatchedRuleName string   // Name of the rule that matched
+	Block           bool     // When true, the request should be rejected with 403
 }
 
 // RoutingContext holds all data needed for routing rule evaluation
@@ -45,6 +46,8 @@ type RoutingContext struct {
 	QueryParams              map[string]string                  // Query parameters for dynamic routing
 	BudgetAndRateLimitStatus *BudgetAndRateLimitStatus          // Budget and rate limit status by provider/model
 	InputTokenContextLength  int                                // Total character count of text content in the request body
+	InputCostPerToken        float64                            // Per-token input cost from config_models (0 if unset)
+	OutputCostPerToken       float64                            // Per-token output cost from config_models (0 if unset)
 }
 
 type RoutingEngine struct {
@@ -232,6 +235,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 					Fallbacks:       rule.ParsedFallbacks,
 					MatchedRuleID:   rule.ID,
 					MatchedRuleName: rule.Name,
+					Block:           isCostCeilingExpression(rule.CelExpression),
 				}
 				stampRoutingQueryParamContext(ctx, rule.CelExpression, variables)
 				matchedRule = rule
@@ -409,6 +413,8 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 	}
 
 	variables["input_token_context_length"] = int64(ctx.InputTokenContextLength)
+	variables["input_cost_per_token"] = ctx.InputCostPerToken
+	variables["output_cost_per_token"] = ctx.OutputCostPerToken
 
 	return variables, nil
 }
@@ -438,6 +444,8 @@ func buildNoMatchContext(expr string, variables map[string]any) string {
 		fmt.Sprintf("request=%.1f%%", variables["request"]),
 		fmt.Sprintf("soft_limit_exceeded=%v", variables["soft_limit_exceeded"]),
 		fmt.Sprintf("input_token_context_length=%d", variables["input_token_context_length"]),
+		fmt.Sprintf("input_cost_per_token=%g", variables["input_cost_per_token"]),
+		fmt.Sprintf("output_cost_per_token=%g", variables["output_cost_per_token"]),
 	}
 	for _, mapName := range []string{"headers", "params"} {
 		keys := extractMapKeysFromCEL(expr, mapName)
@@ -457,6 +465,14 @@ func buildNoMatchContext(expr string, variables map[string]any) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// isCostCeilingExpression returns true if the CEL expression references
+// input_cost_per_token or output_cost_per_token. Rules matching on cost
+// variables automatically block the request (403) instead of re-routing.
+func isCostCeilingExpression(celExpr string) bool {
+	return strings.Contains(celExpr, "input_cost_per_token") ||
+		strings.Contains(celExpr, "output_cost_per_token")
 }
 
 // celMapKeyRegexCache caches one *regexp.Regexp per mapName to avoid
@@ -563,5 +579,9 @@ func createCELEnvironment() (*cel.Env, error) {
 		// Total character count of text content in the current request.
 		// Use to route long-context requests to larger deployments.
 		cel.Variable("input_token_context_length", cel.IntType),
+
+		// Per-token cost from config_models. Use to block requests to expensive models.
+		cel.Variable("input_cost_per_token", cel.DoubleType),
+		cel.Variable("output_cost_per_token", cel.DoubleType),
 	)
 }

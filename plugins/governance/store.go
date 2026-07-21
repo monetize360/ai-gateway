@@ -160,6 +160,8 @@ type GovernanceStore interface {
 	UpdateProviderAndModelRateLimitUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
 	// CalculateBudgetCost computes dollar cost from config_models token pricing (0 when unknown).
 	CalculateBudgetCost(provider schemas.ModelProvider, model string, promptTokens, completionTokens int) float64
+	// GetModelCostPerToken returns the per-token input and output cost for a model (0 when unknown or unset).
+	GetModelCostPerToken(provider schemas.ModelProvider, model string) (inputCost, outputCost float64)
 	// Dump operations
 	DumpRateLimits(ctx context.Context, tokenBaselines map[string]int64, requestBaselines map[string]int64) error
 	DumpBudgets(ctx context.Context, baselines map[string]float64) error
@@ -844,6 +846,30 @@ func (gs *LocalGovernanceStore) CalculateBudgetCost(provider schemas.ModelProvid
 		cost += float64(completionTokens) * *configModel.OutputCostPerToken
 	}
 	return cost
+}
+
+// GetModelCostPerToken returns the per-token input and output cost for a model.
+// Returns 0.0, 0.0 when the model is unknown or rates are unset.
+func (gs *LocalGovernanceStore) GetModelCostPerToken(provider schemas.ModelProvider, model string) (inputCost, outputCost float64) {
+	if model == "" || provider == "" {
+		return 0, 0
+	}
+	key := fmt.Sprintf("%s:%s", string(provider), model)
+	value, ok := gs.configModels.Load(key)
+	if !ok || value == nil {
+		return 0, 0
+	}
+	configModel, ok := value.(*configstoreTables.TableModel)
+	if !ok || configModel == nil {
+		return 0, 0
+	}
+	if configModel.InputCostPerToken != nil {
+		inputCost = *configModel.InputCostPerToken
+	}
+	if configModel.OutputCostPerToken != nil {
+		outputCost = *configModel.OutputCostPerToken
+	}
+	return inputCost, outputCost
 }
 
 // ResolveConfigProviderID maps a runtime provider key to config_providers.id.
