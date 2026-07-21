@@ -430,19 +430,22 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		if err != nil {
 			return nil, err
 		}
-		// Block the request if the matched routing rule has block=true
+		// Block the request if the matched routing rule is a cost ceiling rule
 		if routingDecision != nil && routingDecision.Block {
 			blockMsg := fmt.Sprintf("Request blocked by routing rule '%s': model %s blocked by cost ceiling policy",
 				routingDecision.MatchedRuleName, routingDecision.Model)
 			p.logger.Info("[HTTPTransport] %s (rule_id=%s)", blockMsg, routingDecision.MatchedRuleID)
-			return nil, &schemas.BifrostError{
-				IsBifrostError: true,
-				Type:           bifrost.Ptr("routing_rule_blocked"),
-				StatusCode:     bifrost.Ptr(403),
-				Error: &schemas.ErrorField{
-					Message: blockMsg,
+			errorBody, _ := sonic.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": blockMsg,
+					"type":    "routing_rule_blocked",
 				},
-			}
+			})
+			return &schemas.HTTPResponse{
+				StatusCode: 403,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       errorBody,
+			}, nil
 		}
 		// Mark for marshal if a routing rule matched
 		if routingDecision != nil {
