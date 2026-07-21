@@ -112,6 +112,17 @@ export const baseRoutingFields: CELFieldDefinition[] = [
 		description: "Check budget usage as percentage. Checked against max of model and provider configs.",
 	},
 	{
+		name: "input_token_context_length",
+		label: "Input Context Length",
+		placeholder: "e.g., 32000",
+		inputType: "text",
+		valueEditorType: "number",
+		operators: ["=", "!=", ">", "<", ">=", "<="],
+		defaultOperator: ">",
+		description:
+			"Total character count of the input text in the current request. Use to route long-context requests to larger deployments.",
+	},
+	{
 		name: "params",
 		label: "Query Parameter",
 		placeholder: "e.g., api_key, user_id",

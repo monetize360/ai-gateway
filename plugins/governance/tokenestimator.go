@@ -1,10 +1,10 @@
 package governance
 
-// estimateInputTokenCount estimates the number of input tokens in a request payload
-// using a character-based heuristic (total characters / 4).
-// It extracts text from common LLM request fields: messages, system, prompt, and input.
+// estimateInputContextLength returns the total character count of text content
+// in a request payload. It extracts text from common LLM request fields:
+// messages, system, prompt, and input.
 // Returns 0 if no text content is found.
-func estimateInputTokenCount(payload map[string]any) int {
+func estimateInputContextLength(payload map[string]any) int {
 	if len(payload) == 0 {
 		return 0
 	}
@@ -31,7 +31,7 @@ func estimateInputTokenCount(payload map[string]any) int {
 	// Extract from "input" field (embeddings, responses API)
 	totalChars += extractContentLength(payload["input"])
 
-	return totalChars / 4
+	return totalChars
 }
 
 // extractContentLength returns the character count of text content.

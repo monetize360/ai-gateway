@@ -44,7 +44,7 @@ type RoutingContext struct {
 	Headers                  map[string]string                  // Request headers for dynamic routing
 	QueryParams              map[string]string                  // Query parameters for dynamic routing
 	BudgetAndRateLimitStatus *BudgetAndRateLimitStatus          // Budget and rate limit status by provider/model
-	InputTokenCount          int                                // Estimated input token count from request body (chars / 4)
+	InputTokenContextLength  int                                // Total character count of text content in the request body
 }
 
 type RoutingEngine struct {
@@ -408,7 +408,7 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 		variables["soft_limit_exceeded"] = false
 	}
 
-	variables["input_token_count"] = int64(ctx.InputTokenCount)
+	variables["input_token_context_length"] = int64(ctx.InputTokenContextLength)
 
 	return variables, nil
 }
@@ -437,7 +437,7 @@ func buildNoMatchContext(expr string, variables map[string]any) string {
 		fmt.Sprintf("tokens_used=%.1f%%", variables["tokens_used"]),
 		fmt.Sprintf("request=%.1f%%", variables["request"]),
 		fmt.Sprintf("soft_limit_exceeded=%v", variables["soft_limit_exceeded"]),
-		fmt.Sprintf("input_token_count=%d", variables["input_token_count"]),
+		fmt.Sprintf("input_token_context_length=%d", variables["input_token_context_length"]),
 	}
 	for _, mapName := range []string{"headers", "params"} {
 		keys := extractMapKeysFromCEL(expr, mapName)
@@ -560,8 +560,8 @@ func createCELEnvironment() (*cel.Env, error) {
 		// want to act on soft limits and leave hard-limit behaviour unchanged.
 		cel.Variable("soft_limit_exceeded", cel.BoolType),
 
-		// Estimated input token count for the current request (characters / 4).
+		// Total character count of text content in the current request.
 		// Use to route long-context requests to larger deployments.
-		cel.Variable("input_token_count", cel.IntType),
+		cel.Variable("input_token_context_length", cel.IntType),
 	)
 }

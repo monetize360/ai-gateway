@@ -203,6 +203,17 @@ function convertRuleToCEL(rule: RuleType): string {
 		return `${field}.${celOperator}(${formattedValue})`;
 	}
 
+	// Handle input_token_context_length — integer numeric comparison (no decimal formatting)
+	if (field === "input_token_context_length") {
+		const thresholdValue = String(value).trim();
+		if (thresholdValue) {
+			const numValue = parseInt(thresholdValue, 10);
+			if (!isNaN(numValue)) {
+				return `${field} ${celOperator} ${numValue}`;
+			}
+		}
+	}
+
 	// Handle tokens_used, request, and budget_used
 	// Structure: tokens_used > 80.0 or request >= 75.0 or budget_used > 50.0
 	// These are simple numeric comparisons against percent_used values from GetBudgetAndRateLimitStatus
