@@ -433,7 +433,7 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		// Block the request if the matched routing rule has block=true
 		if routingDecision != nil && routingDecision.Block {
 			blockMsg := fmt.Sprintf("Request blocked by routing rule '%s': model %s blocked by cost ceiling policy",
-				routingDecision.MatchedRuleName, ctx.GetModel())
+				routingDecision.MatchedRuleName, routingDecision.Model)
 			p.logger.Info("[HTTPTransport] %s (rule_id=%s)", blockMsg, routingDecision.MatchedRuleID)
 			return nil, &schemas.BifrostError{
 				IsBifrostError: true,
