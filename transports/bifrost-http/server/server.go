@@ -153,6 +153,7 @@ type BifrostHTTPServer struct {
 	AuthMiddleware       *handlers.AuthMiddleware
 	TracingMiddleware    *handlers.TracingMiddleware
 	TenantMiddleware     *handlers.TenantMiddleware
+	KafkaIngestHandler   *handlers.KafkaIngestHandler
 	WSTicketStore        *handlers.WSTicketStore
 	TempTokens           *temptoken.Service
 	TempTokenSweepWorker *temptoken.SweepWorker
@@ -1673,6 +1674,17 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		}
 		return fmt.Errorf("failed to initialize inference routes: %v", err)
 	}
+
+	// High-throughput Kafka ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
+	if s.Config.Registry() != nil && s.Config.TenantStore != nil && len(s.Config.TenantStore.AdminJWTKey) > 0 {
+		s.KafkaIngestHandler = handlers.NewKafkaIngestHandler(s.Config.Registry())
+		ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
+		s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
+		logger.Info("registered kafka ingest route POST /v1/ingest/kafka")
+	} else {
+		logger.Warn("kafka ingest route not registered: tenant registry or admin JWT key missing")
+	}
+
 	// Register UI handler
 	s.RegisterUIRoutes()
 	// Create fasthttp server instance
@@ -1715,6 +1727,10 @@ func (s *BifrostHTTPServer) Start() error {
 		if s.IntegrationHandler != nil {
 			logger.Info("closing realtime transport sessions...")
 			s.IntegrationHandler.Close()
+		}
+		if s.KafkaIngestHandler != nil {
+			logger.Info("closing kafka ingest producers...")
+			s.KafkaIngestHandler.Close()
 		}
 		// Create shutdown context with timeout
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1774,6 +1790,9 @@ func (s *BifrostHTTPServer) Start() error {
 	case err := <-errChan:
 		if s.IntegrationHandler != nil {
 			s.IntegrationHandler.Close()
+		}
+		if s.KafkaIngestHandler != nil {
+			s.KafkaIngestHandler.Close()
 		}
 		if s.wsPool != nil {
 			s.wsPool.Close()
