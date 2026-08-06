@@ -43,6 +43,8 @@ type Config struct {
 	IsEnterprise          bool      `json:"is_enterprise"`
 	DisableAutoToolInject *bool     `json:"disable_auto_tool_inject"`
 	RoutingChainMaxDepth  *int      `json:"routing_chain_max_depth"` // Pointer to live config value; changes are reflected immediately without restart
+	// GatewayDeploymentType: "unified_llm" (default) or "ai_infra". See configstore.GatewayDeploymentType*.
+	GatewayDeploymentType string `json:"gateway_deployment_type,omitempty"`
 }
 
 type InMemoryStore interface {
@@ -96,6 +98,10 @@ type GovernancePlugin struct {
 	isEnterprise          bool
 	disableAutoToolInject *bool
 	routingChainMaxDepth  *int
+	gatewayDeploymentType string
+
+	// usagePublisher publishes InferenceUsage to Kafka (injected by HTTP transport).
+	usagePublisher UsageEventPublisher
 }
 
 // Init initializes and returns a governance plugin instance.
@@ -160,12 +166,17 @@ func Init(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
+	gatewayDeploymentType := configstore.GatewayDeploymentTypeUnifiedLLM
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
+		if config.GatewayDeploymentType != "" {
+			gatewayDeploymentType = config.GatewayDeploymentType
+		}
 	}
+	gatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(gatewayDeploymentType)
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
@@ -185,6 +196,7 @@ func Init(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
+		gatewayDeploymentType: gatewayDeploymentType,
 		inMemoryStore:         inMemoryStore,
 	}
 	return plugin, nil
@@ -229,18 +241,27 @@ func InitFromStore(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
+	gatewayDeploymentType := configstore.GatewayDeploymentTypeUnifiedLLM
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
+		if config.GatewayDeploymentType != "" {
+			gatewayDeploymentType = config.GatewayDeploymentType
+		}
 	}
+	gatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(gatewayDeploymentType)
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
 	}
 	resolver := NewBudgetResolver(governanceStore, modelCatalog, logger, inMemoryStore)
 	tracker := NewUsageTracker(ctx, governanceStore, resolver, configStore, logger)
+	tracker.SetOwnsLocalBudgetUsage(!configstore.IsAIInfraGatewayDeployment(gatewayDeploymentType))
+	if localStore, ok := governanceStore.(*LocalGovernanceStore); ok {
+		localStore.SetSyncBudgetUsageFromDatabase(configstore.IsAIInfraGatewayDeployment(gatewayDeploymentType))
+	}
 	engine, err := NewRoutingEngine(governanceStore, logger, routingChainMaxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize routing engine: %w", err)
@@ -276,6 +297,7 @@ func InitFromStore(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
+		gatewayDeploymentType: gatewayDeploymentType,
 	}
 	plugin.tenantComponents.Store(testTenantID, &tenantGovernanceComponents{
 		store:    governanceStore,
@@ -322,6 +344,33 @@ func (p *GovernancePlugin) getStoreAndResolverForContext(ctx context.Context) (G
 		return nil, nil
 	}
 	return comp.store, comp.resolver
+}
+
+// SetUsageEventPublisher injects the Kafka InferenceUsage publisher (HTTP transport).
+// Nil disables publish; failures are logged only and never fail the LLM path.
+// Publish runs only when gateway deployment type is ai_infra.
+func (p *GovernancePlugin) SetUsageEventPublisher(publisher UsageEventPublisher) {
+	if p == nil {
+		return
+	}
+	p.usagePublisher = publisher
+}
+
+// isAIInfraDeployment reports whether this plugin runs in AI infra gateway mode
+// (Kafka usage publish + DB→cache budget sync; no local DumpBudgets).
+func (p *GovernancePlugin) isAIInfraDeployment() bool {
+	if p == nil {
+		return false
+	}
+	p.cfgMutex.RLock()
+	defer p.cfgMutex.RUnlock()
+	return configstore.IsAIInfraGatewayDeployment(p.gatewayDeploymentType)
+}
+
+// ownsLocalBudgetUsage reports whether the gateway prices and persists budget usage locally
+// (unified_llm default).
+func (p *GovernancePlugin) ownsLocalBudgetUsage() bool {
+	return !p.isAIInfraDeployment()
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -1265,8 +1314,9 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	// Short-circuits with VirtualKeyBlocked / ProviderBlocked / ModelBlocked before
 	// we touch Customer / Team / User.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
-		// Enterprise user auth (user id without tenant context) skips VK budget/rate-limit
-		// so user-level governance owns limits. Tenant JWT auth never sets user id on context.
+		// Enterprise user auth (auth UserID without tenant context) skips VK budget/rate-limit
+		// so user-level governance owns limits. Body billing user_id must NOT trigger this —
+		// it is untrusted client input and only feeds user-scoped budget checks.
 		skipVKBudgetLimit := skipBudgetsAndRateLimits
 		if !skipVKBudgetLimit && evaluationRequest.UserID != "" {
 			if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
@@ -1284,9 +1334,19 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 		}
 	}
 
-	// Step 3: User-level governance (enterprise-only).
+	// Step 3: Billing-scope budgets (account / contract) — skip when IDs not provided.
 	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
-		result = resolver.EvaluateUserRequest(ctx, evaluationRequest.UserID, evaluationRequest)
+		result = resolver.EvaluateBillingScopeRequest(ctx, evaluationRequest)
+	}
+
+	// Step 4: User-level governance for auth user and/or body billing user_id (deduped).
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
+		for _, userID := range uniqueNonEmptyStrings(evaluationRequest.UserID, evaluationRequest.BillingUserID) {
+			result = resolver.EvaluateUserRequest(ctx, userID, evaluationRequest)
+			if result.Decision != DecisionAllow {
+				break
+			}
+		}
 	}
 
 	// Check the actual MCP tools injected into the request against the VK MCPConfigs.
@@ -1452,16 +1512,23 @@ func (p *GovernancePlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.
 	}
 	// Extract governance headers and virtual key using utility functions
 	virtualKeyValue := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)
-	// Extract user ID for enterprise user-level governance
-	userID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	// Auth user (enterprise) vs body billing user_id — kept separate so body input cannot skip VK budgets.
+	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
+	// Account/contract from top-level request body fields (stamped by HTTP router)
+	accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID)
+	contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID)
 	// Getting provider and mode from the request
 	provider, model, _ := req.GetRequestFields()
 	// Create request context for evaluation
 	evaluationRequest := &EvaluationRequest{
-		VirtualKey: virtualKeyValue,
-		Provider:   provider,
-		Model:      model,
-		UserID:     userID,
+		VirtualKey:    virtualKeyValue,
+		Provider:      provider,
+		Model:         model,
+		UserID:        authUserID,
+		BillingUserID: billingUserID,
+		AccountID:     accountID,
+		ContractID:    contractID,
 	}
 	// Evaluate governance using common function
 	_, bifrostError := p.EvaluateGovernanceRequest(ctx, evaluationRequest, req.RequestType)
@@ -1505,8 +1572,13 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 	// Extract governance information
 	virtualKey := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)
 	requestID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyRequestID)
-	// Extract user ID for enterprise user-level governance
-	userID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	// Auth user for enterprise skip-VK behavior; billing body user_id only for attribution/budget bumps.
+	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
+	userID := authUserID
+	if userID == "" {
+		userID = billingUserID
+	}
 
 	if requestType == schemas.ListModelsRequest && result != nil && result.ListModelsResponse != nil && virtualKey != "" {
 		// filter models which are not supported on this virtual key
@@ -1518,7 +1590,7 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 	// Always process usage tracking (with or without virtual key).
 	// Enterprise user auth skips VK usage tracking so user-level governance owns limits.
 	effectiveVK := virtualKey
-	if userID != "" {
+	if authUserID != "" {
 		if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
 			effectiveVK = ""
 		}
@@ -1578,13 +1650,20 @@ func (p *GovernancePlugin) PreMCPHook(ctx *schemas.BifrostContext, req *schemas.
 
 	// Extract governance headers and virtual key using utility functions
 	virtualKeyValue := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)
-	// Extract user ID for enterprise user-level governance
-	userID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	// Auth user vs body billing user_id — kept separate so body input cannot skip VK budgets.
+	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
+	// Account/contract from top-level request body fields (stamped by HTTP router)
+	accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID)
+	contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID)
 
 	// Create request context for evaluation (MCP requests don't have provider/model)
 	evaluationRequest := &EvaluationRequest{
-		VirtualKey: virtualKeyValue,
-		UserID:     userID,
+		VirtualKey:    virtualKeyValue,
+		UserID:        authUserID,
+		BillingUserID: billingUserID,
+		AccountID:     accountID,
+		ContractID:    contractID,
 	}
 
 	// Evaluate governance using common function
@@ -1669,11 +1748,17 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 	// Extract governance information
 	virtualKey := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)
 	requestID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyRequestID)
-	userID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
 
-	// When user auth is present, skip VK usage tracking to avoid double-counting
-	if userID != "" {
+	// When enterprise user auth is present, skip VK usage tracking to avoid double-counting.
+	// Body billing user_id must not clear VK tracking.
+	if authUserID != "" {
 		virtualKey = ""
+	}
+	userID := authUserID
+	if userID == "" {
+		userID = billingUserID
 	}
 
 	// Skip if no virtual key
@@ -1796,34 +1881,83 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 
 	if !isStreaming || (isStreaming && isFinalChunk) {
 		promptTokens, completionTokens := extractBudgetTokenCounts(result)
-		cost := float64(0)
-		if comp.store != nil {
-			cost = comp.store.CalculateBudgetCost(provider, model, promptTokens, completionTokens)
-		}
 		tokensUsed := 0
+		cachedInputTokens := 0
+		cacheCreationTokens := 0
+		reasoningTokens := 0
+		durationMs := int64(0)
 		if result != nil {
 			switch {
 			case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
 				tokensUsed = result.TextCompletionResponse.Usage.TotalTokens
+				if result.TextCompletionResponse.Usage.PromptTokensDetails != nil {
+					cachedInputTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedReadTokens
+					cacheCreationTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedWriteTokens
+				}
+				if result.TextCompletionResponse.Usage.CompletionTokensDetails != nil {
+					reasoningTokens = result.TextCompletionResponse.Usage.CompletionTokensDetails.ReasoningTokens
+				}
+				durationMs = result.TextCompletionResponse.ExtraFields.Latency
 			case result.ChatResponse != nil && result.ChatResponse.Usage != nil:
 				tokensUsed = result.ChatResponse.Usage.TotalTokens
+				if result.ChatResponse.Usage.PromptTokensDetails != nil {
+					cachedInputTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedReadTokens
+					cacheCreationTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedWriteTokens
+				}
+				if result.ChatResponse.Usage.CompletionTokensDetails != nil {
+					reasoningTokens = result.ChatResponse.Usage.CompletionTokensDetails.ReasoningTokens
+				}
+				durationMs = result.ChatResponse.ExtraFields.Latency
 			case result.ResponsesResponse != nil && result.ResponsesResponse.Usage != nil:
 				tokensUsed = result.ResponsesResponse.Usage.TotalTokens
+				if result.ResponsesResponse.Usage.InputTokensDetails != nil {
+					cachedInputTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedReadTokens
+					cacheCreationTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedWriteTokens
+				}
+				if result.ResponsesResponse.Usage.OutputTokensDetails != nil {
+					reasoningTokens = result.ResponsesResponse.Usage.OutputTokensDetails.ReasoningTokens
+				}
+				durationMs = result.ResponsesResponse.ExtraFields.Latency
 			case result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.Response != nil && result.ResponsesStreamResponse.Response.Usage != nil:
 				tokensUsed = result.ResponsesStreamResponse.Response.Usage.TotalTokens
+				if result.ResponsesStreamResponse.Response.Usage.InputTokensDetails != nil {
+					cachedInputTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedReadTokens
+					cacheCreationTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedWriteTokens
+				}
+				if result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails != nil {
+					reasoningTokens = result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails.ReasoningTokens
+				}
+				durationMs = result.ResponsesStreamResponse.ExtraFields.Latency
 			case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
 				tokensUsed = result.EmbeddingResponse.Usage.TotalTokens
+				durationMs = result.EmbeddingResponse.ExtraFields.Latency
 			case result.SpeechResponse != nil && result.SpeechResponse.Usage != nil:
 				tokensUsed = result.SpeechResponse.Usage.TotalTokens
+				durationMs = result.SpeechResponse.ExtraFields.Latency
 			case result.SpeechStreamResponse != nil && result.SpeechStreamResponse.Usage != nil:
 				tokensUsed = result.SpeechStreamResponse.Usage.TotalTokens
+				durationMs = result.SpeechStreamResponse.ExtraFields.Latency
 			case result.TranscriptionResponse != nil && result.TranscriptionResponse.Usage != nil && result.TranscriptionResponse.Usage.TotalTokens != nil:
 				tokensUsed = *result.TranscriptionResponse.Usage.TotalTokens
+				durationMs = result.TranscriptionResponse.ExtraFields.Latency
 			case result.TranscriptionStreamResponse != nil && result.TranscriptionStreamResponse.Usage != nil && result.TranscriptionStreamResponse.Usage.TotalTokens != nil:
 				tokensUsed = *result.TranscriptionStreamResponse.Usage.TotalTokens
+				durationMs = result.TranscriptionStreamResponse.ExtraFields.Latency
 			}
 		}
-		// Create usage update for tracker (business logic)
+
+		// Publish InferenceUsage to Kafka only for AI infra gateway (MPilot/Rating owns budget DB writes).
+		if p.isAIInfraDeployment() {
+			p.publishInferenceUsage(ctx, comp, provider, model, virtualKey, requestID, userID, success,
+				promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs)
+		}
+
+		// Unified LLM gateway: calculate cost and bump budgets locally.
+		// AI infra: Cost=0 — rate limits only; budget usage comes from DB sync after MPilot updates.
+		cost := float64(0)
+		if p.ownsLocalBudgetUsage() && comp.store != nil {
+			cost = comp.store.CalculateBudgetCost(provider, model, promptTokens, completionTokens)
+		}
 		usageUpdate := &UsageUpdate{
 			VirtualKey:   virtualKey,
 			Provider:     provider,
@@ -1837,8 +1971,97 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 			IsFinalChunk: isFinalChunk,
 			HasUsageData: tokensUsed > 0,
 		}
-
 		comp.tracker.UpdateUsage(ctx, usageUpdate)
+	}
+}
+
+// publishInferenceUsage builds the InferenceUsage Kafka payload and publishes via the injected publisher.
+func (p *GovernancePlugin) publishInferenceUsage(
+	ctx context.Context,
+	comp *tenantGovernanceComponents,
+	provider schemas.ModelProvider,
+	model string,
+	virtualKey, requestID, userID string,
+	success bool,
+	promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens int,
+	durationMs int64,
+) {
+	if p.usagePublisher == nil {
+		return
+	}
+	if !p.isAIInfraDeployment() {
+		return
+	}
+	tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID)
+	if tenantID == "" {
+		if tid, ok := ctx.Value(schemas.BifrostContextKeyTenantID).(string); ok {
+			tenantID = tid
+		}
+	}
+	if tenantID == "" {
+		p.logger.Debug("skipping InferenceUsage kafka publish: tenant id missing")
+		return
+	}
+
+	message := map[string]any{
+		"provider":              string(provider),
+		"model":                 model,
+		"prompt_tokens":         promptTokens,
+		"completion_tokens":     completionTokens,
+		"total_tokens":          totalTokens,
+		"cached_input_tokens":   cachedInputTokens,
+		"cache_creation_tokens": cacheCreationTokens,
+		"reasoning_tokens":      reasoningTokens,
+		"success":               success,
+	}
+	if durationMs > 0 {
+		message["duration_ms"] = durationMs
+		endTime := time.Now().UTC()
+		startTime := endTime.Add(-time.Duration(durationMs) * time.Millisecond)
+		message["end_time"] = endTime.Format(time.RFC3339Nano)
+		message["start_time"] = startTime.Format(time.RFC3339Nano)
+	}
+	if requestID != "" {
+		message["request_id"] = requestID
+	}
+	// Prefer body billing user_id for MPilot budget attribution; fall back to auth user.
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
+	if billingUserID != "" {
+		message["user_id"] = billingUserID
+	} else if userID != "" {
+		message["user_id"] = userID
+	}
+	if accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID); accountID != "" {
+		message["account_id"] = accountID
+	}
+	if contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID); contractID != "" {
+		message["contract_id"] = contractID
+	}
+	if orgID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID); orgID != "" {
+		message["org_unit"] = orgID
+	}
+	vkID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)
+	if vkID != "" {
+		message["virtual_key_id"] = vkID
+	}
+	if comp != nil && comp.store != nil {
+		if providerID := comp.store.ResolveConfigProviderID(provider); providerID != "" {
+			message["provider_id"] = providerID
+		}
+		if modelID := comp.store.ResolveConfigModelID(provider, model); modelID != "" {
+			message["model_id"] = modelID
+		}
+	}
+
+	key := requestID
+	if key == "" {
+		key = vkID
+	}
+	if key == "" {
+		key = virtualKey
+	}
+	if err := p.usagePublisher.PublishUsage(ctx, tenantID, key, message); err != nil {
+		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
 	}
 }
 
@@ -1849,6 +2072,23 @@ func (p *GovernancePlugin) GetGovernanceStore(ctx context.Context) GovernanceSto
 		return nil
 	}
 	return comp.store
+}
+
+// uniqueNonEmptyStrings returns non-empty values in order, dropping duplicates.
+func uniqueNonEmptyStrings(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // GenerateVirtualKey is a helper function

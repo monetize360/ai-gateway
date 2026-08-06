@@ -22,13 +22,32 @@ type KafkaIngestHandler struct {
 	schemaCache *kafkainject.SchemaCache
 }
 
-// NewKafkaIngestHandler creates a Kafka ingest handler.
+// NewKafkaIngestHandler creates a Kafka ingest handler with its own producer pool.
 func NewKafkaIngestHandler(registry tenantstore.Resolver) *KafkaIngestHandler {
+	return NewKafkaIngestHandlerWithPool(registry, kafkainject.NewPool(registry), kafkainject.NewSchemaCache(registry))
+}
+
+// NewKafkaIngestHandlerWithPool creates a Kafka ingest handler that shares a producer pool.
+func NewKafkaIngestHandlerWithPool(registry tenantstore.Resolver, pool *kafkainject.Pool, schemaCache *kafkainject.SchemaCache) *KafkaIngestHandler {
+	if pool == nil {
+		pool = kafkainject.NewPool(registry)
+	}
+	if schemaCache == nil {
+		schemaCache = kafkainject.NewSchemaCache(registry)
+	}
 	return &KafkaIngestHandler{
 		registry:    registry,
-		pool:        kafkainject.NewPool(registry),
-		schemaCache: kafkainject.NewSchemaCache(registry),
+		pool:        pool,
+		schemaCache: schemaCache,
 	}
+}
+
+// UsagePublisher returns an InferenceUsage publisher backed by this handler's pool.
+func (h *KafkaIngestHandler) UsagePublisher() *kafkainject.UsagePublisher {
+	if h == nil {
+		return nil
+	}
+	return kafkainject.NewUsagePublisher(h.pool, h.schemaCache)
 }
 
 // RegisterRoutes registers POST /v1/ingest/kafka.

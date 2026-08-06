@@ -731,6 +731,22 @@ func (g *GenericRouter) createHandler(config RouteConfig) fasthttp.RequestHandle
 				}
 			}
 
+			// Stamp optional billing-scope IDs from top-level body fields (same as model).
+			// Prefer raw JSON body; fall back to form values for multipart parsers.
+			// Then strip those keys from the fasthttp body so providers never see them
+			// (raw-forward path and any later body readers). Must run AFTER stamp.
+			if !isLargePayload {
+				if rawBody == nil {
+					rawBody = ctx.Request.Body()
+				}
+				stampBillingScopeIDsFromBody(bifrostCtx, ctx, rawBody)
+				if len(rawBody) > 0 {
+					stripped := stripBillingScopeIDsFromBody(rawBody)
+					rawBody = stripped
+					ctx.Request.SetBody(stripped)
+				}
+			}
+
 			// Extract the "extra_params" JSON key when passthrough is
 			// explicitly enabled via x-bf-passthrough-extra-params: true.
 			// Provider-specific fields (e.g. Bedrock guardrailConfig)
@@ -908,7 +924,7 @@ func (g *GenericRouter) createHandler(config RouteConfig) fasthttp.RequestHandle
 			return
 		}
 		if sendRawRequestBody, ok := (*bifrostCtx).Value(schemas.BifrostContextKeyUseRawRequestBody).(bool); ok && sendRawRequestBody {
-			bifrostReq.SetRawRequestBody(rawBody)
+			bifrostReq.SetRawRequestBody(stripBillingScopeIDsFromBody(rawBody))
 		}
 
 		// Extract and parse fallbacks from the request if present

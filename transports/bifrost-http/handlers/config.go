@@ -376,6 +376,10 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	updatedConfig.EnforceGovernanceHeader = payload.ClientConfig.EnforceAuthOnInference
 	updatedConfig.EnforceSCIMAuth = payload.ClientConfig.EnforceAuthOnInference
 
+	if payload.ClientConfig.GatewayDeploymentType != "" {
+		updatedConfig.GatewayDeploymentType = payload.ClientConfig.GatewayDeploymentType
+	}
+
 	// Only update MaxRequestBodySizeMB if explicitly provided (> 0) to avoid clearing stored value
 	if payload.ClientConfig.MaxRequestBodySizeMB > 0 {
 		if payload.ClientConfig.MaxRequestBodySizeMB != currentConfig.MaxRequestBodySizeMB {

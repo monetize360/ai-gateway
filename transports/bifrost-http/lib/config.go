@@ -405,6 +405,7 @@ var DefaultClientConfig = configstore.ClientConfig{
 	MCPEnableTempTokenAuth:          false,
 	HideDeletedVirtualKeysInFilters: false,
 	RoutingChainMaxDepth:            governance.DefaultRoutingChainMaxDepth,
+	GatewayDeploymentType:           configstore.GatewayDeploymentTypeUnifiedLLM,
 }
 
 // applyV1Compat normalizes ConfigData to restore v1.4.x allow-list semantics.
@@ -812,6 +813,34 @@ func applyClientConfigDefaults(cc *configstore.ClientConfig) {
 	if cc.EnableLogging == nil {
 		cc.EnableLogging = new(true)
 	}
+	resolveGatewayDeploymentType(cc)
+}
+
+// resolveGatewayDeploymentType normalizes gateway_deployment_type, supporting
+// env.VAR indirection and defaulting to unified_llm.
+func resolveGatewayDeploymentType(cc *configstore.ClientConfig) {
+	if cc == nil {
+		return
+	}
+	raw := strings.TrimSpace(cc.GatewayDeploymentType)
+	if raw == "" {
+		raw = DefaultClientConfig.GatewayDeploymentType
+	}
+	if envKey, ok := strings.CutPrefix(raw, "env."); ok {
+		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+			raw = v
+		} else if v := strings.TrimSpace(os.Getenv("BIFROST_GATEWAY_DEPLOYMENT_TYPE")); v != "" {
+			raw = v
+		} else {
+			raw = configstore.GatewayDeploymentTypeUnifiedLLM
+		}
+	} else if raw == configstore.GatewayDeploymentTypeUnifiedLLM || raw == "" {
+		// Allow process env to override default when config leaves unified default / empty
+		if v := strings.TrimSpace(os.Getenv("BIFROST_GATEWAY_DEPLOYMENT_TYPE")); v != "" && cc.GatewayDeploymentType == "" {
+			raw = v
+		}
+	}
+	cc.GatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(raw)
 }
 
 // sanitizeMCPExternalOAuthURLs validates the MCP external OAuth URL overrides

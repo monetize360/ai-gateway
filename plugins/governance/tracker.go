@@ -37,6 +37,10 @@ type UsageTracker struct {
 	configStore configstore.ConfigStore
 	logger      schemas.Logger
 
+	// ownsLocalBudgetUsage: true for unified_llm (bump cache + DumpBudgets).
+	// false for ai_infra (rate limits only; MPilot owns governance_budgets writes).
+	ownsLocalBudgetUsage bool
+
 	// Background workers
 	trackerCtx    context.Context
 	trackerCancel context.CancelFunc
@@ -49,14 +53,16 @@ const (
 	workerInterval = 10 * time.Second
 )
 
-// NewUsageTracker creates a new usage tracker for the hierarchical budget system
+// NewUsageTracker creates a new usage tracker for the hierarchical budget system.
+// Defaults to ownsLocalBudgetUsage=true (unified_llm). Call SetOwnsLocalBudgetUsage for ai_infra.
 func NewUsageTracker(ctx context.Context, store GovernanceStore, resolver *BudgetResolver, configStore configstore.ConfigStore, logger schemas.Logger) *UsageTracker {
 	tracker := &UsageTracker{
-		store:       store,
-		resolver:    resolver,
-		configStore: configStore,
-		logger:      logger,
-		done:        make(chan struct{}),
+		store:                store,
+		resolver:             resolver,
+		configStore:          configStore,
+		logger:               logger,
+		ownsLocalBudgetUsage: true,
+		done:                 make(chan struct{}),
 	}
 
 	// Start background workers for business logic
@@ -64,6 +70,14 @@ func NewUsageTracker(ctx context.Context, store GovernanceStore, resolver *Budge
 	tracker.startWorkers(tracker.trackerCtx)
 
 	return tracker
+}
+
+// SetOwnsLocalBudgetUsage configures whether this tracker bumps and dumps budget usage locally.
+func (t *UsageTracker) SetOwnsLocalBudgetUsage(owns bool) {
+	if t == nil {
+		return
+	}
+	t.ownsLocalBudgetUsage = owns
 }
 
 // UpdateUsage queues a usage update for async processing (main business entry point)
@@ -88,10 +102,8 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 		}
 	}
 
-	// 2. Update budget usage for both provider-level and model-level
-	// This applies even when virtual keys are disabled or not present
-	// Guard: only update when both Provider and Model are set (MCP paths may not have these)
-	if update.Provider != "" && update.Model != "" && shouldUpdateBudget && update.Cost > 0 {
+	// 2. Update budget usage for both provider-level and model-level (unified_llm only)
+	if t.ownsLocalBudgetUsage && update.Provider != "" && update.Model != "" && shouldUpdateBudget && update.Cost > 0 {
 		if err := t.store.UpdateProviderAndModelBudgetUsageInMemory(ctx, update.Model, update.Provider, update.Cost); err != nil {
 			t.logger.Error("failed to update budget usage for model %s, provider %s: %v", update.Model, update.Provider, err)
 		}
@@ -103,8 +115,7 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 		if err := t.store.UpdateUserRateLimitUsageInMemory(ctx, update.UserID, update.TokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
 			t.logger.Error("failed to update user rate limit usage for user %s: %v", update.UserID, err)
 		}
-		// Update user budget usage
-		if shouldUpdateBudget && update.Cost > 0 {
+		if t.ownsLocalBudgetUsage && shouldUpdateBudget && update.Cost > 0 {
 			if err := t.store.UpdateUserBudgetUsageInMemory(ctx, update.UserID, update.Cost); err != nil {
 				t.logger.Error("failed to update user budget usage for user %s: %v", update.UserID, err)
 			}
@@ -131,10 +142,9 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 		}
 	}
 
-	// Update budget usage in hierarchy (VK → Team → Customer) only if we have usage data
-	if shouldUpdateBudget && update.Cost > 0 {
+	// Update budget usage in hierarchy (VK → Team → Customer) — unified_llm only
+	if t.ownsLocalBudgetUsage && shouldUpdateBudget && update.Cost > 0 {
 		t.logger.Debug("updating budget usage for VK %s", vk.ID)
-		// Use atomic budget update to prevent race conditions and ensure consistency
 		if err := t.store.UpdateVirtualKeyBudgetUsageInMemory(ctx, vk, update.Provider, update.Cost); err != nil {
 			t.logger.Error("failed to update budget hierarchy atomically for VK %s: %v", vk.ID, err)
 		}
@@ -182,8 +192,10 @@ func (t *UsageTracker) resetExpiredCounters(ctx context.Context) {
 	if err := t.store.DumpRateLimits(ctx, nil, nil); err != nil {
 		t.logger.Error("failed to dump rate limits to database: %v", err)
 	}
-	if err := t.store.DumpBudgets(ctx, nil); err != nil {
-		t.logger.Error("failed to dump budgets to database: %v", err)
+	if t.ownsLocalBudgetUsage {
+		if err := t.store.DumpBudgets(ctx, nil); err != nil {
+			t.logger.Error("failed to dump budgets to database: %v", err)
+		}
 	}
 }
 
@@ -314,8 +326,10 @@ func (t *UsageTracker) PerformStartupResets(ctx context.Context) error {
 func (t *UsageTracker) Cleanup() error {
 	// Final flush of in-memory deltas to DB before shutdown. Without this,
 	// any deltas accumulated since the last `workerInterval` tick are lost.
-	if err := t.store.DumpBudgets(context.Background(), nil); err != nil {
-		t.logger.Error("final budget dump on shutdown failed: %v", err)
+	if t.ownsLocalBudgetUsage {
+		if err := t.store.DumpBudgets(context.Background(), nil); err != nil {
+			t.logger.Error("final budget dump on shutdown failed: %v", err)
+		}
 	}
 	if err := t.store.DumpRateLimits(context.Background(), nil, nil); err != nil {
 		t.logger.Error("final rate-limit dump on shutdown failed: %v", err)

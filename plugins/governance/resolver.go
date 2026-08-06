@@ -28,10 +28,13 @@ const (
 
 // EvaluationRequest contains the context for evaluating a request
 type EvaluationRequest struct {
-	VirtualKey string                `json:"virtual_key"` // Virtual key value
-	Provider   schemas.ModelProvider `json:"provider"`
-	Model      string                `json:"model"`
-	UserID     string                `json:"user_id,omitempty"` // User ID for user-level governance (enterprise only)
+	VirtualKey    string                `json:"virtual_key"` // Virtual key value
+	Provider      schemas.ModelProvider `json:"provider"`
+	Model         string                `json:"model"`
+	UserID        string                `json:"user_id,omitempty"`         // Auth user ID (enterprise). Alone triggers VK budget skip when no tenant.
+	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for governance_budgets.user_id checks only
+	AccountID     string                `json:"account_id,omitempty"`      // Account ID for billing account budget checks (optional)
+	ContractID    string                `json:"contract_id,omitempty"`     // Contract ID for billing contract budget checks (optional)
 }
 
 // EvaluationResult contains the complete result of governance evaluation
@@ -151,8 +154,7 @@ func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext
 	}
 }
 
-// EvaluateUserRequest evaluates user-level rate limits and budgets (enterprise-only)
-// This runs after provider/model checks but before VK checks
+// EvaluateUserRequest evaluates user-level rate limits and budgets
 // Returns DecisionAllow if userID is empty or user has no governance configured
 func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID string, request *EvaluationRequest) *EvaluationResult {
 	// Skip if no userID (non-enterprise or anonymous request)
@@ -171,7 +173,7 @@ func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID
 		}
 	}
 
-	// Check user-level budget
+	// Check user-level budget (governance_budgets.user_id)
 	if decision, err := r.store.CheckUserBudget(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
 		return &EvaluationResult{
 			Decision: decision,
@@ -182,6 +184,37 @@ func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID
 	return &EvaluationResult{
 		Decision: DecisionAllow,
 		Reason:   "User-level checks passed",
+	}
+}
+
+// EvaluateBillingScopeRequest checks account/contract budgets when IDs are present on the request.
+// Missing IDs skip their respective checks.
+func (r *BudgetResolver) EvaluateBillingScopeRequest(ctx *schemas.BifrostContext, request *EvaluationRequest) *EvaluationResult {
+	if request == nil {
+		return &EvaluationResult{
+			Decision: DecisionAllow,
+			Reason:   "No evaluation request, skipping billing-scope checks",
+		}
+	}
+	if request.AccountID != "" {
+		if decision, err := r.store.CheckAccountBudget(ctx, request.AccountID, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
+			}
+		}
+	}
+	if request.ContractID != "" {
+		if decision, err := r.store.CheckContractBudget(ctx, request.ContractID, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision: decision,
+				Reason:   fmt.Sprintf("Contract-level budget exceeded: %s", reasonFromErr(err, decision)),
+			}
+		}
+	}
+	return &EvaluationResult{
+		Decision: DecisionAllow,
+		Reason:   "Billing-scope checks passed",
 	}
 }
 

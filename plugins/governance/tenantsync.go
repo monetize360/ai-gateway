@@ -77,8 +77,10 @@ func (p *GovernancePlugin) syncTenantGovernanceStore(ctx context.Context, tenant
 	if err := localStore.DumpRateLimits(ctx, nil, nil); err != nil {
 		p.logger.Warn("tenant governance sync: failed to dump rate limits for tenant %s: %v", tenantID, err)
 	}
-	if err := localStore.DumpBudgets(ctx, nil); err != nil {
-		p.logger.Warn("tenant governance sync: failed to dump budgets for tenant %s: %v", tenantID, err)
+	if p.ownsLocalBudgetUsage() {
+		if err := localStore.DumpBudgets(ctx, nil); err != nil {
+			p.logger.Warn("tenant governance sync: failed to dump budgets for tenant %s: %v", tenantID, err)
+		}
 	}
 	return localStore.RefreshFromDatabase(ctx)
 }
@@ -95,8 +97,10 @@ func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, t
 		p.logger.Debug("failed to initialise governance store for tenant %s: %v", tenantID, err)
 		return nil
 	}
+	store.SetSyncBudgetUsageFromDatabase(p.isAIInfraDeployment())
 	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
 	tracker := NewUsageTracker(p.ctx, store, resolver, configStore, p.logger)
+	tracker.SetOwnsLocalBudgetUsage(p.ownsLocalBudgetUsage())
 	engine, err := NewRoutingEngine(store, p.logger, p.routingChainMaxDepth)
 	if err != nil {
 		p.logger.Debug("failed to initialise routing engine for tenant %s: %v", tenantID, err)

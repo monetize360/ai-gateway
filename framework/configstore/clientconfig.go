@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/bytedance/sonic"
 	bifrost "github.com/maximhq/bifrost/core"
@@ -95,8 +96,35 @@ type ClientConfig struct {
 	WhitelistedRoutes                     []string                         `json:"whitelisted_routes,omitempty"`         // Routes that bypass auth middleware
 	HideDeletedVirtualKeysInFilters       bool                             `json:"hide_deleted_virtual_keys_in_filters"` // Hide deleted virtual keys from logs/MCP filter data
 	RoutingChainMaxDepth                  int                              `json:"routing_chain_max_depth"`              // Maximum depth for routing rule chain evaluation (default: 10)
+	// GatewayDeploymentType selects budget ownership mode:
+	//   "unified_llm" (default) — gateway prices, bumps cache, DumpBudgets to DB; no Kafka InferenceUsage publish
+	//   "ai_infra" — publish InferenceUsage to Kafka; MPilot/Rating updates DB; gateway SyncBudgetFromDatabase
+	// Supports literal values or env indirection ("env.BIFROST_GATEWAY_DEPLOYMENT_TYPE").
+	GatewayDeploymentType                 string                           `json:"gateway_deployment_type,omitempty"`
 	MCPExternalClientURL                  *schemas.EnvVar                  `json:"mcp_external_client_url,omitempty"`    // Public base URL used as redirect_uri when Bifrost acts as an OAuth client to upstream MCP servers. Supports env var syntax ("env.MY_VAR")
 	ConfigHash                            string                           `json:"-"`                                    // Config hash for reconciliation (not serialized)
+}
+
+// Gateway deployment type values for ClientConfig.GatewayDeploymentType.
+const (
+	GatewayDeploymentTypeUnifiedLLM = "unified_llm"
+	GatewayDeploymentTypeAIInfra    = "ai_infra"
+)
+
+// NormalizeGatewayDeploymentType returns a canonical deployment type.
+// Unknown / empty values map to unified_llm (default).
+func NormalizeGatewayDeploymentType(v string) string {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case GatewayDeploymentTypeAIInfra, "ai-infra", "ai_infra_gateway":
+		return GatewayDeploymentTypeAIInfra
+	default:
+		return GatewayDeploymentTypeUnifiedLLM
+	}
+}
+
+// IsAIInfraGatewayDeployment reports whether v is the AI infra gateway mode.
+func IsAIInfraGatewayDeployment(v string) bool {
+	return NormalizeGatewayDeploymentType(v) == GatewayDeploymentTypeAIInfra
 }
 
 // UnmarshalJSON defaults all bool fields to true when absent from JSON.
@@ -178,6 +206,10 @@ func (c *ClientConfig) GenerateClientConfigHash() (string, error) {
 	// their config_hash so there is no hash churn on upgrade for unmodified configs.
 	if c.RoutingChainMaxDepth > 0 {
 		hash.Write([]byte("routingChainMaxDepth:" + strconv.Itoa(c.RoutingChainMaxDepth)))
+	}
+
+	if c.GatewayDeploymentType != "" {
+		hash.Write([]byte("gatewayDeploymentType:" + NormalizeGatewayDeploymentType(c.GatewayDeploymentType)))
 	}
 
 	if c.MCPAgentDepth > 0 {

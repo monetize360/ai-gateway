@@ -9,7 +9,8 @@ import (
 
 // TableBudget defines spending limits with configurable reset periods.
 // Parent ownership is expressed via FK columns on this row (virtual_key_id,
-// provider_config_id, provider_id, model_config_id, team_id, governed_organization_id).
+// provider_config_id, provider_id, model_config_id, team_id, governed_organization_id,
+// account_id, contract_id, user_id).
 // org_id is a visibility column (tenant scoping); governed_organization_id links
 // the budget to an organization for hierarchy governance checks.
 type TableBudget struct {
@@ -26,6 +27,9 @@ type TableBudget struct {
 	ModelConfigID    *string `gorm:"type:uuid;index" json:"model_config_id,omitempty"`
 	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
+	AccountID                *string `gorm:"type:uuid;index" json:"account_id,omitempty"`
+	ContractID               *string `gorm:"type:uuid;index" json:"contract_id,omitempty"`
+	UserID                   *string `gorm:"type:uuid;index" json:"user_id,omitempty"`
 
 	SoftLimit *bool `gorm:"default:false" json:"soft_limit,omitempty"`
 
