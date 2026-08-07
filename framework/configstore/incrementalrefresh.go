@@ -20,6 +20,7 @@ type GovernanceRefreshDelta struct {
 	Organizations                  []tables.TableOrganization
 	VirtualKeys                    []tables.TableVirtualKey
 	Budgets                        []tables.TableBudget
+	BudgetUsages                   []tables.TableBudgetUsage
 	RateLimits                     []tables.TableRateLimit
 	ModelConfigs                   []tables.TableModelConfig
 	Providers                      []tables.TableProvider
@@ -38,6 +39,7 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.Organizations) == 0 &&
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
+		len(d.BudgetUsages) == 0 &&
 		len(d.RateLimits) == 0 &&
 		len(d.ModelConfigs) == 0 &&
 		len(d.Providers) == 0 &&
@@ -79,6 +81,15 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 	if err := appendDeletedRowsSince(db, since, &delta.Budgets); err != nil {
 		return nil, err
+	}
+
+	if db.Migrator().HasTable(&tables.TableBudgetUsage{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.BudgetUsages).Error; err != nil {
+			return nil, fmt.Errorf("budget usages changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.BudgetUsages); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.RateLimits).Error; err != nil {

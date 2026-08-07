@@ -224,6 +224,9 @@ type ConfigStore interface {
 	UpdateBudgetUsage(ctx context.Context, id string, currentUsage float64) error
 	UpdateRateLimitUsage(ctx context.Context, id string, tokenCurrentUsage int64, requestCurrentUsage int64) error
 
+	// BudgetUsage (billing budgetusage__m — ai_infra PreLLM scopes)
+	GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error)
+
 	// Routing Rules CRUD
 	GetRoutingRules(ctx context.Context) ([]tables.TableRoutingRule, error)
 	GetRoutingRulesByScope(ctx context.Context, scope string, scopeID string) ([]tables.TableRoutingRule, error)

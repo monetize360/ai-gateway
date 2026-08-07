@@ -33,6 +33,7 @@ import (
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib/kafkainject"
 	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -1676,13 +1677,30 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	}
 
 	// High-throughput Kafka ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
-	if s.Config.Registry() != nil && s.Config.TenantStore != nil && len(s.Config.TenantStore.AdminJWTKey) > 0 {
-		s.KafkaIngestHandler = handlers.NewKafkaIngestHandler(s.Config.Registry())
-		ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
-		s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
-		logger.Info("registered kafka ingest route POST /v1/ingest/kafka")
+	// Governance InferenceUsage publish is wired only for ai_infra (MPilot owns budget DB writes).
+	if s.Config.Registry() != nil && s.Config.TenantStore != nil {
+		isAIInfra := configstore.IsAIInfraGatewayDeployment(s.Config.ClientConfig.GatewayDeploymentType)
+		needIngestRoute := len(s.Config.TenantStore.AdminJWTKey) > 0
+		if isAIInfra || needIngestRoute {
+			kafkaPool := kafkainject.NewPool(s.Config.Registry())
+			kafkaSchemaCache := kafkainject.NewSchemaCache(s.Config.Registry())
+			s.KafkaIngestHandler = handlers.NewKafkaIngestHandlerWithPool(s.Config.Registry(), kafkaPool, kafkaSchemaCache)
+			if isAIInfra {
+				if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
+					govPlugin.SetUsageEventPublisher(s.KafkaIngestHandler.UsagePublisher())
+					logger.Info("governance InferenceUsage kafka publisher wired (ai_infra)")
+				}
+			}
+			if needIngestRoute {
+				ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
+				s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
+				logger.Info("registered kafka ingest route POST /v1/ingest/kafka")
+			} else {
+				logger.Warn("kafka ingest HTTP route not registered: admin JWT key missing")
+			}
+		}
 	} else {
-		logger.Warn("kafka ingest route not registered: tenant registry or admin JWT key missing")
+		logger.Warn("kafka ingest / usage publish not configured: tenant registry or tenant store missing")
 	}
 
 	// Register UI handler
