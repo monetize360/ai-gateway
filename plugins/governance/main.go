@@ -1961,7 +1961,7 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 
 		// Publish InferenceUsage to Kafka only for AI infra gateway (MPilot/Rating owns budget DB writes).
 		if p.isAIInfraDeployment() {
-			p.publishInferenceUsage(ctx, comp, provider, model, virtualKey, requestID, userID, success,
+			p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
 				promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs)
 		}
 
@@ -1991,11 +1991,9 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 // publishInferenceUsage builds the InferenceUsage Kafka payload and publishes via the injected publisher.
 func (p *GovernancePlugin) publishInferenceUsage(
 	ctx context.Context,
-	comp *tenantGovernanceComponents,
 	provider schemas.ModelProvider,
 	model string,
 	virtualKey, requestID, userID string,
-	success bool,
 	promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens int,
 	durationMs int64,
 ) {
@@ -2025,7 +2023,6 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		"cached_input_tokens":   cachedInputTokens,
 		"cache_creation_tokens": cacheCreationTokens,
 		"reasoning_tokens":      reasoningTokens,
-		"success":               success,
 	}
 	if durationMs > 0 {
 		message["duration_ms"] = durationMs
@@ -2034,10 +2031,7 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		message["end_time"] = endTime.Format(time.RFC3339Nano)
 		message["start_time"] = startTime.Format(time.RFC3339Nano)
 	}
-	if requestID != "" {
-		message["request_id"] = requestID
-	}
-	// Prefer body billing user_id for MPilot budget attribution; fall back to auth user.
+	// Prefer body billing user_id for MPilot BudgetUsage attribution; fall back to auth user.
 	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
 	if billingUserID != "" {
 		message["user_id"] = billingUserID
@@ -2053,25 +2047,15 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	if orgID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID); orgID != "" {
 		message["org_unit"] = orgID
 	}
-	vkID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)
-	if vkID != "" {
-		message["virtual_key_id"] = vkID
-	}
-	if comp != nil && comp.store != nil {
-		if providerID := comp.store.ResolveConfigProviderID(provider); providerID != "" {
-			message["provider_id"] = providerID
-		}
-		if modelID := comp.store.ResolveConfigModelID(provider, model); modelID != "" {
-			message["model_id"] = modelID
-		}
-	}
 
 	key := requestID
 	if key == "" {
-		key = vkID
+		key = virtualKey
 	}
 	if key == "" {
-		key = virtualKey
+		if accountID, ok := message["account_id"].(string); ok {
+			key = accountID
+		}
 	}
 	if err := p.usagePublisher.PublishUsage(ctx, tenantID, key, message); err != nil {
 		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
