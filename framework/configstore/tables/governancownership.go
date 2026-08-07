@@ -29,15 +29,6 @@ func budgetOwnerFields(b *TableBudget) (fields []string) {
 	if b.GovernedOrganizationID != nil {
 		fields = append(fields, "governed_organization_id")
 	}
-	if b.AccountID != nil {
-		fields = append(fields, "account_id")
-	}
-	if b.ContractID != nil {
-		fields = append(fields, "contract_id")
-	}
-	if b.UserID != nil {
-		fields = append(fields, "user_id")
-	}
 	return fields
 }
 

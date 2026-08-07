@@ -3686,6 +3686,20 @@ func (s *RDBConfigStore) GetBudgets(ctx context.Context) ([]tables.TableBudget, 
 	return budgets, nil
 }
 
+// GetBudgetUsages retrieves all BudgetUsage rows from budgetusage__m.
+// Returns an empty slice when the table is absent (e.g. unified_llm tenants without billing).
+func (s *RDBConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableBudgetUsage{}) {
+		return nil, nil
+	}
+	var usages []tables.TableBudgetUsage
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&usages).Error; err != nil {
+		return nil, err
+	}
+	return usages, nil
+}
+
 // GetBudget retrieves a specific budget from the database.
 func (s *RDBConfigStore) GetBudget(ctx context.Context, id string, tx ...*gorm.DB) (*tables.TableBudget, error) {
 	var txDB *gorm.DB

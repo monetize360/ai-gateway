@@ -28,6 +28,7 @@ type LocalGovernanceStore struct {
 	virtualKeys   sync.Map // string -> *VirtualKey (VK value -> VirtualKey with preloaded relationships)
 	organizations sync.Map // string -> *Organization (org ID -> Organization for hierarchy walks)
 	budgets       sync.Map // string -> *Budget (Budget ID -> Budget)
+	budgetUsages  sync.Map // string -> *TableBudgetUsage (BudgetUsage ID -> row from budgetusage__m)
 	rateLimits    sync.Map // string -> *RateLimit (RateLimit ID -> RateLimit)
 	modelConfigs  sync.Map // string -> *ModelConfig (key: "modelName" or "modelName:provider" -> ModelConfig)
 	configModels  sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
@@ -68,8 +69,10 @@ type LocalGovernanceStore struct {
 	orgProviderAccessByOrgID map[string][]configstoreTables.TableProviderAccess
 
 	// syncBudgetUsageFromDB: when true (ai_infra), incremental refresh applies DB CurrentUsage
-	// via SyncBudgetFromDatabase. When false (unified_llm), UpsertBudgetConfig preserves
-	// in-memory usage so local DumpBudgets bumps are not clobbered.
+	// for governance_budgets via SyncBudgetFromDatabase, and BudgetUsage rows are always
+	// synced from DB (MPilot Rating owns budgetusage__m). When false (unified_llm),
+	// UpsertBudgetConfig preserves in-memory governance budget usage so local DumpBudgets
+	// bumps are not clobbered.
 	syncBudgetUsageFromDB bool
 }
 
@@ -179,16 +182,16 @@ type GovernanceStore interface {
 	// Org hierarchy governance checks (walks org → parent → … → root)
 	CheckOrgHierarchyBudget(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckOrgHierarchyRateLimit(ctx context.Context, orgID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
-	// Billing-scope budget checks (governance_budgets.account_id / contract_id / user_id)
-	CheckAccountBudget(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
-	CheckContractBudget(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	// Billing-scope BudgetUsage checks (budgetusage__m account_id / contract_id / user_id; ai_infra PreLLM)
+	CheckAccountBudgetUsage(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	CheckContractBudgetUsage(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	// User governance in-memory operations (enterprise-only, but interface defined here for compatibility)
 	GetUserGovernance(ctx context.Context, userID string) (*UserGovernance, bool)
 	CreateUserGovernanceInMemory(ctx context.Context, userID string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit)
 	UpdateUserGovernanceInMemory(ctx context.Context, userID string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit)
 	DeleteUserGovernanceInMemory(ctx context.Context, userID string)
-	// User-level governance checks (enterprise-only)
-	CheckUserBudget(ctx context.Context, userID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	// User-level governance checks (enterprise-only rate limits; BudgetUsage for ai_infra user scope)
+	CheckUserBudgetUsage(ctx context.Context, userID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckUserRateLimit(ctx context.Context, userID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
 	UpdateUserBudgetUsageInMemory(ctx context.Context, userID string, cost float64) error
 	UpdateUserRateLimitUsageInMemory(ctx context.Context, userID string, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
@@ -1176,77 +1179,104 @@ func (gs *LocalGovernanceStore) CheckOrgHierarchyRateLimit(ctx context.Context, 
 	return gs.CheckRateLimit(ctx, rateLimitsWithCategories, tokensBaselines, requestsBaselines)
 }
 
-// collectBudgetsByOwnerFK gathers live budgets whose owner FK matches match.
-func (gs *LocalGovernanceStore) collectBudgetsByOwnerFK(ctx context.Context, entityKey string, match func(*configstoreTables.TableBudget) bool) EntityWiseBudgets {
-	var budgets []*configstoreTables.TableBudget
-	gs.budgets.Range(func(_, value interface{}) bool {
-		budget, ok := value.(*configstoreTables.TableBudget)
-		if !ok || budget == nil || !match(budget) {
+// collectBudgetUsagesByOwnerFK gathers BudgetUsage rows whose owner FK matches match.
+func (gs *LocalGovernanceStore) collectBudgetUsagesByOwnerFK(entityKey string, match func(*configstoreTables.TableBudgetUsage) bool) map[string][]*configstoreTables.TableBudgetUsage {
+	var usages []*configstoreTables.TableBudgetUsage
+	gs.budgetUsages.Range(func(_, value interface{}) bool {
+		usage, ok := value.(*configstoreTables.TableBudgetUsage)
+		if !ok || usage == nil || !match(usage) {
 			return true
 		}
-		if live := gs.LoadBudget(ctx, budget.ID); live != nil {
-			budgets = append(budgets, live)
-		}
+		usages = append(usages, usage)
 		return true
 	})
-	if len(budgets) == 0 {
+	if len(usages) == 0 {
 		return nil
 	}
-	return EntityWiseBudgets{entityKey: budgets}
+	return map[string][]*configstoreTables.TableBudgetUsage{entityKey: usages}
 }
 
-// CheckAccountBudget checks budgets owned by governance_budgets.account_id.
+// CheckBudgetUsage compares BudgetUsage current_usage against max_limit.
+func (gs *LocalGovernanceStore) CheckBudgetUsage(ctx context.Context, entityWiseUsages map[string][]*configstoreTables.TableBudgetUsage, baselines map[string]float64) (Decision, error) {
+	if baselines == nil {
+		baselines = map[string]float64{}
+	}
+	for entity, usages := range entityWiseUsages {
+		for _, usage := range usages {
+			if usage == nil {
+				continue
+			}
+			baseline := baselines[usage.ID]
+			total := usage.CurrentUsage + baseline
+			gs.logger.Debug("LocalStore CheckBudgetUsage: Checking %s budget usage %s: usage=%.4f, baseline=%.4f, total=%.4f, limit=%.4f",
+				entity, usage.ID, usage.CurrentUsage, baseline, total, usage.MaxLimit)
+			if total >= usage.MaxLimit {
+				return DecisionBudgetExceeded, fmt.Errorf("%s budget exceeded: %.4f >= %.4f dollars",
+					entity, total, usage.MaxLimit)
+			}
+		}
+	}
+	return DecisionAllow, nil
+}
+
+// SyncBudgetUsageFromDatabase installs a BudgetUsage row from DB into the cache.
+// MPilot Rating owns current_usage; always overwrite the in-memory copy.
+func (gs *LocalGovernanceStore) SyncBudgetUsageFromDatabase(ctx context.Context, usageID string, fromDB *configstoreTables.TableBudgetUsage) {
+	if fromDB == nil || usageID == "" {
+		return
+	}
+	clone := *fromDB
+	gs.budgetUsages.Store(usageID, &clone)
+}
+
+// DeleteBudgetUsage removes a BudgetUsage row from the in-memory cache.
+func (gs *LocalGovernanceStore) DeleteBudgetUsage(ctx context.Context, usageID string) {
+	gs.budgetUsages.Delete(usageID)
+}
+
+// CheckAccountBudgetUsage checks BudgetUsage rows owned by account_id.
 // Empty accountID skips the check (DecisionAllow).
-func (gs *LocalGovernanceStore) CheckAccountBudget(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+func (gs *LocalGovernanceStore) CheckAccountBudgetUsage(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
 	if accountID == "" {
 		return DecisionAllow, nil
 	}
-	if baselines == nil {
-		baselines = map[string]float64{}
-	}
-	entityWiseBudgets := gs.collectBudgetsByOwnerFK(ctx, "Account:"+accountID, func(b *configstoreTables.TableBudget) bool {
-		return b.AccountID != nil && *b.AccountID == accountID
+	entityWise := gs.collectBudgetUsagesByOwnerFK("Account:"+accountID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.AccountID != nil && *u.AccountID == accountID
 	})
-	if len(entityWiseBudgets) == 0 {
+	if len(entityWise) == 0 {
 		return DecisionAllow, nil
 	}
-	return gs.CheckBudget(ctx, entityWiseBudgets, baselines)
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
 }
 
-// CheckContractBudget checks budgets owned by governance_budgets.contract_id.
+// CheckContractBudgetUsage checks BudgetUsage rows owned by contract_id.
 // Empty contractID skips the check (DecisionAllow).
-func (gs *LocalGovernanceStore) CheckContractBudget(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+func (gs *LocalGovernanceStore) CheckContractBudgetUsage(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
 	if contractID == "" {
 		return DecisionAllow, nil
 	}
-	if baselines == nil {
-		baselines = map[string]float64{}
-	}
-	entityWiseBudgets := gs.collectBudgetsByOwnerFK(ctx, "Contract:"+contractID, func(b *configstoreTables.TableBudget) bool {
-		return b.ContractID != nil && *b.ContractID == contractID
+	entityWise := gs.collectBudgetUsagesByOwnerFK("Contract:"+contractID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.ContractID != nil && *u.ContractID == contractID
 	})
-	if len(entityWiseBudgets) == 0 {
+	if len(entityWise) == 0 {
 		return DecisionAllow, nil
 	}
-	return gs.CheckBudget(ctx, entityWiseBudgets, baselines)
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
 }
 
-// CheckUserBudget checks budgets owned by governance_budgets.user_id.
+// CheckUserBudgetUsage checks BudgetUsage rows owned by user_id.
 // Empty userID skips the check (DecisionAllow).
-func (gs *LocalGovernanceStore) CheckUserBudget(ctx context.Context, userID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+func (gs *LocalGovernanceStore) CheckUserBudgetUsage(ctx context.Context, userID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
 	if userID == "" {
 		return DecisionAllow, nil
 	}
-	if baselines == nil {
-		baselines = map[string]float64{}
-	}
-	entityWiseBudgets := gs.collectBudgetsByOwnerFK(ctx, "User:"+userID, func(b *configstoreTables.TableBudget) bool {
-		return b.UserID != nil && *b.UserID == userID
+	entityWise := gs.collectBudgetUsagesByOwnerFK("User:"+userID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.UserID != nil && *u.UserID == userID
 	})
-	if len(entityWiseBudgets) == 0 {
+	if len(entityWise) == 0 {
 		return DecisionAllow, nil
 	}
-	return gs.CheckBudget(ctx, entityWiseBudgets, baselines)
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
 }
 
 // CheckModelRateLimit checks model-level rate limits and returns evaluation result if violated
@@ -1819,6 +1849,13 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load budgets: %w", err)
 	}
 
+	// Load billing BudgetUsage rows (account/contract/user scopes for ai_infra PreLLM).
+	// Missing table returns empty slice.
+	budgetUsages, err := gs.configStore.GetBudgetUsages(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load budget usages: %w", err)
+	}
+
 	// Load rate limits
 	rateLimits, err := gs.configStore.GetRateLimits(ctx)
 	if err != nil {
@@ -1861,7 +1898,7 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	}
 
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
@@ -1891,11 +1928,24 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			continue
 		}
 		if gs.syncBudgetUsageFromDB {
-			// AI infra: MPilot/Rating owns CurrentUsage — apply DB values into cache.
+			// AI infra: apply DB CurrentUsage for governance_budgets into cache.
 			gs.SyncBudgetFromDatabase(ctx, budget.ID, budget)
 		} else {
 			// Unified LLM: preserve in-memory CurrentUsage across config refresh.
 			gs.UpsertBudgetConfig(ctx, budget.ID, budget)
+		}
+	}
+
+	for i := range delta.BudgetUsages {
+		usage := &delta.BudgetUsages[i]
+		if usage.Deleted {
+			gs.DeleteBudgetUsage(ctx, usage.ID)
+			continue
+		}
+		// ai_infra only: MPilot Rating owns BudgetUsage.current_usage — apply DB values.
+		// unified_llm skips BudgetUsage refresh (PreLLM never checks these rows).
+		if gs.syncBudgetUsageFromDB {
+			gs.SyncBudgetUsageFromDatabase(ctx, usage.ID, usage)
 		}
 	}
 
@@ -1976,17 +2026,19 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 
 	// Rebuild in-memory structures (lock-free).
 	// Org-level allowed model configs and provider access are not available from config.json — pass nil.
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
+	// BudgetUsage is DB-backed (budgetusage__m); config.json path has none.
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
 	gs.budgets = sync.Map{}
+	gs.budgetUsages = sync.Map{}
 	gs.rateLimits = sync.Map{}
 	gs.modelConfigs = sync.Map{}
 	gs.configModels = sync.Map{}
@@ -2018,6 +2070,12 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	for i := range budgets {
 		budget := &budgets[i]
 		gs.budgets.Store(budget.ID, budget)
+	}
+
+	// Build BudgetUsage map (account / contract / user billing scopes)
+	for i := range budgetUsages {
+		usage := &budgetUsages[i]
+		gs.budgetUsages.Store(usage.ID, usage)
 	}
 
 	// Build rate limits map

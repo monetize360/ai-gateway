@@ -32,9 +32,9 @@ type EvaluationRequest struct {
 	Provider      schemas.ModelProvider `json:"provider"`
 	Model         string                `json:"model"`
 	UserID        string                `json:"user_id,omitempty"`         // Auth user ID (enterprise). Alone triggers VK budget skip when no tenant.
-	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for governance_budgets.user_id checks only
-	AccountID     string                `json:"account_id,omitempty"`      // Account ID for billing account budget checks (optional)
-	ContractID    string                `json:"contract_id,omitempty"`     // Contract ID for billing contract budget checks (optional)
+	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for budgetusage__m.user_id checks (ai_infra)
+	AccountID     string                `json:"account_id,omitempty"`      // Account ID for BudgetUsage account checks (ai_infra)
+	ContractID    string                `json:"contract_id,omitempty"`     // Contract ID for BudgetUsage contract checks (ai_infra)
 }
 
 // EvaluationResult contains the complete result of governance evaluation
@@ -173,8 +173,8 @@ func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID
 		}
 	}
 
-	// Check user-level budget (governance_budgets.user_id)
-	if decision, err := r.store.CheckUserBudget(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
+	// Check user-level budget (budgetusage__m.user_id; ai_infra PreLLM)
+	if decision, err := r.store.CheckUserBudgetUsage(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
 		return &EvaluationResult{
 			Decision: decision,
 			Reason:   fmt.Sprintf("User-level budget exceeded: %s", reasonFromErr(err, decision)),
@@ -187,8 +187,8 @@ func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID
 	}
 }
 
-// EvaluateBillingScopeRequest checks account/contract budgets when IDs are present on the request.
-// Missing IDs skip their respective checks.
+// EvaluateBillingScopeRequest checks account/contract BudgetUsage when IDs are present on the request.
+// Missing IDs skip their respective checks. Intended for ai_infra PreLLM only.
 func (r *BudgetResolver) EvaluateBillingScopeRequest(ctx *schemas.BifrostContext, request *EvaluationRequest) *EvaluationResult {
 	if request == nil {
 		return &EvaluationResult{
@@ -197,7 +197,7 @@ func (r *BudgetResolver) EvaluateBillingScopeRequest(ctx *schemas.BifrostContext
 		}
 	}
 	if request.AccountID != "" {
-		if decision, err := r.store.CheckAccountBudget(ctx, request.AccountID, request, nil); err != nil || isBudgetViolation(decision) {
+		if decision, err := r.store.CheckAccountBudgetUsage(ctx, request.AccountID, request, nil); err != nil || isBudgetViolation(decision) {
 			return &EvaluationResult{
 				Decision: decision,
 				Reason:   fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
@@ -205,7 +205,7 @@ func (r *BudgetResolver) EvaluateBillingScopeRequest(ctx *schemas.BifrostContext
 		}
 	}
 	if request.ContractID != "" {
-		if decision, err := r.store.CheckContractBudget(ctx, request.ContractID, request, nil); err != nil || isBudgetViolation(decision) {
+		if decision, err := r.store.CheckContractBudgetUsage(ctx, request.ContractID, request, nil); err != nil || isBudgetViolation(decision) {
 			return &EvaluationResult{
 				Decision: decision,
 				Reason:   fmt.Sprintf("Contract-level budget exceeded: %s", reasonFromErr(err, decision)),

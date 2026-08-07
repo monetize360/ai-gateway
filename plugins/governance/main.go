@@ -1287,8 +1287,26 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	}
 	p.cfgMutex.RUnlock()
 
-	// First evaluate model and provider checks (applies even when virtual keys are disabled or not present)
-	result := resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
+	// Budget systems are mutually exclusive by deployment:
+	//   unified_llm → governance_budgets (VK / org / provider / model)
+	//   ai_infra    → budgetusage__m (account / contract / user)
+	useGovernanceBudgets := p.ownsLocalBudgetUsage()
+	useBudgetUsage := p.isAIInfraDeployment()
+
+	// Read-only metadata calls (e.g. list models) set this flag to skip budget/rate-limit
+	// checks while still enforcing VK identity (existence, active status, provider/model filtering).
+	skipBudgetsAndRateLimits := bifrost.GetBoolFromContext(ctx, schemas.BifrostContextKeySkipBudgetAndRateLimits)
+
+	// Provider/model governance budgets + rate limits — unified_llm only.
+	var result *EvaluationResult
+	if useGovernanceBudgets && !skipBudgetsAndRateLimits {
+		result = resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
+	} else {
+		result = &EvaluationResult{
+			Decision: DecisionAllow,
+			Reason:   "Skipping provider/model governance budget checks",
+		}
+	}
 
 	// The flow for governance checks is:
 	//   VK (identity + VK-level budget/rate-limit) -> Customer -> Team -> User
@@ -1306,18 +1324,13 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 		}
 	}
 
-	// Read-only metadata calls (e.g. list models) set this flag to skip budget/rate-limit
-	// checks while still enforcing VK identity (existence, active status, provider/model filtering).
-	skipBudgetsAndRateLimits := bifrost.GetBoolFromContext(ctx, schemas.BifrostContextKeySkipBudgetAndRateLimits)
-
-	// Step 1: Evaluate virtual key (identity + VK-level budget/rate-limit hierarchy).
-	// Short-circuits with VirtualKeyBlocked / ProviderBlocked / ModelBlocked before
-	// we touch Customer / Team / User.
+	// Step 1: Evaluate virtual key.
+	// Identity + provider/model filtering always run when a VK is present.
+	// VK budget/rate-limit hierarchy runs only for unified_llm.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
-		// Enterprise user auth (auth UserID without tenant context) skips VK budget/rate-limit
-		// so user-level governance owns limits. Body billing user_id must NOT trigger this —
-		// it is untrusted client input and only feeds user-scoped budget checks.
-		skipVKBudgetLimit := skipBudgetsAndRateLimits
+		// Skip VK budget/rate-limit when: metadata skip flag, enterprise user-auth path,
+		// or ai_infra (BudgetUsage owns spend limits instead of governance_budgets).
+		skipVKBudgetLimit := skipBudgetsAndRateLimits || !useGovernanceBudgets
 		if !skipVKBudgetLimit && evaluationRequest.UserID != "" {
 			if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
 				skipVKBudgetLimit = true
@@ -1326,21 +1339,21 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
 	}
 
-	// Step 2: Org hierarchy budget/rate-limit when VK-level checks were skipped (user auth path).
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
+	// Step 2: Org hierarchy governance budgets — unified_llm only.
+	if useGovernanceBudgets && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
 		stampVirtualKeyOrgContext(ctx, hierarchyVK)
 		if scopeOrgID := hierarchyVK.GovernanceScopeOrgID(); scopeOrgID != nil {
 			result = resolver.EvaluateOrgHierarchyRequest(ctx, *scopeOrgID, evaluationRequest)
 		}
 	}
 
-	// Step 3: Billing-scope budgets (account / contract) — skip when IDs not provided.
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
+	// Step 3: Billing-scope BudgetUsage (account / contract) — ai_infra only.
+	if useBudgetUsage && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
 		result = resolver.EvaluateBillingScopeRequest(ctx, evaluationRequest)
 	}
 
-	// Step 4: User-level governance for auth user and/or body billing user_id (deduped).
-	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
+	// Step 4: User-scoped BudgetUsage — ai_infra only.
+	if useBudgetUsage && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
 		for _, userID := range uniqueNonEmptyStrings(evaluationRequest.UserID, evaluationRequest.BillingUserID) {
 			result = resolver.EvaluateUserRequest(ctx, userID, evaluationRequest)
 			if result.Decision != DecisionAllow {

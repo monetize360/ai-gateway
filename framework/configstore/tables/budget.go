@@ -9,10 +9,10 @@ import (
 
 // TableBudget defines spending limits with configurable reset periods.
 // Parent ownership is expressed via FK columns on this row (virtual_key_id,
-// provider_config_id, provider_id, model_config_id, team_id, governed_organization_id,
-// account_id, contract_id, user_id).
+// provider_config_id, provider_id, model_config_id, team_id, governed_organization_id).
 // org_id is a visibility column (tenant scoping); governed_organization_id links
 // the budget to an organization for hierarchy governance checks.
+// Account / contract / user spending limits live on TableBudgetUsage (budgetusage__m).
 type TableBudget struct {
 	ID            string    `gorm:"primaryKey;type:uuid" json:"id"`
 	MaxLimit      float64   `gorm:"not null" json:"max_limit"`
@@ -20,16 +20,13 @@ type TableBudget struct {
 	LastReset     time.Time `gorm:"index" json:"last_reset"`
 	CurrentUsage  float64   `gorm:"default:0" json:"current_usage"`
 
-	VirtualKeyID     *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
-	ProviderConfigID *string `gorm:"type:uuid;index" json:"provider_config_id,omitempty"`
-	TeamID           *string `gorm:"type:uuid;index" json:"team_id,omitempty"`
-	ProviderID       *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
-	ModelConfigID    *string `gorm:"type:uuid;index" json:"model_config_id,omitempty"`
-	OrgID                    *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
-	GovernedOrganizationID   *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
-	AccountID                *string `gorm:"type:uuid;index" json:"account_id,omitempty"`
-	ContractID               *string `gorm:"type:uuid;index" json:"contract_id,omitempty"`
-	UserID                   *string `gorm:"type:uuid;index" json:"user_id,omitempty"`
+	VirtualKeyID           *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
+	ProviderConfigID       *string `gorm:"type:uuid;index" json:"provider_config_id,omitempty"`
+	TeamID                 *string `gorm:"type:uuid;index" json:"team_id,omitempty"`
+	ProviderID             *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
+	ModelConfigID          *string `gorm:"type:uuid;index" json:"model_config_id,omitempty"`
+	OrgID                  *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	GovernedOrganizationID *string `gorm:"type:uuid;index" json:"governed_organization_id,omitempty"`
 
 	SoftLimit *bool `gorm:"default:false" json:"soft_limit,omitempty"`
 

@@ -687,6 +687,10 @@ func (m *MockConfigStore) GetBudgets(ctx context.Context) ([]tables.TableBudget,
 	return nil, nil
 }
 
+func (m *MockConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error) {
+	return nil, nil
+}
+
 func (m *MockConfigStore) CreateRateLimit(ctx context.Context, rateLimit *tables.TableRateLimit, tx ...*gorm.DB) error {
 	if m.governanceConfig == nil {
 		m.governanceConfig = &configstore.GovernanceConfig{}
