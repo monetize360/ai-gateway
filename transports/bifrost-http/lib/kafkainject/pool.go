@@ -91,10 +91,11 @@ type dataSourceRow struct {
 }
 
 type kafkaConnectionConfig struct {
-	Type               string `json:"type"`
-	BootstrapServers   string `json:"bootstrapServers"`
-	ClientID           string `json:"clientId"`
-	AuthenticationType string `json:"authenticationType"`
+	Type               string               `json:"type"`
+	BootstrapServers   string               `json:"bootstrapServers"`
+	ClientID           string               `json:"clientId"`
+	AuthenticationType string               `json:"authenticationType"`
+	ProducerConfig     *kafkaProducerConfig `json:"producerConfig"`
 	SASLDetails        *struct {
 		Username  string `json:"username"`
 		Password  any    `json:"password"`
@@ -195,11 +196,20 @@ func newKafkaClient(conf *kafkaConnectionConfig) (*kgo.Client, error) {
 		clientID = "ai-gateway-kafka-ingest"
 	}
 
+	settings := resolveProducerSettings(conf.ProducerConfig)
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID(clientID),
-		kgo.RequiredAcks(kgo.AllISRAcks()),
-		kgo.ProducerLinger(50 * time.Millisecond),
+		kgo.RequiredAcks(settings.RequiredAcks),
+		kgo.ProducerLinger(lingerDuration(settings.LingerMs)),
+		kgo.ProducerBatchMaxBytes(ProducerBatchMaxBytes),
+		kgo.MaxBufferedRecords(MaxBufferedRecords),
+		kgo.RecordPartitioner(kgo.RoundRobinPartitioner()),
+		kgo.ProducerBatchCompression(kgo.Lz4Compression()),
+	}
+	// franz-go enables idempotent writes by default, which only works with acks=all.
+	if settings.AcksLabel != "all" {
+		opts = append(opts, kgo.DisableIdempotentWrite())
 	}
 
 	auth := strings.ToUpper(strings.TrimSpace(conf.AuthenticationType))
@@ -274,13 +284,15 @@ func extractSecretText(v any) string {
 }
 
 // ProduceSync publishes a record and waits for broker acknowledgment.
+// Uses async Produce + callback so HTTP goroutines can pipeline in-flight records.
 func ProduceSync(ctx context.Context, entry *ProducerEntry, key string, value []byte) (topic string, partition int32, offset int64, err error) {
 	if entry == nil || entry.Client == nil {
 		return "", 0, 0, fmt.Errorf("kafka producer not available")
 	}
+	payload := append([]byte(nil), value...)
 	rec := &kgo.Record{
 		Topic: entry.Topic,
-		Value: value,
+		Value: payload,
 	}
 	if key != "" {
 		rec.Key = []byte(key)
@@ -289,10 +301,33 @@ func ProduceSync(ctx context.Context, entry *ProducerEntry, key string, value []
 	produceCtx, cancel := context.WithTimeout(ctx, ProduceTimeout)
 	defer cancel()
 
-	results := entry.Client.ProduceSync(produceCtx, rec)
-	r, produceErr := results.First()
-	if produceErr != nil {
-		return "", 0, 0, produceErr
+	type produceResult struct {
+		topic     string
+		partition int32
+		offset    int64
+		err       error
 	}
-	return r.Topic, r.Partition, r.Offset, nil
+	done := make(chan produceResult, 1)
+	entry.Client.Produce(produceCtx, rec, func(r *kgo.Record, produceErr error) {
+		res := produceResult{err: produceErr}
+		if r != nil {
+			res.topic = r.Topic
+			res.partition = r.Partition
+			res.offset = r.Offset
+		}
+		done <- res
+	})
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			return "", 0, 0, res.err
+		}
+		if res.topic == "" {
+			res.topic = entry.Topic
+		}
+		return res.topic, res.partition, res.offset, nil
+	case <-produceCtx.Done():
+		return "", 0, 0, produceCtx.Err()
+	}
 }

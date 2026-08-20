@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -63,10 +64,10 @@ func (h *KafkaIngestHandler) Close() {
 }
 
 type kafkaIngestRequest struct {
-	ConnectionID string         `json:"connectionId"`
-	DataSourceID string         `json:"dataSourceId"`
-	Key          string         `json:"key"`
-	Message      map[string]any `json:"message"`
+	ConnectionID string          `json:"connectionId"`
+	DataSourceID string          `json:"dataSourceId"`
+	Key          string          `json:"key"`
+	Message      json.RawMessage `json:"message"`
 }
 
 type kafkaIngestResponse struct {
@@ -77,7 +78,8 @@ type kafkaIngestResponse struct {
 }
 
 func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
-	if len(ctx.PostBody()) > kafkainject.MaxMessageBytes {
+	body := ctx.PostBody()
+	if len(body) > kafkainject.MaxMessageBytes {
 		SendError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
@@ -89,11 +91,11 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 	}
 
 	var req kafkaIngestRequest
-	if err := sonic.Unmarshal(ctx.PostBody(), &req); err != nil {
+	if err := sonic.Unmarshal(body, &req); err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Message == nil {
+	if len(req.Message) == 0 || string(req.Message) == "null" {
 		SendError(ctx, fasthttp.StatusBadRequest, "message is required")
 		return
 	}
@@ -121,18 +123,17 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
-	if err := kafkainject.ValidateMessage(req.Message, fields); err != nil {
+	var message map[string]any
+	if err := sonic.Unmarshal(req.Message, &message); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
+		return
+	}
+	if err := kafkainject.ValidateMessage(message, fields); err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 
-	payload, err := sonic.Marshal(req.Message)
-	if err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "failed to serialize message")
-		return
-	}
-
-	topic, partition, offset, err := kafkainject.ProduceSync(reqCtx, entry, req.Key, payload)
+	topic, partition, offset, err := kafkainject.ProduceSync(reqCtx, entry, req.Key, req.Message)
 	if err != nil {
 		if reqCtx.Err() != nil {
 			SendError(ctx, fasthttp.StatusGatewayTimeout, fmt.Sprintf("timed out publishing kafka message: %v", err))

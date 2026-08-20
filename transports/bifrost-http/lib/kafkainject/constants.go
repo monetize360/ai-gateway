@@ -14,4 +14,11 @@ const (
 	JWTCacheTTL      = 30 * time.Second
 	ProduceTimeout   = 10 * time.Second
 	MaxMessageBytes  = 1 << 20 // 1 MiB
+
+	// DefaultProducerLingerMs is used only when lingerMs is omitted (Kafka client default).
+	DefaultProducerLingerMs = 5
+	ProducerBatchMaxBytes   = 1 << 20
+	MaxBufferedRecords      = 500_000
+	// DefaultProducerAcks is ISR acks=all. Connection JSON can override (e.g. "1").
+	DefaultProducerAcks = "all"
 )
