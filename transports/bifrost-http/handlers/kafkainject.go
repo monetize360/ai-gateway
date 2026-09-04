@@ -48,11 +48,15 @@ func (h *KafkaIngestHandler) UsagePublisher() *kafkainject.UsagePublisher {
 	if h == nil {
 		return nil
 	}
-	return kafkainject.NewUsagePublisher(h.pool, h.schemaCache)
+	return kafkainject.NewUsagePublisher(h.pool)
 }
 
-// RegisterRoutes registers POST /v1/ingest/kafka.
+// RegisterRoutes registers the standard usage endpoint and the deprecated
+// connection/datasource-based Kafka endpoint.
 func (h *KafkaIngestHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.POST("/v1/ingest/usage", lib.ChainMiddlewares(h.ingestUsage, middlewares...))
+	// Deprecated: use POST /v1/ingest/usage. The legacy endpoint remains
+	// available for clients that still depend on integration configuration.
 	r.POST("/v1/ingest/kafka", lib.ChainMiddlewares(h.ingest, middlewares...))
 }
 
@@ -70,6 +74,11 @@ type kafkaIngestRequest struct {
 	Message      json.RawMessage `json:"message"`
 }
 
+type usageIngestRequest struct {
+	Key     string          `json:"key"`
+	Message json.RawMessage `json:"message"`
+}
+
 type kafkaIngestResponse struct {
 	Status    string `json:"status"`
 	Topic     string `json:"topic"`
@@ -78,6 +87,9 @@ type kafkaIngestResponse struct {
 }
 
 func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
+	ctx.Response.Header.Set("Deprecation", "true")
+	ctx.Response.Header.Set("Link", `</v1/ingest/usage>; rel="successor-version"`)
+
 	body := ctx.PostBody()
 	if len(body) > kafkainject.MaxMessageBytes {
 		SendError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
@@ -133,7 +145,90 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	topic, partition, offset, err := kafkainject.ProduceSync(reqCtx, entry, req.Key, req.Message)
+	h.publish(ctx, reqCtx, entry, req.Key, req.Message)
+}
+
+func (h *KafkaIngestHandler) ingestUsage(ctx *fasthttp.RequestCtx) {
+	body := ctx.PostBody()
+	if len(body) > kafkainject.MaxMessageBytes {
+		SendError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+
+	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
+	if tenantID == "" {
+		SendError(ctx, fasthttp.StatusUnauthorized, "tenant context missing")
+		return
+	}
+
+	var req usageIngestRequest
+	if err := sonic.Unmarshal(body, &req); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if len(req.Message) == 0 || string(req.Message) == "null" {
+		SendError(ctx, fasthttp.StatusBadRequest, "message is required")
+		return
+	}
+	var message map[string]any
+	if err := sonic.Unmarshal(req.Message, &message); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
+		return
+	}
+
+	payload, err := ensureOrganizationID(ctx, message)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, kafkainject.ProduceTimeout+2*time.Second)
+	defer cancel()
+
+	entry, err := h.pool.GetOrCreateStandard(tenantID)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	h.publish(ctx, reqCtx, entry, req.Key, payload)
+}
+
+func ensureOrganizationID(ctx *fasthttp.RequestCtx, message map[string]any) ([]byte, error) {
+	if organizationIDFromMessage(message) == "" {
+		morgID, _ := ctx.UserValue(ingestContextKeyMorgID).(string)
+		morgID = strings.TrimSpace(morgID)
+		if morgID == "" {
+			return nil, fmt.Errorf("organizationId is required in the message or as morgId in the token")
+		}
+		message["organizationId"] = morgID
+	}
+	payload, err := sonic.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize usage message: %w", err)
+	}
+	return payload, nil
+}
+
+func organizationIDFromMessage(message map[string]any) string {
+	for _, key := range []string{"organizationId", "organization_id"} {
+		value, ok := message[key]
+		if !ok || value == nil {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		text = strings.TrimSpace(text)
+		if text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func (h *KafkaIngestHandler) publish(ctx *fasthttp.RequestCtx, reqCtx context.Context, entry *kafkainject.ProducerEntry, key string, message []byte) {
+	topic, partition, offset, err := kafkainject.ProduceSync(reqCtx, entry, key, message)
 	if err != nil {
 		if reqCtx.Err() != nil {
 			SendError(ctx, fasthttp.StatusGatewayTimeout, fmt.Sprintf("timed out publishing kafka message: %v", err))

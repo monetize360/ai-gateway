@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,10 @@ func poolKey(tenantID, connectionID, dataSourceID string) string {
 	return tenantID + ":" + connectionID + ":" + dataSourceID
 }
 
+func standardPoolKey(tenantID, bootstrapServers, topic string) string {
+	return "standard:" + tenantID + ":" + bootstrapServers + ":" + topic
+}
+
 // GetOrCreate returns a cached producer or loads connection/datasource from the tenant DB.
 func (p *Pool) GetOrCreate(ctx context.Context, tenantID, connectionID, dataSourceID string) (*ProducerEntry, error) {
 	key := poolKey(tenantID, connectionID, dataSourceID)
@@ -66,6 +71,64 @@ func (p *Pool) GetOrCreate(ctx context.Context, tenantID, connectionID, dataSour
 	entry, err := p.load(ctx, tenantID, connectionID, dataSourceID)
 	if err != nil {
 		return nil, err
+	}
+	p.entries[key] = entry
+	return entry, nil
+}
+
+// GetOrCreateStandard returns the environment-configured producer for a tenant.
+// This path intentionally does not read integration connections or datasources.
+func (p *Pool) GetOrCreateStandard(tenantID string) (*ProducerEntry, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenantID is required")
+	}
+
+	bootstrapServers := strings.TrimSpace(os.Getenv(KafkaBootstrapServersEnv))
+	if bootstrapServers == "" {
+		return nil, fmt.Errorf("%s is not configured", KafkaBootstrapServersEnv)
+	}
+	topicPrefix := strings.TrimSpace(os.Getenv(KafkaUsageTopicPrefixEnv))
+	if topicPrefix == "" {
+		topicPrefix = DefaultUsageTopicPrefix
+	}
+	// Keep this derivation identical to MPilot UsageKafkaTopics.topic:
+	// KAFKA_USAGE_TOPIC_PREFIX + "_" + tenantId.
+	topic := topicPrefix + "_" + tenantID
+	key := standardPoolKey(tenantID, bootstrapServers, topic)
+
+	p.mu.RLock()
+	if entry, ok := p.entries[key]; ok && time.Since(entry.LoadedAt) < ProducerCacheTTL {
+		p.mu.RUnlock()
+		return entry, nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry, ok := p.entries[key]; ok && time.Since(entry.LoadedAt) < ProducerCacheTTL {
+		return entry, nil
+	}
+	if old, ok := p.entries[key]; ok {
+		delete(p.entries, key)
+		go old.Client.Close()
+	}
+
+	clientID := strings.TrimSpace(os.Getenv(KafkaClientIDEnv))
+	if clientID == "" {
+		clientID = DefaultKafkaClientID
+	}
+	client, err := newKafkaClient(&kafkaConnectionConfig{
+		BootstrapServers: bootstrapServers,
+		ClientID:         clientID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	entry := &ProducerEntry{
+		Client:   client,
+		Topic:    topic,
+		LoadedAt: time.Now(),
 	}
 	p.entries[key] = entry
 	return entry, nil
@@ -193,7 +256,7 @@ func newKafkaClient(conf *kafkaConnectionConfig) (*kgo.Client, error) {
 	}
 	clientID := conf.ClientID
 	if clientID == "" {
-		clientID = "ai-gateway-kafka-ingest"
+		clientID = DefaultKafkaClientID
 	}
 
 	settings := resolveProducerSettings(conf.ProducerConfig)

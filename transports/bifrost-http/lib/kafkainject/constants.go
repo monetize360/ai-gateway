@@ -6,6 +6,15 @@ import "time"
 const (
 	DefaultConnectionID = "b2c3d4e5-f6a7-4890-b123-456789abcdef"
 	DefaultDataSourceID = "c3d4e5f6-a7b8-4901-c234-56789abcdef0"
+
+	KafkaBootstrapServersEnv = "KAFKA_BOOTSTRAP_SERVERS"
+	KafkaUsageTopicPrefixEnv = "KAFKA_USAGE_TOPIC_PREFIX"
+	KafkaClientIDEnv         = "KAFKA_CLIENT_ID"
+
+	// DefaultUsageTopicPrefix must match AppKafkaProperties.Usage.topicPrefix
+	// in MPilot so producers and consumers resolve the same per-tenant topic.
+	DefaultUsageTopicPrefix = "inference-usage"
+	DefaultKafkaClientID    = "ai-gateway-kafka-ingest"
 )
 
 const (

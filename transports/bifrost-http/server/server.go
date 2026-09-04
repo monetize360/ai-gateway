@@ -1676,9 +1676,10 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize inference routes: %v", err)
 	}
 
-	// High-throughput Kafka ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
-	// Governance InferenceUsage publish is wired only for ai_infra (MPilot owns budget DB writes).
-	if s.Config.Registry() != nil && s.Config.TenantStore != nil {
+	// High-throughput usage ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
+	// Standard usage publishing uses KAFKA_BOOTSTRAP_SERVERS and the same
+	// KAFKA_USAGE_TOPIC_PREFIX configured in MPilot.
+	if s.Config.TenantStore != nil {
 		isAIInfra := configstore.IsAIInfraGatewayDeployment(s.Config.ClientConfig.GatewayDeploymentType)
 		needIngestRoute := len(s.Config.TenantStore.AdminJWTKey) > 0
 		if isAIInfra || needIngestRoute {
@@ -1694,13 +1695,13 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			if needIngestRoute {
 				ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
 				s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
-				logger.Info("registered kafka ingest route POST /v1/ingest/kafka")
+				logger.Info("registered usage ingest route POST /v1/ingest/usage (legacy POST /v1/ingest/kafka is deprecated)")
 			} else {
 				logger.Warn("kafka ingest HTTP route not registered: admin JWT key missing")
 			}
 		}
 	} else {
-		logger.Warn("kafka ingest / usage publish not configured: tenant registry or tenant store missing")
+		logger.Warn("kafka ingest / usage publish not configured: tenant store missing")
 	}
 
 	// Register UI handler

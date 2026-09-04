@@ -14,8 +14,12 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// ingestContextKeyMorgID is the MPilot organization UUID from the JWT morgId claim.
+const ingestContextKeyMorgID = "ingest-morg-id"
+
 type jwtCacheEntry struct {
 	tenantID  string
+	morgID    string
 	expiresAt time.Time
 }
 
@@ -63,8 +67,12 @@ func (m *IngestAuthMiddleware) authenticate(ctx *fasthttp.RequestCtx) error {
 	m.mu.RLock()
 	if entry, ok := m.cache[tokenHash]; ok && now.Before(entry.expiresAt) {
 		tenantID := entry.tenantID
+		morgID := entry.morgID
 		m.mu.RUnlock()
 		ctx.SetUserValue(schemas.BifrostContextKeyTenantID, tenantID)
+		if morgID != "" {
+			ctx.SetUserValue(ingestContextKeyMorgID, morgID)
+		}
 		return nil
 	}
 	m.mu.RUnlock()
@@ -86,7 +94,7 @@ func (m *IngestAuthMiddleware) authenticate(ctx *fasthttp.RequestCtx) error {
 	}
 
 	m.mu.Lock()
-	m.cache[tokenHash] = jwtCacheEntry{tenantID: claims.TenantID, expiresAt: expiresAt}
+	m.cache[tokenHash] = jwtCacheEntry{tenantID: claims.TenantID, morgID: claims.MorgID, expiresAt: expiresAt}
 	// Opportunistic cleanup of a few expired entries to bound map growth.
 	if len(m.cache) > 10_000 {
 		for k, v := range m.cache {
@@ -98,6 +106,9 @@ func (m *IngestAuthMiddleware) authenticate(ctx *fasthttp.RequestCtx) error {
 	m.mu.Unlock()
 
 	ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
+	if claims.MorgID != "" {
+		ctx.SetUserValue(ingestContextKeyMorgID, claims.MorgID)
+	}
 	return nil
 }
 

@@ -12,23 +12,15 @@ import (
 // UsagePublisher publishes InferenceUsage messages via the shared Kafka producer pool.
 // Method signature matches governance.UsageEventPublisher without importing that package.
 type UsagePublisher struct {
-	pool         *Pool
-	schemaCache  *SchemaCache
-	connectionID string
-	dataSourceID string
+	pool *Pool
 }
 
-// NewUsagePublisher creates a publisher bound to the standard InferenceUsage connection/datasource.
-func NewUsagePublisher(pool *Pool, schemaCache *SchemaCache) *UsagePublisher {
-	return &UsagePublisher{
-		pool:         pool,
-		schemaCache:  schemaCache,
-		connectionID: DefaultConnectionID,
-		dataSourceID: DefaultDataSourceID,
-	}
+// NewUsagePublisher creates a publisher for the standard per-tenant usage topic.
+func NewUsagePublisher(pool *Pool) *UsagePublisher {
+	return &UsagePublisher{pool: pool}
 }
 
-// PublishUsage validates and produces an InferenceUsage Kafka message for the tenant.
+// PublishUsage produces an InferenceUsage message without datasource or mobject validation.
 func (p *UsagePublisher) PublishUsage(ctx context.Context, tenantID, key string, message map[string]any) error {
 	if p == nil || p.pool == nil {
 		return fmt.Errorf("kafka usage publisher not configured")
@@ -43,19 +35,9 @@ func (p *UsagePublisher) PublishUsage(ctx context.Context, tenantID, key string,
 	publishCtx, cancel := context.WithTimeout(ctx, ProduceTimeout+2*time.Second)
 	defer cancel()
 
-	entry, err := p.pool.GetOrCreate(publishCtx, tenantID, p.connectionID, p.dataSourceID)
+	entry, err := p.pool.GetOrCreateStandard(tenantID)
 	if err != nil {
 		return err
-	}
-
-	if p.schemaCache != nil {
-		fields, err := p.schemaCache.GetOrLoad(publishCtx, tenantID, entry.MObjectID)
-		if err != nil {
-			return err
-		}
-		if err := ValidateMessage(message, fields); err != nil {
-			return err
-		}
 	}
 
 	payload, err := sonic.Marshal(message)
