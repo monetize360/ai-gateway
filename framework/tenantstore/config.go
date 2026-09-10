@@ -1,12 +1,17 @@
 // Package tenantstore provides Database-per-Tenant connection management.
 //
-// It lazily initialises one configstore.ConfigStore per tenant on first access
-// (double-checked locking), validates tenant JWTs (RS256 public key or HS256
-// secret from config), and looks up per-tenant DB credentials from the mpilotv2
-// global tenants table.
+// It lazily initialises one configstore.ConfigStore per tenant on first request
+// (single-flight so concurrent first requests share one pool), looks up per-tenant
+// DB credentials from the mpilotv2 global tenants table, recycles sql.DB
+// connections with ConnMaxIdleTime / ConnMaxLifetime, and closes unused tenant
+// pools after PoolIdleTimeout.
 package tenantstore
 
-import "github.com/maximhq/bifrost/core/schemas"
+import (
+	"time"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
 
 // Config holds the settings needed to bootstrap the tenantstore.
 // The JWT secret is shared across all tenants; each tenant is identified
@@ -24,14 +29,16 @@ type Config struct {
 // PostgresConfig mirrors configstore.PostgresConfig so the tenantstore package
 // does not import configstore (avoiding a circular dependency).
 type PostgresConfig struct {
-	Host         *schemas.EnvVar `json:"host"`
-	Port         *schemas.EnvVar `json:"port"`
-	User         *schemas.EnvVar `json:"user"`
-	Password     *schemas.EnvVar `json:"password"`
-	DBName       *schemas.EnvVar `json:"db_name"`
-	SSLMode      *schemas.EnvVar `json:"ssl_mode"`
-	MaxIdleConns int             `json:"max_idle_conns"`
-	MaxOpenConns int             `json:"max_open_conns"`
+	Host            *schemas.EnvVar `json:"host"`
+	Port            *schemas.EnvVar `json:"port"`
+	User            *schemas.EnvVar `json:"user"`
+	Password        *schemas.EnvVar `json:"password"`
+	DBName          *schemas.EnvVar `json:"db_name"`
+	SSLMode         *schemas.EnvVar `json:"ssl_mode"`
+	MaxIdleConns    int             `json:"max_idle_conns"`
+	MaxOpenConns    int             `json:"max_open_conns"`
+	ConnMaxIdleTime time.Duration   `json:"-"`
+	ConnMaxLifetime time.Duration   `json:"-"`
 }
 
 // DSN builds a libpq-style connection string from the config.

@@ -1459,6 +1459,14 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// Start per-tenant governance sync worker.
 	if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
 		govPlugin.StartTenantGovernanceSync(lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
+		if s.Config.TenantStore != nil && s.Config.TenantStore.Manager != nil {
+			// Governance caches per-tenant components holding a reference to the tenant
+			// store; release them before the pool closes so usage is flushed and the next
+			// request rebuilds against the reopened pool.
+			s.Config.TenantStore.Manager.SetOnStoreClosing(func(_ context.Context, tenantID string, _ configstore.ConfigStore) {
+				govPlugin.ReleaseTenant(tenantID)
+			})
+		}
 		logger.Info("governance plugin configured for per-tenant store routing")
 	}
 

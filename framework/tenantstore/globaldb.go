@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"gorm.io/driver/postgres"
@@ -75,6 +76,16 @@ func NewGlobalDB(ctx context.Context, cfg *PostgresConfig, logger schemas.Logger
 	}
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetMaxOpenConns(maxOpen)
+	idleTime := cfg.ConnMaxIdleTime
+	if idleTime <= 0 {
+		idleTime = 5 * time.Minute
+	}
+	sqlDB.SetConnMaxIdleTime(idleTime)
+	lifetime := cfg.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = 30 * time.Minute
+	}
+	sqlDB.SetConnMaxLifetime(lifetime)
 
 	logger.Info("global DB connected (%s)", cfg.DBName.GetValue())
 	return &GlobalDB{db: db, globalCfg: cfg, logger: logger}, nil

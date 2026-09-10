@@ -57,6 +57,6 @@ func TestPrepareLogsStoreConfig_OmittedPostgresConfig(t *testing.T) {
 	var configData ConfigData
 	require.NoError(t, json.Unmarshal([]byte(raw), &configData))
 	require.NoError(t, prepareLogsStoreConfig(&configData))
-	// Per-tenant routing opens one log store per tenant DB at startup.
+	// Per-tenant routing opens one log store per tenant DB on first use.
 	assert.Nil(t, configData.LogsStoreConfig.Config)
 }

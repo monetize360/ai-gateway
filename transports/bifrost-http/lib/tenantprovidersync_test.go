@@ -8,8 +8,8 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
-	"github.com/valyala/fasthttp"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 type stubProviderRuntime struct {
@@ -81,7 +81,7 @@ func TestSyncTenantProvidersLoadsValidProviders(t *testing.T) {
 
 	store := NewMockConfigStore()
 	store.providers = map[schemas.ModelProvider]configstore.ProviderConfig{
-		"fakellm":  validCfg,
+		"fakellm":   validCfg,
 		"brokenllm": invalidCfg,
 	}
 
@@ -184,4 +184,8 @@ func (s *stubTenantProviderSyncSource) SyncTenants(context.Context) error {
 
 func (s *stubTenantProviderSyncSource) GetStoreForTenant(_ context.Context, tenantID string) configstore.ConfigStore {
 	return s.stores[tenantID]
+}
+
+func (s *stubTenantProviderSyncSource) PeekStoreForTenant(tenantID string) configstore.ConfigStore {
+	return s.GetStoreForTenant(context.Background(), tenantID)
 }

@@ -42,6 +42,13 @@ func StartTenantProviderSync(ctx context.Context, cfg *Config, client tenantProv
 	}
 
 	globalTenantProviderSync.once.Do(func() {
+		if cfg.TenantStore.Manager != nil {
+			cfg.TenantStore.Manager.SetOnStoreOpened(func(openCtx context.Context, tenantID string, store configstore.ConfigStore) {
+				if err := syncTenantProviders(openCtx, cfg, client, tenantID, store); err != nil {
+					logger.Warn("tenant provider hydrate failed for tenant %s: %v", tenantID, err)
+				}
+			})
+		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		globalTenantProviderSync.cancel = cancel
 		globalTenantProviderSync.wg.Add(1)
@@ -95,6 +102,18 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 		}
 	}
 
+	idleTimeout := TenantPoolIdleTimeout(cfg.TenantStoreConfig)
+	if cfg.TenantStore.Manager != nil {
+		for _, id := range cfg.TenantStore.Manager.EvictIdle(ctx, idleTimeout) {
+			cfg.setTenantProvidersSnapshot(id, nil)
+			cfg.clearTenantProviderRefreshWatermark(id)
+			logger.Info("tenant provider sync: provider snapshot cleared for idle tenant %s", id)
+		}
+	}
+	if cfg.TenantStore.LogStoreManager != nil {
+		_ = cfg.TenantStore.LogStoreManager.EvictIdle(ctx, idleTimeout)
+	}
+
 	// Detect tenants evicted during this sync cycle (soft-deleted in MPilot) and
 	// remove their provider snapshot so stale configs are not retained in memory.
 	tenantIDs := registry.ListTenantIDs(ctx)
@@ -105,12 +124,13 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 	for _, id := range prevIDs {
 		if _, stillActive := activeSet[id]; !stillActive {
 			cfg.setTenantProvidersSnapshot(id, nil)
+			cfg.clearTenantProviderRefreshWatermark(id)
 			logger.Info("tenant provider sync: provider snapshot cleared for evicted tenant %s", id)
 		}
 	}
 
 	for _, tenantID := range tenantIDs {
-		store := registry.GetStoreForTenant(ctx, tenantID)
+		store := registry.PeekStoreForTenant(tenantID)
 		if store == nil {
 			continue
 		}

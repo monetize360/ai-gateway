@@ -51,7 +51,7 @@ func (p *GovernancePlugin) syncAllTenantGovernanceStores(ctx context.Context) {
 
 	tenantIDs := p.registry.ListTenantIDs(ctx)
 	for _, tenantID := range tenantIDs {
-		configStore := p.registry.GetStoreForTenant(ctx, tenantID)
+		configStore := p.registry.PeekStoreForTenant(tenantID)
 		if configStore == nil {
 			continue
 		}
@@ -83,6 +83,28 @@ func (p *GovernancePlugin) syncTenantGovernanceStore(ctx context.Context, tenant
 		}
 	}
 	return localStore.RefreshFromDatabase(ctx)
+}
+
+// ReleaseTenant drops the cached governance components for tenantID. It must be
+// called while the tenant's config store is still open: the usage tracker's
+// cleanup flushes pending budget and rate-limit deltas back to the tenant DB.
+// The next request for this tenant rebuilds the components against the new pool.
+func (p *GovernancePlugin) ReleaseTenant(tenantID string) {
+	if p == nil || tenantID == "" {
+		return
+	}
+	raw, loaded := p.tenantComponents.LoadAndDelete(tenantID)
+	if !loaded {
+		return
+	}
+	comp, ok := raw.(*tenantGovernanceComponents)
+	if !ok || comp == nil || comp.tracker == nil {
+		return
+	}
+	if err := comp.tracker.Cleanup(); err != nil {
+		p.logger.Warn("tenant governance release: usage tracker cleanup failed for tenant %s: %v", tenantID, err)
+	}
+	p.logger.Info("tenant governance components released for tenant %s", tenantID)
 }
 
 func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, tenantID string, configStore configstore.ConfigStore) *tenantGovernanceComponents {

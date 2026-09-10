@@ -18,6 +18,9 @@ type TenantStoreFileConfig struct {
 	RefreshIntervalSeconds int                            `json:"refresh_interval_seconds,omitempty"`
 	MaxIdleConns           int                            `json:"max_idle_conns,omitempty"`
 	MaxOpenConns           int                            `json:"max_open_conns,omitempty"`
+	ConnMaxLifetimeSeconds int                            `json:"conn_max_lifetime_seconds,omitempty"`
+	ConnMaxIdleTimeSeconds int                            `json:"conn_max_idle_time_seconds,omitempty"`
+	PoolIdleTimeoutSeconds int                            `json:"pool_idle_timeout_seconds,omitempty"`
 	Global                 *TenantStoreGlobalPostgresFile `json:"global,omitempty"`
 	JWTPublicKey           string                         `json:"jwt_public_key,omitempty"`
 	JWTSecret              string                         `json:"jwt_secret,omitempty"`
@@ -28,14 +31,16 @@ type TenantStoreFileConfig struct {
 
 // TenantStoreGlobalPostgresFile holds plain-string postgres settings for the global DB.
 type TenantStoreGlobalPostgresFile struct {
-	Host         string `json:"host"`
-	Port         string `json:"port"`
-	User         string `json:"user"`
-	Password     string `json:"password"`
-	DBName       string `json:"db_name"`
-	SSLMode      string `json:"ssl_mode"`
-	MaxIdleConns int    `json:"max_idle_conns,omitempty"`
-	MaxOpenConns int    `json:"max_open_conns,omitempty"`
+	Host                   string `json:"host"`
+	Port                   string `json:"port"`
+	User                   string `json:"user"`
+	Password               string `json:"password"`
+	DBName                 string `json:"db_name"`
+	SSLMode                string `json:"ssl_mode"`
+	MaxIdleConns           int    `json:"max_idle_conns,omitempty"`
+	MaxOpenConns           int    `json:"max_open_conns,omitempty"`
+	ConnMaxLifetimeSeconds int    `json:"conn_max_lifetime_seconds,omitempty"`
+	ConnMaxIdleTimeSeconds int    `json:"conn_max_idle_time_seconds,omitempty"`
 }
 
 // TenantStoreHolder wires the per-tenant ConfigStore registry and JWT verification
@@ -47,6 +52,7 @@ type TenantStoreHolder struct {
 	GlobalDB        *tenantstore.GlobalDB
 	JWTKey          []byte
 	AdminJWTKey     []byte
+	PoolSettings    configstore.PostgresPoolSettings
 }
 
 // Close releases global DB and per-tenant connection pools.
@@ -90,6 +96,14 @@ func InitTenantStore(
 	adminJWTKey := tenantstore.FormatJWTVerificationKey(cfg.AdminJWTPublicKey)
 
 	globalCfg := postgresConfigFromFile(cfg.Global)
+	if globalCfg != nil {
+		if globalCfg.ConnMaxIdleTime <= 0 {
+			globalCfg.ConnMaxIdleTime = durationFromPositiveSeconds(cfg.ConnMaxIdleTimeSeconds)
+		}
+		if globalCfg.ConnMaxLifetime <= 0 {
+			globalCfg.ConnMaxLifetime = durationFromPositiveSeconds(cfg.ConnMaxLifetimeSeconds)
+		}
+	}
 	globalDB, err := tenantstore.NewGlobalDB(ctx, globalCfg, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialise global tenant DB: %w", err)
@@ -97,18 +111,15 @@ func InitTenantStore(
 
 	manager := tenantstore.NewTenantDBManager(globalDB, tenantPoolSettingsFromFile(cfg), logger)
 
-	if err := manager.LoadAll(ctx); err != nil {
-		return nil, fmt.Errorf("failed to load tenant stores: %w", err)
-	}
-
 	registry := tenantstore.NewTenantConfigRegistry(manager)
 
 	holder := &TenantStoreHolder{
-		Registry:    registry,
-		Manager:     manager,
-		GlobalDB:    globalDB,
-		JWTKey:      jwtKey,
-		AdminJWTKey: adminJWTKey,
+		Registry:     registry,
+		Manager:      manager,
+		GlobalDB:     globalDB,
+		JWTKey:       jwtKey,
+		AdminJWTKey:  adminJWTKey,
+		PoolSettings: tenantPoolSettingsFromFile(cfg),
 	}
 
 	logger.Info("multi-tenant mode enabled")
@@ -128,14 +139,16 @@ func postgresConfigFromFile(cfg *TenantStoreGlobalPostgresFile) *tenantstore.Pos
 		port = "5432"
 	}
 	return &tenantstore.PostgresConfig{
-		Host:         schemas.NewEnvVar(cfg.Host),
-		Port:         schemas.NewEnvVar(port),
-		User:         schemas.NewEnvVar(cfg.User),
-		Password:     schemas.NewEnvVar(cfg.Password),
-		DBName:       schemas.NewEnvVar(cfg.DBName),
-		SSLMode:      schemas.NewEnvVar(sslMode),
-		MaxIdleConns: cfg.MaxIdleConns,
-		MaxOpenConns: cfg.MaxOpenConns,
+		Host:            schemas.NewEnvVar(cfg.Host),
+		Port:            schemas.NewEnvVar(port),
+		User:            schemas.NewEnvVar(cfg.User),
+		Password:        schemas.NewEnvVar(cfg.Password),
+		DBName:          schemas.NewEnvVar(cfg.DBName),
+		SSLMode:         schemas.NewEnvVar(sslMode),
+		MaxIdleConns:    cfg.MaxIdleConns,
+		MaxOpenConns:    cfg.MaxOpenConns,
+		ConnMaxIdleTime: durationFromPositiveSeconds(cfg.ConnMaxIdleTimeSeconds),
+		ConnMaxLifetime: durationFromPositiveSeconds(cfg.ConnMaxLifetimeSeconds),
 	}
 }
 
@@ -155,14 +168,16 @@ func LogStorePostgresConfigFromTenantStore(cfg *TenantStoreFileConfig) (*logstor
 		maxOpen = cfg.MaxOpenConns
 	}
 	return &logstore.PostgresConfig{
-		Host:         base.Host,
-		Port:         base.Port,
-		User:         base.User,
-		Password:     base.Password,
-		DBName:       base.DBName,
-		SSLMode:      base.SSLMode,
-		MaxIdleConns: maxIdle,
-		MaxOpenConns: maxOpen,
+		Host:            base.Host,
+		Port:            base.Port,
+		User:            base.User,
+		Password:        base.Password,
+		DBName:          base.DBName,
+		SSLMode:         base.SSLMode,
+		MaxIdleConns:    maxIdle,
+		MaxOpenConns:    maxOpen,
+		ConnMaxIdleTime: logStoreConnMaxIdleTime(cfg),
+		ConnMaxLifetime: logStoreConnMaxLifetime(cfg),
 	}, nil
 }
 
@@ -197,6 +212,12 @@ func MergeLogsStorePostgresFromTenantStore(pg *logstore.PostgresConfig, ts *Tena
 	if pg.MaxOpenConns == 0 {
 		pg.MaxOpenConns = defaults.MaxOpenConns
 	}
+	if pg.ConnMaxIdleTime <= 0 {
+		pg.ConnMaxIdleTime = defaults.ConnMaxIdleTime
+	}
+	if pg.ConnMaxLifetime <= 0 {
+		pg.ConnMaxLifetime = defaults.ConnMaxLifetime
+	}
 	if !logsStorePostgresConfigComplete(pg) {
 		return fmt.Errorf("logs_store postgres config is incomplete after applying tenant_store.global defaults")
 	}
@@ -220,9 +241,51 @@ func tenantPoolSettingsFromFile(cfg *TenantStoreFileConfig) configstore.Postgres
 		return configstore.PostgresPoolSettings{}
 	}
 	return configstore.PostgresPoolSettings{
-		MaxIdleConns: cfg.MaxIdleConns,
-		MaxOpenConns: cfg.MaxOpenConns,
+		MaxIdleConns:    cfg.MaxIdleConns,
+		MaxOpenConns:    cfg.MaxOpenConns,
+		ConnMaxIdleTime: durationFromPositiveSeconds(cfg.ConnMaxIdleTimeSeconds),
+		ConnMaxLifetime: durationFromPositiveSeconds(cfg.ConnMaxLifetimeSeconds),
 	}
+}
+
+func logStoreConnMaxIdleTime(cfg *TenantStoreFileConfig) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	if cfg.Global != nil {
+		if d := durationFromPositiveSeconds(cfg.Global.ConnMaxIdleTimeSeconds); d > 0 {
+			return d
+		}
+	}
+	return durationFromPositiveSeconds(cfg.ConnMaxIdleTimeSeconds)
+}
+
+func logStoreConnMaxLifetime(cfg *TenantStoreFileConfig) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	if cfg.Global != nil {
+		if d := durationFromPositiveSeconds(cfg.Global.ConnMaxLifetimeSeconds); d > 0 {
+			return d
+		}
+	}
+	return durationFromPositiveSeconds(cfg.ConnMaxLifetimeSeconds)
+}
+
+func durationFromPositiveSeconds(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// TenantPoolIdleTimeout returns how long an unused tenant pool is kept open.
+// Defaults to 15 minutes when unset.
+func TenantPoolIdleTimeout(cfg *TenantStoreFileConfig) time.Duration {
+	if cfg == nil || cfg.PoolIdleTimeoutSeconds <= 0 {
+		return tenantstore.DefaultPoolIdleTimeout
+	}
+	return time.Duration(cfg.PoolIdleTimeoutSeconds) * time.Second
 }
 
 // GetTenantIDFromContext is a convenience helper for handlers and plugins
@@ -247,7 +310,7 @@ func GetVirtualKeyFromContext(ctx context.Context) string {
 	return v
 }
 
-// InitTenantLogStores opens per-tenant postgres log stores when logs_store is enabled.
+// InitTenantLogStores creates a per-tenant log store manager. Pools are opened on demand.
 func InitTenantLogStores(ctx context.Context, holder *TenantStoreHolder, logsConfig *logstore.Config) error {
 	if holder == nil || holder.GlobalDB == nil || logsConfig == nil || !logsConfig.Enabled {
 		return nil
@@ -255,7 +318,19 @@ func InitTenantLogStores(ctx context.Context, holder *TenantStoreHolder, logsCon
 	if logsConfig.Type != logstore.LogStoreTypePostgres {
 		return nil
 	}
-	pool := tenantstore.LogStorePoolSettings{MaxIdleConns: 5, MaxOpenConns: 50}
+	_ = ctx
+	pool := tenantstore.LogStorePoolSettings{
+		MaxIdleConns:    5,
+		MaxOpenConns:    20,
+		ConnMaxIdleTime: holder.PoolSettings.ConnMaxIdleTime,
+		ConnMaxLifetime: holder.PoolSettings.ConnMaxLifetime,
+	}
+	if holder.PoolSettings.MaxIdleConns > 0 {
+		pool.MaxIdleConns = holder.PoolSettings.MaxIdleConns
+	}
+	if holder.PoolSettings.MaxOpenConns > 0 {
+		pool.MaxOpenConns = holder.PoolSettings.MaxOpenConns
+	}
 	if pg, ok := logsConfig.Config.(*logstore.PostgresConfig); ok && pg != nil {
 		if pg.MaxIdleConns > 0 {
 			pool.MaxIdleConns = pg.MaxIdleConns
@@ -263,11 +338,14 @@ func InitTenantLogStores(ctx context.Context, holder *TenantStoreHolder, logsCon
 		if pg.MaxOpenConns > 0 {
 			pool.MaxOpenConns = pg.MaxOpenConns
 		}
+		if pg.ConnMaxIdleTime > 0 {
+			pool.ConnMaxIdleTime = pg.ConnMaxIdleTime
+		}
+		if pg.ConnMaxLifetime > 0 {
+			pool.ConnMaxLifetime = pg.ConnMaxLifetime
+		}
 	}
 	manager := tenantstore.NewTenantLogStoreManager(holder.GlobalDB, pool, logger)
-	if err := manager.LoadAll(ctx); err != nil {
-		return err
-	}
 	holder.LogStoreManager = manager
 	return nil
 }

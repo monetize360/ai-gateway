@@ -8,15 +8,15 @@ import (
 
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
-	"github.com/valyala/fasthttp"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 type stubTenantGovernanceSyncSource struct {
-	tenantIDs   []string
-	stores      map[string]configstore.ConfigStore
-	syncCalls   int
-	listCalls   int
+	tenantIDs []string
+	stores    map[string]configstore.ConfigStore
+	syncCalls int
+	listCalls int
 }
 
 func (s *stubTenantGovernanceSyncSource) GetStoreFromContext(ctx context.Context) configstore.ConfigStore {
@@ -43,6 +43,10 @@ func (s *stubTenantGovernanceSyncSource) SyncTenants(context.Context) error {
 
 func (s *stubTenantGovernanceSyncSource) GetStoreForTenant(_ context.Context, tenantID string) configstore.ConfigStore {
 	return s.stores[tenantID]
+}
+
+func (s *stubTenantGovernanceSyncSource) PeekStoreForTenant(tenantID string) configstore.ConfigStore {
+	return s.GetStoreForTenant(context.Background(), tenantID)
 }
 
 func TestStartTenantGovernanceSyncRunsImmediatelyAndOnTicker(t *testing.T) {

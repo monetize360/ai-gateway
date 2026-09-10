@@ -312,8 +312,8 @@ type Config struct {
 	configPath string
 
 	// Stores (config data lives in per-tenant Postgres via TenantStore)
-	VectorStore vectorstore.VectorStore
-	LogsStore   logstore.LogStore
+	VectorStore     vectorstore.VectorStore
+	LogsStore       logstore.LogStore
 	LogsStoreConfig *logstore.Config
 
 	// Multi-tenant (nil when tenant_store.enabled is false)
@@ -321,16 +321,16 @@ type Config struct {
 	TenantStore       *TenantStoreHolder
 
 	// In-memory storage
-	ClientConfig     *configstore.ClientConfig
-	Providers        map[schemas.ModelProvider]configstore.ProviderConfig
-	tenantProvidersMu        sync.RWMutex
-	tenantProviders          map[string]map[schemas.ModelProvider]configstore.ProviderConfig
-	tenantProviderRefreshMu  sync.Mutex
-	tenantProviderRefreshAt  map[string]time.Time
-	MCPConfig        *schemas.MCPConfig
-	GovernanceConfig *configstore.GovernanceConfig
-	FrameworkConfig  *framework.FrameworkConfig
-	ProxyConfig      *configstoreTables.GlobalProxyConfig
+	ClientConfig            *configstore.ClientConfig
+	Providers               map[schemas.ModelProvider]configstore.ProviderConfig
+	tenantProvidersMu       sync.RWMutex
+	tenantProviders         map[string]map[schemas.ModelProvider]configstore.ProviderConfig
+	tenantProviderRefreshMu sync.Mutex
+	tenantProviderRefreshAt map[string]time.Time
+	MCPConfig               *schemas.MCPConfig
+	GovernanceConfig        *configstore.GovernanceConfig
+	FrameworkConfig         *framework.FrameworkConfig
+	ProxyConfig             *configstoreTables.GlobalProxyConfig
 
 	// Plugin Storage (SINGLE SOURCE OF TRUTH)
 	// All plugins are stored in BasePlugins. Interface-specific caches are
@@ -735,11 +735,11 @@ func initStores(ctx context.Context, config *Config, configData *ConfigData, log
 		}
 	} else if configData.LogsStoreConfig == nil {
 		logStoreConfig := &logstore.Config{
-				Enabled: true,
-				Type:    logstore.LogStoreTypeSQLite,
-				Config: &logstore.SQLiteConfig{
-					Path: logsDBPath,
-				},
+			Enabled: true,
+			Type:    logstore.LogStoreTypeSQLite,
+			Config: &logstore.SQLiteConfig{
+				Path: logsDBPath,
+			},
 		}
 		config.LogsStore, err = logstore.NewLogStore(ctx, logStoreConfig, logger)
 		if err != nil {
@@ -2031,13 +2031,13 @@ func updateGovernanceConfigInStore(
 			if err := config.StoreFromContext(ctx).CreateVirtualKey(ctx, virtualKey, tx); err != nil {
 				return fmt.Errorf("failed to create virtual key %s: %w", virtualKey.ID, err)
 			}
-		for j := range providerConfigs {
-			vkID := virtualKey.ID
-			providerConfigs[j].VirtualKeyID = &vkID
-			if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &providerConfigs[j], tx); err != nil {
-				return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
+			for j := range providerConfigs {
+				vkID := virtualKey.ID
+				providerConfigs[j].VirtualKeyID = &vkID
+				if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &providerConfigs[j], tx); err != nil {
+					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
+				}
 			}
-		}
 			for j := range mcpConfigs {
 				mcpConfigs[j].VirtualKeyID = virtualKey.ID
 				if err := config.StoreFromContext(ctx).CreateVirtualKeyMCPConfig(ctx, &mcpConfigs[j], tx); err != nil {
@@ -2562,15 +2562,15 @@ func createGovernanceConfigInStore(ctx context.Context, config *Config) {
 			}
 			logger.Debug("created virtual key %s successfully", virtualKey.ID)
 
-		for _, pc := range providerConfigs {
-			vkID := virtualKey.ID
-			pc.VirtualKeyID = &vkID
-			logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
-			if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &pc, tx); err != nil {
-				logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
-				return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
+			for _, pc := range providerConfigs {
+				vkID := virtualKey.ID
+				pc.VirtualKeyID = &vkID
+				logger.Debug("creating provider config for VK %s: provider=%s, keys=%d", virtualKey.ID, pc.Provider, len(pc.Keys))
+				if err := config.StoreFromContext(ctx).CreateAllowedModelConfigExpanded(ctx, &pc, tx); err != nil {
+					logger.Error("failed to create provider config for virtual key %s: %v", virtualKey.ID, err)
+					return fmt.Errorf("failed to create provider config for virtual key %s: %w", virtualKey.ID, err)
+				}
 			}
-		}
 
 			// Resolve MCP client names to IDs for config file mcp_configs
 			mcpConfigs = resolveMCPConfigClientIDs(ctx, config.StoreFromContext(ctx), mcpConfigs, virtualKey.ID)
@@ -2918,8 +2918,8 @@ func ResolveFrameworkPricingConfig(
 		configID = dbConfig.ID
 	}
 	return &configstoreTables.TableFrameworkConfig{
-			ID: configID,
-		}, &modelcatalog.Config{}, false
+		ID: configID,
+	}, &modelcatalog.Config{}, false
 }
 
 // initFrameworkConfig initializes framework config and pricing manager from file
@@ -3427,6 +3427,15 @@ func (c *Config) setTenantProviderRefreshWatermark(tenantID string, at time.Time
 		c.tenantProviderRefreshAt = make(map[string]time.Time)
 	}
 	c.tenantProviderRefreshAt[tenantID] = configstore.NormalizeRefreshSince(at)
+}
+
+func (c *Config) clearTenantProviderRefreshWatermark(tenantID string) {
+	c.tenantProviderRefreshMu.Lock()
+	defer c.tenantProviderRefreshMu.Unlock()
+	if c.tenantProviderRefreshAt == nil {
+		return
+	}
+	delete(c.tenantProviderRefreshAt, tenantID)
 }
 
 // GetPluginOrder returns the names of all base plugins in their sorted placement order.
