@@ -49,9 +49,9 @@ type ValidatedToken struct {
 // the configstore-backed persistence layer; nothing else needs the row format
 // directly.
 type Service struct {
-	registry       tenantstore.Resolver
-	scopeRegistry  *Registry
-	now            func() time.Time // injectable for tests
+	registry      tenantstore.Resolver
+	scopeRegistry *Registry
+	now           func() time.Time // injectable for tests
 }
 
 // NewService constructs a Service backed by the tenant registry and scope registry.
@@ -165,7 +165,7 @@ func (s *Service) DeleteExpiredAll(ctx context.Context, before time.Time) (int64
 	}
 	var total int64
 	for _, tenantID := range s.registry.ListTenantIDs(ctx) {
-		store := s.registry.GetStoreForTenant(ctx, tenantID)
+		store := s.registry.PeekStoreForTenant(tenantID)
 		if store == nil {
 			continue
 		}

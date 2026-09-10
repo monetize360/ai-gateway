@@ -67,3 +67,7 @@ func (r *StaticRegistry) GetStoreForTenant(_ context.Context, tenantID string) c
 	}
 	return r.Store
 }
+
+func (r *StaticRegistry) PeekStoreForTenant(tenantID string) configstore.ConfigStore {
+	return r.GetStoreForTenant(context.Background(), tenantID)
+}

@@ -86,7 +86,7 @@ func (p *OAuth2Provider) forEachTenant(ctx context.Context, fn func(tenantCtx co
 		return nil
 	}
 	for _, tenantID := range tenantIDs {
-		store := p.tenantResolver.GetStoreForTenant(ctx, tenantID)
+		store := p.tenantResolver.PeekStoreForTenant(tenantID)
 		if store == nil {
 			continue
 		}

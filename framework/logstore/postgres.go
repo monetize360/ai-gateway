@@ -2,7 +2,9 @@ package logstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
@@ -12,17 +14,50 @@ import (
 
 // PostgresConfig represents the configuration for a Postgres database.
 type PostgresConfig struct {
-	Host         *schemas.EnvVar `json:"host"`
-	Port         *schemas.EnvVar `json:"port"`
-	User         *schemas.EnvVar `json:"user"`
-	Password     *schemas.EnvVar `json:"password"`
-	DBName       *schemas.EnvVar `json:"db_name"`
-	SSLMode      *schemas.EnvVar `json:"ssl_mode"`
-	MaxIdleConns int             `json:"max_idle_conns"`
-	MaxOpenConns int             `json:"max_open_conns"`
+	Host            *schemas.EnvVar `json:"host"`
+	Port            *schemas.EnvVar `json:"port"`
+	User            *schemas.EnvVar `json:"user"`
+	Password        *schemas.EnvVar `json:"password"`
+	DBName          *schemas.EnvVar `json:"db_name"`
+	SSLMode         *schemas.EnvVar `json:"ssl_mode"`
+	MaxIdleConns    int             `json:"max_idle_conns"`
+	MaxOpenConns    int             `json:"max_open_conns"`
+	ConnMaxIdleTime time.Duration   `json:"-"`
+	ConnMaxLifetime time.Duration   `json:"-"`
 	// MatViewRefreshInterval is retained for config compatibility only. Materialized
 	// views are no longer created or refreshed by Bifrost at startup.
 	MatViewRefreshInterval string `json:"matview_refresh_interval,omitempty"`
+}
+
+// PoolSettings tunes sql.DB limits for a log store connection pool.
+type PoolSettings struct {
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxIdleTime time.Duration
+	ConnMaxLifetime time.Duration
+}
+
+func applyLogStorePool(sqlDB *sql.DB, pool PoolSettings) {
+	maxIdleConns := pool.MaxIdleConns
+	if maxIdleConns == 0 {
+		maxIdleConns = 5
+	}
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	maxOpenConns := pool.MaxOpenConns
+	if maxOpenConns == 0 {
+		maxOpenConns = 20
+	}
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	idleTime := pool.ConnMaxIdleTime
+	if idleTime <= 0 {
+		idleTime = 5 * time.Minute
+	}
+	sqlDB.SetConnMaxIdleTime(idleTime)
+	lifetime := pool.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = 30 * time.Minute
+	}
+	sqlDB.SetConnMaxLifetime(lifetime)
 }
 
 // newPostgresLogStore creates a new Postgres log store.
@@ -76,24 +111,19 @@ func newPostgresLogStore(ctx context.Context, config *PostgresConfig, logger sch
 		return nil, err
 	}
 
-	maxIdleConns := config.MaxIdleConns
-	if maxIdleConns == 0 {
-		maxIdleConns = 5
-	}
-	sqlDB.SetMaxIdleConns(maxIdleConns)
-
-	maxOpenConns := config.MaxOpenConns
-	if maxOpenConns == 0 {
-		maxOpenConns = 50
-	}
-	sqlDB.SetMaxOpenConns(maxOpenConns)
+	applyLogStorePool(sqlDB, PoolSettings{
+		MaxIdleConns:    config.MaxIdleConns,
+		MaxOpenConns:    config.MaxOpenConns,
+		ConnMaxIdleTime: config.ConnMaxIdleTime,
+		ConnMaxLifetime: config.ConnMaxLifetime,
+	})
 
 	return &RDBLogStore{db: db, logger: logger}, nil
 }
 
 // NewPostgresLogStoreFromDSN opens a postgres log store from a libpq DSN.
 // Schema management is the caller's responsibility; Bifrost only opens a runtime pool.
-func NewPostgresLogStoreFromDSN(ctx context.Context, dsn string, maxIdleConns, maxOpenConns int, logger schemas.Logger) (LogStore, error) {
+func NewPostgresLogStoreFromDSN(ctx context.Context, dsn string, pool PoolSettings, logger schemas.Logger) (LogStore, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("postgres dsn is required")
 	}
@@ -112,14 +142,7 @@ func NewPostgresLogStoreFromDSN(ctx context.Context, dsn string, maxIdleConns, m
 		return nil, err
 	}
 
-	if maxIdleConns == 0 {
-		maxIdleConns = 5
-	}
-	if maxOpenConns == 0 {
-		maxOpenConns = 50
-	}
-	sqlDB.SetMaxIdleConns(maxIdleConns)
-	sqlDB.SetMaxOpenConns(maxOpenConns)
+	applyLogStorePool(sqlDB, pool)
 
 	return &RDBLogStore{db: db, logger: logger}, nil
 }

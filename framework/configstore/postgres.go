@@ -4,22 +4,32 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
+const (
+	DefaultPostgresMaxIdleConns    = 5
+	DefaultPostgresMaxOpenConns    = 20
+	DefaultPostgresConnMaxIdleTime = 5 * time.Minute
+	DefaultPostgresConnMaxLifetime = 30 * time.Minute
+)
+
 // PostgresConfig represents the configuration for a Postgres database.
 type PostgresConfig struct {
-	Host         *schemas.EnvVar `json:"host"`
-	Port         *schemas.EnvVar `json:"port"`
-	User         *schemas.EnvVar `json:"user"`
-	Password     *schemas.EnvVar `json:"password"`
-	DBName       *schemas.EnvVar `json:"db_name"`
-	SSLMode      *schemas.EnvVar `json:"ssl_mode"`
-	MaxIdleConns int             `json:"max_idle_conns"`
-	MaxOpenConns int             `json:"max_open_conns"`
+	Host            *schemas.EnvVar `json:"host"`
+	Port            *schemas.EnvVar `json:"port"`
+	User            *schemas.EnvVar `json:"user"`
+	Password        *schemas.EnvVar `json:"password"`
+	DBName          *schemas.EnvVar `json:"db_name"`
+	SSLMode         *schemas.EnvVar `json:"ssl_mode"`
+	MaxIdleConns    int             `json:"max_idle_conns"`
+	MaxOpenConns    int             `json:"max_open_conns"`
+	ConnMaxIdleTime time.Duration   `json:"-"`
+	ConnMaxLifetime time.Duration   `json:"-"`
 }
 
 // buildPostgresDSN assembles a libpq-style DSN from the validated config.
@@ -62,10 +72,12 @@ func closeDbConn(db *gorm.DB, logger schemas.Logger) {
 }
 
 // PostgresPoolSettings holds sql.DB pool limits for Postgres connections.
-// Zero values use package defaults (5 idle, 50 open).
+// Zero values use package defaults (5 idle, 20 open, 5m idle time, 30m lifetime).
 type PostgresPoolSettings struct {
-	MaxIdleConns int
-	MaxOpenConns int
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxIdleTime time.Duration
+	ConnMaxLifetime time.Duration
 }
 
 func (p PostgresPoolSettings) apply(db *gorm.DB) error {
@@ -75,24 +87,35 @@ func (p PostgresPoolSettings) apply(db *gorm.DB) error {
 	}
 	maxIdleConns := p.MaxIdleConns
 	if maxIdleConns == 0 {
-		maxIdleConns = 5
+		maxIdleConns = DefaultPostgresMaxIdleConns
 	}
 	sqlDB.SetMaxIdleConns(maxIdleConns)
 	maxOpenConns := p.MaxOpenConns
 	if maxOpenConns == 0 {
-		maxOpenConns = 50
+		maxOpenConns = DefaultPostgresMaxOpenConns
 	}
 	sqlDB.SetMaxOpenConns(maxOpenConns)
+	idleTime := p.ConnMaxIdleTime
+	if idleTime <= 0 {
+		idleTime = DefaultPostgresConnMaxIdleTime
+	}
+	sqlDB.SetConnMaxIdleTime(idleTime)
+	lifetime := p.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = DefaultPostgresConnMaxLifetime
+	}
+	sqlDB.SetConnMaxLifetime(lifetime)
 	return nil
 }
 
-// applyPostgresPoolTuning applies MaxIdleConns / MaxOpenConns from config to
-// the supplied *gorm.DB, falling back to defaults when the config leaves the
-// field at zero.
+// applyPostgresPoolTuning applies pool limits from config to the supplied
+// *gorm.DB, falling back to defaults when the config leaves a field at zero.
 func applyPostgresPoolTuning(db *gorm.DB, config *PostgresConfig) error {
 	return PostgresPoolSettings{
-		MaxIdleConns: config.MaxIdleConns,
-		MaxOpenConns: config.MaxOpenConns,
+		MaxIdleConns:    config.MaxIdleConns,
+		MaxOpenConns:    config.MaxOpenConns,
+		ConnMaxIdleTime: config.ConnMaxIdleTime,
+		ConnMaxLifetime: config.ConnMaxLifetime,
 	}.apply(db)
 }
 

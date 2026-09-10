@@ -17,6 +17,9 @@ type Resolver interface {
 	ListTenantIDs(ctx context.Context) []string
 	SyncTenants(ctx context.Context) error
 	GetStoreForTenant(ctx context.Context, tenantID string) configstore.ConfigStore
+	// PeekStoreForTenant returns an already-open store without creating a pool
+	// or refreshing lastUsed. Use this from background workers.
+	PeekStoreForTenant(tenantID string) configstore.ConfigStore
 }
 
 // TenantConfigRegistry resolves per-tenant ConfigStore instances from request
@@ -86,7 +89,7 @@ func (r *TenantConfigRegistry) ListTenantIDs(_ context.Context) []string {
 	return r.manager.ListTenantIDs()
 }
 
-// SyncTenants discovers new tenants from the global DB and opens their stores.
+// SyncTenants closes pools for tenants that were soft-deleted in the global DB.
 func (r *TenantConfigRegistry) SyncTenants(ctx context.Context) error {
 	if r == nil || r.manager == nil {
 		return nil
@@ -104,4 +107,13 @@ func (r *TenantConfigRegistry) GetStoreForTenant(ctx context.Context, tenantID s
 		return nil
 	}
 	return store
+}
+
+// PeekStoreForTenant returns the open ConfigStore for tenantID without opening
+// a pool or refreshing lastUsed.
+func (r *TenantConfigRegistry) PeekStoreForTenant(tenantID string) configstore.ConfigStore {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	return r.manager.PeekStore(tenantID)
 }
