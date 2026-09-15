@@ -92,23 +92,23 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 
 	body := ctx.PostBody()
 	if len(body) > kafkainject.MaxMessageBytes {
-		SendError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
+		SendIngestError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
 	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
 	if tenantID == "" {
-		SendError(ctx, fasthttp.StatusUnauthorized, "tenant context missing")
+		SendIngestError(ctx, fasthttp.StatusUnauthorized, "tenant context missing")
 		return
 	}
 
 	var req kafkaIngestRequest
 	if err := sonic.Unmarshal(body, &req); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if len(req.Message) == 0 || string(req.Message) == "null" {
-		SendError(ctx, fasthttp.StatusBadRequest, "message is required")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "message is required")
 		return
 	}
 
@@ -126,22 +126,22 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 
 	entry, err := h.pool.GetOrCreate(reqCtx, tenantID, connectionID, dataSourceID)
 	if err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		SendIngestError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 
 	fields, err := h.schemaCache.GetOrLoad(reqCtx, tenantID, entry.MObjectID)
 	if err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		SendIngestError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 	var message map[string]any
 	if err := sonic.Unmarshal(req.Message, &message); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
 		return
 	}
 	if err := kafkainject.ValidateMessage(message, fields); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		SendIngestError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -151,34 +151,34 @@ func (h *KafkaIngestHandler) ingest(ctx *fasthttp.RequestCtx) {
 func (h *KafkaIngestHandler) ingestUsage(ctx *fasthttp.RequestCtx) {
 	body := ctx.PostBody()
 	if len(body) > kafkainject.MaxMessageBytes {
-		SendError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
+		SendIngestError(ctx, fasthttp.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
 	tenantID, _ := ctx.UserValue(schemas.BifrostContextKeyTenantID).(string)
 	if tenantID == "" {
-		SendError(ctx, fasthttp.StatusUnauthorized, "tenant context missing")
+		SendIngestError(ctx, fasthttp.StatusUnauthorized, "tenant context missing")
 		return
 	}
 
 	var req usageIngestRequest
 	if err := sonic.Unmarshal(body, &req); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if len(req.Message) == 0 || string(req.Message) == "null" {
-		SendError(ctx, fasthttp.StatusBadRequest, "message is required")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "message is required")
 		return
 	}
 	var message map[string]any
 	if err := sonic.Unmarshal(req.Message, &message); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
+		SendIngestError(ctx, fasthttp.StatusBadRequest, "message must be a JSON object")
 		return
 	}
 
 	payload, err := ensureOrganizationID(ctx, message)
 	if err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		SendIngestError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -187,7 +187,7 @@ func (h *KafkaIngestHandler) ingestUsage(ctx *fasthttp.RequestCtx) {
 
 	entry, err := h.pool.GetOrCreateStandard(tenantID)
 	if err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		SendIngestError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
 	h.publish(ctx, reqCtx, entry, req.Key, payload)
@@ -231,10 +231,10 @@ func (h *KafkaIngestHandler) publish(ctx *fasthttp.RequestCtx, reqCtx context.Co
 	topic, partition, offset, err := kafkainject.ProduceSync(reqCtx, entry, key, message)
 	if err != nil {
 		if reqCtx.Err() != nil {
-			SendError(ctx, fasthttp.StatusGatewayTimeout, fmt.Sprintf("timed out publishing kafka message: %v", err))
+			SendIngestError(ctx, fasthttp.StatusGatewayTimeout, fmt.Sprintf("timed out publishing kafka message: %v", err))
 			return
 		}
-		SendError(ctx, fasthttp.StatusBadGateway, fmt.Sprintf("failed to publish kafka message: %v", err))
+		SendIngestError(ctx, fasthttp.StatusBadGateway, fmt.Sprintf("failed to publish kafka message: %v", err))
 		return
 	}
 

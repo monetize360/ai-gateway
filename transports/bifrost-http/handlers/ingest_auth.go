@@ -43,7 +43,7 @@ func (m *IngestAuthMiddleware) Middleware() schemas.BifrostHTTPMiddleware {
 	return func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 		return func(ctx *fasthttp.RequestCtx) {
 			if err := m.authenticate(ctx); err != nil {
-				SendError(ctx, fasthttp.StatusUnauthorized, err.Error())
+				SendIngestError(ctx, fasthttp.StatusUnauthorized, err.Error())
 				return
 			}
 			next(ctx)

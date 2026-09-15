@@ -97,6 +97,32 @@ func SendJSONWithStatus(ctx *fasthttp.RequestCtx, data interface{}, statusCode i
 	}
 }
 
+type ingestErrorBody struct {
+	StatusCode  int              `json:"status_code"`
+	Error       ingestErrorField `json:"error"`
+	ExtraFields map[string]any   `json:"extra_fields"`
+}
+
+type ingestErrorField struct {
+	Message string `json:"message"`
+}
+
+// SendIngestError sends an ingest error without is_bifrost_error.
+func SendIngestError(ctx *fasthttp.RequestCtx, statusCode int, message string) {
+	ctx.SetStatusCode(statusCode)
+	ctx.SetContentType("application/json")
+	body := ingestErrorBody{
+		StatusCode:  statusCode,
+		Error:       ingestErrorField{Message: message},
+		ExtraFields: map[string]any{},
+	}
+	if err := json.NewEncoder(ctx).Encode(body); err != nil {
+		logger.Warn(fmt.Sprintf("Failed to encode ingest error response: %v", err))
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.SetBodyString(fmt.Sprintf("Failed to encode error response: %v", err))
+	}
+}
+
 // SendError sends a BifrostError response
 func SendError(ctx *fasthttp.RequestCtx, statusCode int, message string) {
 	bifrostErr := &schemas.BifrostError{
