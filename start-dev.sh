@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Start Bifrost local development (UI on :3000, API + UI proxy on :8080).
+# Start AI gateway local development (API hot reload).
 #
 # Usage:
 #   ./start-dev.sh
-#   ./start-dev.sh PORT=9090
-#   DEBUG=1 ./start-dev.sh
+#   PORT=8082 APP_DIR=. ./start-dev.sh
+#   DEBUG=1 PORT=8082 APP_DIR=. ./start-dev.sh
+#
+# For MPilot integration use PORT=8082 and APP_DIR=. so config.json
+# (tenant_store) loads from the repo root.
 #
 # Stop with Ctrl+C.
 
@@ -15,19 +18,6 @@ cd "$ROOT"
 
 # Go + dev tools (air, etc.) — extend if your install paths differ
 export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${PATH}"
-
-# Node via nvm when available (same behavior as Makefile USE_NODE)
-NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
-if [[ ! -s "$NVM_SH" ]]; then
-	brew_prefix="$(brew --prefix nvm 2>/dev/null || true)"
-	[[ -n "$brew_prefix" ]] && NVM_SH="${brew_prefix}/nvm.sh"
-fi
-if [[ -s "$NVM_SH" ]]; then
-	# shellcheck source=/dev/null
-	. "$NVM_SH"
-	nvm install >/dev/null 2>&1 || true
-	nvm use >/dev/null 2>&1 || true
-fi
 
 # Optional local secrets (Makefile default when USE_INFISICAL is not set)
 if [[ -f "${ROOT}/.env" ]]; then
@@ -47,9 +37,17 @@ if ! command -v make >/dev/null 2>&1; then
 	exit 1
 fi
 
-echo "Starting Bifrost dev environment from ${ROOT}"
+# Ensure embed stub exists for //go:embed all:ui
+mkdir -p transports/bifrost-http/ui
+if [[ ! -f transports/bifrost-http/ui/.gitkeep && ! -f transports/bifrost-http/ui/.tmp ]]; then
+	touch transports/bifrost-http/ui/.gitkeep
+fi
+
+echo "Starting AI gateway from ${ROOT}"
 echo "  App:  http://localhost:${PORT:-8080}"
-echo "  UI:   http://localhost:3000 (Vite, proxied via API in dev)"
+if [[ -n "${APP_DIR:-}" ]]; then
+	echo "  Dir:  ${APP_DIR}"
+fi
 echo ""
 
 exec make dev "$@"

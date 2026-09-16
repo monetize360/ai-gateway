@@ -1,12 +1,13 @@
-# AGENTS.md — Bifrost AI Gateway
+# AGENTS.md — Monetize360 AI Gateway
 
 > Context for AI agents (Claude Code, Copilot, Cursor, etc.) working on this codebase. Read this fully before making changes.
 
-## What is Bifrost?
+## What is this?
 
-Bifrost is a high-performance AI gateway that unifies 20+ LLM providers behind a single OpenAI-compatible API with ~11µs overhead at 5,000 RPS. It also serves as an MCP (Model Context Protocol) gateway, turning static chat models into tool-calling agents.
-
-GitHub: `maximhq/bifrost`
+Monetize360 AI Gateway is the inference runtime used by MPilot. It unifies
+multiple LLM providers behind an OpenAI-compatible API, with governance,
+caching, and MCP tool-calling support. Go identifiers and module paths may
+still use historical `bifrost` names — do not rename them unless explicitly asked.
 
 ---
 
@@ -596,7 +597,7 @@ Variants:
 - `/e2e-test audit` — Scan specs for incorrect/weak assertions (P0-P6 severity scale)
 
 ### `/investigate-issue <issue-id>`
-Investigate a GitHub issue from `maximhq/bifrost`. Fetches issue details, classifies by type/area, searches codebase, traces dependencies, analyzes side effects, suggests tests (LLM/MCP/E2E), and presents an implementation plan with per-change approval gates.
+Investigate a GitHub issue for this repository. Fetches issue details, classifies by type/area, searches codebase, traces dependencies, analyzes side effects, suggests tests (LLM/MCP/E2E), and presents an implementation plan with per-change approval gates.
 
 ### `/resolve-pr-comments <pr-number>`
 Systematically address unresolved PR review comments. Uses GraphQL to get unresolved threads, presents each with FIX/REPLY/SKIP options, collects fixes locally, and only posts replies **after code is pushed** to remote.

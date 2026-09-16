@@ -1571,7 +1571,6 @@ func TestProviderFallbackMechanism(t *testing.T) {
 // ============================================================================
 
 // TestVirtualKeyHeaderFormats verifies that Bifrost accepts all documented VK header formats
-// Reference: https://docs.getbifrost.ai/features/governance/virtual-keys
 // Supported headers:
 //   - x-bf-vk: Virtual key header (Bifrost native)
 //   - Authorization: Bearer token style (OpenAI style)
