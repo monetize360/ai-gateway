@@ -10,15 +10,17 @@ private.*
 bifrost-data
 test-coverage-local.sh
 
-# Enterprise
-ui/app/enterprise
-ui/components/enterprise
+# Enterprise (legacy Bifrost UI paths — UI removed)
+# ui/app/enterprise
+# ui/components/enterprise
 
 # Temporary directories
 **/temp/
 /transports/ui
 /transports/bifrost-http/lib/ui
-/transports/bifrost-http/ui/
+# Built UI assets are ignored; keep the embed stub tracked for //go:embed
+/transports/bifrost-http/ui/*
+!/transports/bifrost-http/ui/.gitkeep
 transports/bifrost-http/logs/
 transports/bifrost-http/tmp/
 node_modules

@@ -61,7 +61,7 @@ func (l *SharedObjectPluginLoader) LoadPlugin(path string, config any) (schemas.
 	}
 	var ok bool
 	if dp.getName, ok = getNameSym.(func() string); !ok {
-		return nil, fmt.Errorf("failed to cast GetName to func() string\nSee docs for more information: https://docs.getbifrost.ai/plugins/writing-go-plugin")
+		return nil, fmt.Errorf("failed to cast GetName to func() string")
 	}
 
 	// Required: Cleanup
@@ -70,7 +70,7 @@ func (l *SharedObjectPluginLoader) LoadPlugin(path string, config any) (schemas.
 		return nil, fmt.Errorf("required symbol Cleanup not found: %w", err)
 	}
 	if dp.cleanup, ok = cleanupSym.(func() error); !ok {
-		return nil, fmt.Errorf("failed to cast Cleanup to func() error\nSee docs for more information: https://docs.getbifrost.ai/plugins/writing-go-plugin")
+		return nil, fmt.Errorf("failed to cast Cleanup to func() error")
 	}
 
 	// Optional: HTTPTransportPreHook
