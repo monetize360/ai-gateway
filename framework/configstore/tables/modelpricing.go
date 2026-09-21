@@ -14,6 +14,20 @@ type TableModelPricing struct {
 	MaxOutputTokens *int                  `gorm:"default:null" json:"max_output_tokens,omitempty"`
 	Architecture    *schemas.Architecture `gorm:"type:text;serializer:json;default:null" json:"architecture,omitempty"`
 
+	// Input modality capabilities. Present in the datasheet for a subset of models;
+	// nil means unknown, not unsupported.
+	SupportsVision     *bool `gorm:"default:null;column:supports_vision" json:"supports_vision,omitempty"`
+	SupportsPDFInput   *bool `gorm:"default:null;column:supports_pdf_input" json:"supports_pdf_input,omitempty"`
+	SupportsAudioInput *bool `gorm:"default:null;column:supports_audio_input" json:"supports_audio_input,omitempty"`
+
+	// Routing metadata (in-memory catalog only; not persisted as a SQL table).
+	Categories        []string `gorm:"type:text;serializer:json;default:null" json:"categories,omitempty"`
+	CapabilityTier    string   `gorm:"type:varchar(32);default:null" json:"capability_tier,omitempty"`
+	SupportsReasoning *bool    `gorm:"default:null;column:supports_reasoning" json:"supports_reasoning,omitempty"`
+	Status            string   `gorm:"type:varchar(32);default:null" json:"status,omitempty"`
+	LatencyClass      string   `gorm:"type:varchar(32);default:null" json:"latency_class,omitempty"`
+	SheetJSON         []byte   `gorm:"type:text;default:null;column:routing_sheet" json:"sheet,omitempty"`
+
 	// Costs - Text
 	InputCostPerToken          *float64 `gorm:"default:null" json:"input_cost_per_token,omitempty"`
 	OutputCostPerToken         *float64 `gorm:"default:null" json:"output_cost_per_token,omitempty"`

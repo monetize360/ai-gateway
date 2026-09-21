@@ -1367,6 +1367,199 @@
                     "is_enterprise": {
                       "type": "boolean",
                       "description": "Enable enterprise mode features"
+                    },
+                    "semantic_routing": {
+                      "type": "object",
+                      "description": "Semantic model selection. Layer 1 filters the virtual-key pool by capability. Layer 2 calls the vLLM Semantic Router preview API when router.base_url is set and intersects its recommendation with the Layer 1 pool. Router errors, out-of-pool answers, or an unset router decline the rewrite (incoming model is kept). Selection runs when a routing rule matches with action semantic, or when default_for_all is true and no pin rule matched.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "description": "Kill switch for semantic selection. When false, semantic declines and load balancing takes over.",
+                          "default": false
+                        },
+                        "default_for_all": {
+                          "type": "boolean",
+                          "description": "When true with enabled, run semantic for every virtual-key request that did not match a pin rule. Pin rules still override. Opt out per request with x-bf-disable-semantic-routing.",
+                          "default": false
+                        },
+                        "classes": {
+                          "type": "object",
+                          "description": "Optional preference lists keyed by class name (or default_class) used when ranking L1 survivors alongside a vLLM-SR recommendation. Not a standalone Layer 2 router.",
+                          "additionalProperties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "default_class": {
+                          "type": "string",
+                          "description": "Preference key used when ranking L1 survivors without a class override."
+                        },
+                        "task_weight": {
+                          "type": "number",
+                          "description": "Weight of the task_type ↔ model categories match term.",
+                          "default": 1.0
+                        },
+                        "tier_weight": {
+                          "type": "number",
+                          "description": "Weight of the complexity ↔ capability_tier match term.",
+                          "default": 1.0
+                        },
+                        "preference_weight": {
+                          "type": "number",
+                          "description": "Weight of the optional operator preference list term.",
+                          "default": 0.5
+                        },
+                        "cost_weight": {
+                          "type": "number",
+                          "description": "Weight of the normalised cost term in the score.",
+                          "default": 0.5
+                        },
+                        "context_weight": {
+                          "type": "number",
+                          "description": "Weight of the context headroom term in the score.",
+                          "default": 0.2
+                        },
+                        "max_fallbacks": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "description": "Maximum number of runner-up candidates recorded as fallbacks.",
+                          "default": 2
+                        },
+                        "router": {
+                          "type": "object",
+                          "description": "Primary Layer 2 surface: vLLM Semantic Router management API. Bifrost calls POST preview only (OpenAI-chat shaped body; eligible_models is rejected by the sidecar and intersected locally). Local routing work budget is ~10ms; total semantic budget ≈ 10ms + router.timeout_ms. Prefer secrets/env for api_key.",
+                          "properties": {
+                            "base_url": {
+                              "type": "string",
+                              "description": "Absolute http(s) management API origin, for example http://127.0.0.1:18080 (local) or http://vllm-sr-mgmt.internal:8080 (prod). Must not share Bifrost's listen port."
+                            },
+                            "preview_path": {
+                              "type": "string",
+                              "description": "Preview path appended to base_url.",
+                              "default": "/api/v1/routing/preview"
+                            },
+                            "entrypoint": {
+                              "type": "string",
+                              "description": "Virtual model / recipe alias sent as request model.",
+                              "default": "vllm-sr/auto"
+                            },
+                            "api_key": {
+                              "type": "string",
+                              "description": "Optional Bearer token for the management API. Prefer env/secret injection; do not commit production keys."
+                            },
+                            "timeout_ms": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "description": "Preview HTTP deadline in milliseconds. Production typically uses a small value (e.g. 50); local validation may use larger values.",
+                              "default": 2000
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "classifier": {
+                          "type": "object",
+                          "description": "Deprecated and ignored. Layer 2 is vLLM-SR only; retained for config compatibility.",
+                          "deprecated": true,
+                          "properties": {
+                            "provider": {
+                              "type": "string",
+                              "description": "Ignored."
+                            },
+                            "model": {
+                              "type": "string",
+                              "description": "Ignored.",
+                              "default": "nvidia/prompt-task-and-complexity-classifier"
+                            },
+                            "base_url": {
+                              "type": "string",
+                              "description": "Ignored."
+                            },
+                            "api_key": {
+                              "type": "string",
+                              "description": "Ignored."
+                            },
+                            "timeout_ms": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "description": "Ignored.",
+                              "default": 2000
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "complexity_low_max": {
+                          "type": "number",
+                          "description": "Deprecated. Still used by the local fail-open ranker when mapping prompt_complexity_score to tiers.",
+                          "deprecated": true,
+                          "default": 0.25
+                        },
+                        "complexity_mid_max": {
+                          "type": "number",
+                          "description": "Deprecated. Still used by the local fail-open ranker when mapping prompt_complexity_score to tiers.",
+                          "deprecated": true,
+                          "default": 0.5
+                        },
+                        "reasoning_require_min": {
+                          "type": "number",
+                          "description": "Deprecated. Still used by capability filtering when a classification carries reasoning.",
+                          "deprecated": true,
+                          "default": 0.4
+                        },
+                        "task_type_prob_min": {
+                          "type": "number",
+                          "description": "Deprecated. Still used by ranker scoring when a classification is supplied.",
+                          "deprecated": true,
+                          "default": 0.5
+                        },
+                        "classification_ttl": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "description": "Deprecated and unused.",
+                          "deprecated": true
+                        },
+                        "allow_preview_models": {
+                          "type": "boolean",
+                          "description": "When true, models with status=preview may be selected.",
+                          "default": false
+                        },
+                        "model_overrides_file": {
+                          "type": "string",
+                          "description": "Path to a POC/catalog JSON of model routing metadata (see plugins/governance/poc/gemini-model-routing.json). Prefer relative paths from the process working directory / -app-dir. Merged with model_overrides; inline entries win. Prefer inline model_overrides in production."
+                        },
+                        "model_overrides": {
+                          "type": "object",
+                          "description": "Preferred production source of per-model routing annotations keyed by provider/model (must match VK allowlist and vLLM-SR decision IDs).",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "categories": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                              },
+                              "capability_tier": {
+                                "type": "string",
+                                "enum": ["nano", "small", "mid", "large", "flagship"]
+                              },
+                              "supports_reasoning": { "type": "boolean" },
+                              "status": {
+                                "type": "string",
+                                "enum": ["live", "preview", "deprecated"]
+                              },
+                              "latency_class": { "type": "string" },
+                              "sheet": {
+                                "type": "object",
+                                "description": "Full catalog sheet for UI/ops; not used by the ranker.",
+                                "additionalProperties": true
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": ["enabled"],
+                      "additionalProperties": false
                     }
                   },
                   "additionalProperties": false
@@ -1917,7 +2110,13 @@
         "chain_rule": {
           "type": "boolean",
           "default": false,
-          "description": "If true, re-evaluates routing chain after this rule matches"
+          "description": "If true, re-evaluates routing chain after this rule matches. Not supported when action is semantic."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["pin", "semantic"],
+          "default": "pin",
+          "description": "What the rule does when CEL matches. pin (default) writes provider/model. semantic picks a capable model from the virtual key's allowed pool."
         },
         "targets": false,
         "provider_id": {

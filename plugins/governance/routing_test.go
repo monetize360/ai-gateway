@@ -236,7 +236,7 @@ func TestEvaluateRoutingRules_GlobalRuleMatches(t *testing.T) {
 		ID:            "1",
 		Name:          "Global Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -265,6 +265,115 @@ func TestEvaluateRoutingRules_GlobalRuleMatches(t *testing.T) {
 	assert.Equal(t, "Global Rule", decision.MatchedRuleName)
 }
 
+// A semantic-action rule matches CEL without pinning provider/model; selection happens later.
+func TestEvaluateRoutingRules_SemanticAction(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	rule := &configstoreTables.TableRoutingRule{
+		ID:              "sem-1",
+		Name:            "Semantic Select",
+		CelExpression:   "true",
+		Action:          configstoreTables.RoutingRuleActionSemantic,
+		Provider:        bifrost.Ptr("azure"),
+		Model:           bifrost.Ptr("gpt-4-turbo"),
+		ParsedFallbacks: []string{"openai/gpt-4o"},
+		Enabled:         bifrost.Ptr(true),
+		Priority:        0,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
+
+	decision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	assert.True(t, decision.IsSemanticAction())
+	assert.Equal(t, "openai", decision.Provider, "semantic action must not apply the rule's pin")
+	assert.Equal(t, "gpt-4o", decision.Model)
+	assert.Equal(t, []string{"openai/gpt-4o"}, decision.Fallbacks)
+	assert.Empty(t, decision.KeyID)
+}
+
+// A pin rule still wins over a later semantic rule (first-match).
+func TestEvaluateRoutingRules_PinShortCircuitsSemantic(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	pin := &configstoreTables.TableRoutingRule{
+		ID:            "pin-1",
+		Name:          "Pin Azure",
+		CelExpression: "true",
+		Action:        configstoreTables.RoutingRuleActionPin,
+		Provider:      bifrost.Ptr("azure"),
+		Model:         bifrost.Ptr("gpt-4-turbo"),
+		Enabled:       bifrost.Ptr(true),
+		Priority:      0,
+	}
+	semantic := &configstoreTables.TableRoutingRule{
+		ID:            "sem-2",
+		Name:          "Semantic",
+		CelExpression: "true",
+		Action:        configstoreTables.RoutingRuleActionSemantic,
+		Enabled:       bifrost.Ptr(true),
+		Priority:      10,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), pin))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), semantic))
+
+	decision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	assert.False(t, decision.IsSemanticAction())
+	assert.Equal(t, "azure", decision.Provider)
+	assert.Equal(t, "Pin Azure", decision.MatchedRuleName)
+}
+
+// Unmatched CEL yields no decision, so the semantic action is not selected.
+func TestEvaluateRoutingRules_NoMatchIsNotSemantic(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	rule := &configstoreTables.TableRoutingRule{
+		ID:            "sem-nomatch",
+		Name:          "Semantic",
+		CelExpression: "model == 'never'",
+		Action:        configstoreTables.RoutingRuleActionSemantic,
+		Enabled:       bifrost.Ptr(true),
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
+
+	decision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, decision)
+	assert.False(t, decision.IsSemanticAction())
+}
+
 // TestEvaluateRoutingRules_PinnedKeyPropagation verifies the rule key_id propagates into the
 // RoutingDecision and, when applied the same way governance/main.go does it, into the
 // BifrostContext under BifrostContextKeyAPIKeyID.
@@ -283,7 +392,7 @@ func TestEvaluateRoutingRules_PinnedKeyPropagation(t *testing.T) {
 		ID:            "multi-1",
 		Name:          "Pinned Key Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("azure"),
 		Model:    bifrost.Ptr("gpt-4-turbo"),
 		KeyID:    bifrost.Ptr(pinnedKeyID),
@@ -335,7 +444,7 @@ func TestEvaluateRoutingRules_ScopePrecedence(t *testing.T) {
 		ID:            "1",
 		Name:          "Global Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -348,7 +457,7 @@ func TestEvaluateRoutingRules_ScopePrecedence(t *testing.T) {
 		ID:            "2",
 		Name:          "VK Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:      bifrost.Ptr(true),
@@ -397,7 +506,7 @@ func TestEvaluateRoutingRules_PriorityOrdering(t *testing.T) {
 		ID:            "1",
 		Name:          "Low Priority",
 		CelExpression: "true",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -410,7 +519,7 @@ func TestEvaluateRoutingRules_PriorityOrdering(t *testing.T) {
 		ID:            "2",
 		Name:          "High Priority",
 		CelExpression: "true",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -444,7 +553,7 @@ func TestResolveRoutingWithFallback_RuleMatches(t *testing.T) {
 		ID:            "1",
 		Name:          "Test Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -509,7 +618,7 @@ func TestEvaluateRoutingRules_DisabledRulesIgnored(t *testing.T) {
 		ID:            "1",
 		Name:          "Disabled Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(false),
@@ -522,7 +631,7 @@ func TestEvaluateRoutingRules_DisabledRulesIgnored(t *testing.T) {
 		ID:            "2",
 		Name:          "Enabled Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -558,7 +667,7 @@ func TestEvaluateRoutingRules_ComplexExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Complex Rule",
 		CelExpression: "model == 'gpt-4o' && headers['x-tier'] == 'premium'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -601,7 +710,7 @@ func TestEvaluateRoutingRules_NilVirtualKey(t *testing.T) {
 		ID:            "1",
 		Name:          "Global Rule",
 		CelExpression: "true",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -637,7 +746,7 @@ func TestEvaluateRoutingRules_MissingHeaderGracefully(t *testing.T) {
 		ID:            "1",
 		Name:          "Header Check Rule",
 		CelExpression: "headers[\"x-custom-header\"] == \"premium\"",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:  bifrost.Ptr(true),
@@ -681,7 +790,7 @@ func TestEvaluateRoutingRules_ChainRuleReEvaluation(t *testing.T) {
 		ID:            "chain-a",
 		Name:          "Chain Rule A",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -695,7 +804,7 @@ func TestEvaluateRoutingRules_ChainRuleReEvaluation(t *testing.T) {
 		ID:            "chain-b",
 		Name:          "Chain Rule B",
 		CelExpression: "model == 'gpt-4-turbo'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -737,7 +846,7 @@ func TestEvaluateRoutingRules_TerminalRuleStopsChain(t *testing.T) {
 		ID:            "terminal-a",
 		Name:          "Terminal Rule A",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -751,7 +860,7 @@ func TestEvaluateRoutingRules_TerminalRuleStopsChain(t *testing.T) {
 		ID:            "terminal-b",
 		Name:          "Terminal Rule B",
 		CelExpression: "model == 'gpt-4-turbo'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -793,7 +902,7 @@ func TestEvaluateRoutingRules_SelfLoopContinuesToNextRule(t *testing.T) {
 		ID:            "self-loop-a",
 		Name:          "Self-Loop Rule A",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -807,7 +916,7 @@ func TestEvaluateRoutingRules_SelfLoopContinuesToNextRule(t *testing.T) {
 		ID:            "self-loop-b",
 		Name:          "Self-Loop Rule B",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("anthropic"), Model: bifrost.Ptr("claude-3"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -847,7 +956,7 @@ func TestEvaluateRoutingRules_SelfLoopAloneTerminates(t *testing.T) {
 		ID:            "solo-self-loop",
 		Name:          "Solo Self-Loop",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -889,7 +998,7 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		ID:            "depth-a",
 		Name:          "Depth Rule A",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4-turbo"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -903,7 +1012,7 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		ID:            "depth-b",
 		Name:          "Depth Rule B",
 		CelExpression: "model == 'gpt-4-turbo'",
-		
+
 		Provider: bifrost.Ptr("azure"), Model: bifrost.Ptr("gpt-4"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -917,7 +1026,7 @@ func TestEvaluateRoutingRules_MaxDepthCutoff(t *testing.T) {
 		ID:            "depth-c",
 		Name:          "Depth Rule C",
 		CelExpression: "model == 'gpt-4'",
-		
+
 		Provider: bifrost.Ptr("anthropic"), Model: bifrost.Ptr("claude-3"),
 
 		Enabled:   bifrost.Ptr(true),
@@ -957,7 +1066,7 @@ func TestCompileAndCacheProgram_ValidExpression_Routing(t *testing.T) {
 		ID:            "1",
 		Name:          "Test Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -984,7 +1093,7 @@ func TestCompileAndCacheProgram_EmptyExpression_Routing(t *testing.T) {
 		ID:            "1",
 		Name:          "Default Rule",
 		CelExpression: "",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1006,7 +1115,7 @@ func TestCompileAndCacheProgram_InvalidExpression_Routing(t *testing.T) {
 		ID:            "1",
 		Name:          "Invalid Rule",
 		CelExpression: "model == gpt-4o'", // Missing opening quote
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1039,7 +1148,7 @@ func TestCompileAndCacheProgram_ListExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "List Rule",
 		CelExpression: "model in ['gpt-4o', 'gpt-4-turbo']",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1061,7 +1170,7 @@ func TestCompileAndCacheProgram_RegexExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Regex Rule",
 		CelExpression: "model.matches('^gpt-4.*')",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1083,7 +1192,7 @@ func TestCompileAndCacheProgram_HeaderExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Header Rule",
 		CelExpression: "headers['x-tier'] == 'premium'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1105,7 +1214,7 @@ func TestCompileAndCacheProgram_RateLimitExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Rate Limit Rule",
 		CelExpression: "tokens_used >= 80.0",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1127,7 +1236,7 @@ func TestCompileAndCacheProgram_BudgetExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Budget Rule",
 		CelExpression: "budget_used < 100.0",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1149,7 +1258,7 @@ func TestCompileAndCacheProgram_ComplexExpression(t *testing.T) {
 		ID:            "1",
 		Name:          "Complex Rule",
 		CelExpression: "model == 'gpt-4o' && team_name == 'premium' && tokens_used >= 80.0",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1204,7 +1313,7 @@ func TestEvaluateCELExpression_TrueResult(t *testing.T) {
 	rule := &configstoreTables.TableRoutingRule{
 		ID:            "1",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1235,7 +1344,7 @@ func TestEvaluateCELExpression_FalseResult(t *testing.T) {
 	rule := &configstoreTables.TableRoutingRule{
 		ID:            "1",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1266,7 +1375,7 @@ func TestEvaluateCELExpression_ListMembership(t *testing.T) {
 	rule := &configstoreTables.TableRoutingRule{
 		ID:            "1",
 		CelExpression: "model in ['gpt-4o', 'gpt-4-turbo']",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1304,7 +1413,7 @@ func TestEvaluateCELExpression_HeaderAccess(t *testing.T) {
 	rule := &configstoreTables.TableRoutingRule{
 		ID:            "1",
 		CelExpression: "headers['x-tier'] == 'premium'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),

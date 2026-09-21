@@ -102,7 +102,7 @@ func TestBudgetResolver_EvaluateRequest_ModelBlocked(t *testing.T) {
 			Provider:      "openai",
 			AllowedModels: []string{"gpt-4", "gpt-4-turbo"}, // Only these models
 			Weight:        bifrost.Ptr(1.0),
-		RateLimits:    nil,
+			RateLimits:    nil,
 			Keys:          []configstoreTables.TableKey{},
 		},
 	}
@@ -464,6 +464,43 @@ func TestBudgetResolver_IsModelAllowed(t *testing.T) {
 			assert.Equal(t, tt.shouldBeAllowed, allowed)
 		})
 	}
+}
+
+func TestBudgetResolver_IsProviderAndModelAccessible(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	resolver := NewBudgetResolver(store, nil, logger, nil)
+
+	vkBoth := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
+		[]configstoreTables.TableVirtualKeyProviderConfig{
+			buildProviderConfig("openai", []string{"gpt-4", "gpt-4o-mini"}),
+		})
+
+	t.Run("org blacklists one model", func(t *testing.T) {
+		vk := *vkBoth
+		vk.OrgAllowedModelConfigs = []configstoreTables.TableAllowedModelConfig{
+			{
+				Provider:          "openai",
+				AllowedModels:     schemas.WhiteList{"*"},
+				BlacklistedModels: schemas.BlackList{"gpt-4"},
+			},
+		}
+		assert.False(t, resolver.isProviderAndModelAccessible(&vk, schemas.OpenAI, "gpt-4"))
+		assert.True(t, resolver.isProviderAndModelAccessible(&vk, schemas.OpenAI, "gpt-4o-mini"))
+	})
+
+	t.Run("org provider access blocks provider", func(t *testing.T) {
+		vk := *vkBoth
+		vk.OrgProviderAccessPolicy = &configstoreTables.ProviderAccessPolicyRT{
+			BlacklistedProviders: schemas.BlackList{"openai"},
+		}
+		assert.False(t, resolver.isProviderAndModelAccessible(&vk, schemas.OpenAI, "gpt-4o-mini"))
+	})
+
+	t.Run("nil vk is inaccessible", func(t *testing.T) {
+		assert.False(t, resolver.isProviderAndModelAccessible(nil, schemas.OpenAI, "gpt-4o-mini"))
+	})
 }
 
 // TestBudgetResolver_ContextPopulation tests context values are set correctly

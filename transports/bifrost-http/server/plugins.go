@@ -89,8 +89,14 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal governance plugin config: %w", err)
 		}
 		inMemoryStore := &GovernanceInMemoryStore{Config: bifrostConfig}
-		return governance.Init(ctx, governanceConfig, logger, bifrostConfig.Registry(),
+		governancePlugin, err := governance.Init(ctx, governanceConfig, logger, bifrostConfig.Registry(),
 			bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog, inMemoryStore)
+		if err != nil {
+			return nil, err
+		}
+		// Optional shared kvstore (previously used for NVIDIA classifier cache).
+		governancePlugin.SetKVStore(bifrostConfig.GetKVStore())
+		return governancePlugin, nil
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -211,11 +217,23 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	// 4. Governance (if enabled and not enterprise)
 	if ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
 		config := &governance.Config{
-			IsVkMandatory:          &s.Config.ClientConfig.EnforceAuthOnInference,
-			RequiredHeaders:        &s.Config.ClientConfig.RequiredHeaders,
-			DisableAutoToolInject:  &s.Config.ClientConfig.MCPDisableAutoToolInject,
-			RoutingChainMaxDepth:   &s.Config.ClientConfig.RoutingChainMaxDepth,
-			GatewayDeploymentType:  s.Config.ClientConfig.GatewayDeploymentType,
+			IsVkMandatory:         &s.Config.ClientConfig.EnforceAuthOnInference,
+			RequiredHeaders:       &s.Config.ClientConfig.RequiredHeaders,
+			DisableAutoToolInject: &s.Config.ClientConfig.MCPDisableAutoToolInject,
+			RoutingChainMaxDepth:  &s.Config.ClientConfig.RoutingChainMaxDepth,
+			GatewayDeploymentType: s.Config.ClientConfig.GatewayDeploymentType,
+		}
+		// Merge semantic_routing (and any other governance plugin fields) from
+		// PluginConfigs / config_plugins so DB or config.json can enable the kill switch
+		// without hardcoding it here.
+		if govPluginCfg := s.getPluginConfig(governance.PluginName); govPluginCfg != nil && govPluginCfg.Config != nil {
+			if merged, err := MarshalPluginConfig[governance.Config](govPluginCfg.Config); err == nil && merged != nil {
+				if merged.SemanticRouting != nil {
+					config.SemanticRouting = merged.SemanticRouting
+				}
+			} else if err != nil {
+				logger.Warn("failed to parse governance plugin config for semantic_routing: %v", err)
+			}
 		}
 		s.registerPluginWithStatus(ctx, governance.PluginName, nil, config, false)
 	} else {

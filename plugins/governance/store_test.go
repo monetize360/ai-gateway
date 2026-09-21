@@ -793,7 +793,7 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 		Description:   "Test global routing rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4"),
 
 		Fallbacks:       nil,
@@ -811,7 +811,7 @@ func TestGovernanceStore_RoutingRules_CreateAndRetrieve(t *testing.T) {
 		Description:   "Test org routing rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: "model in ['gpt-4o', 'gpt-4-turbo']",
-		
+
 		Provider: bifrost.Ptr("azure"),
 
 		Fallbacks:       nil,
@@ -1069,7 +1069,7 @@ func TestCompileAndCacheProgram(t *testing.T) {
 		ID:            "rule-1",
 		Name:          "Test Rule",
 		CelExpression: "model == 'gpt-4o' && tokens_used < 80.0",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1099,7 +1099,7 @@ func TestCompileAndCacheProgram_InvalidExpression(t *testing.T) {
 		ID:            "rule-invalid",
 		Name:          "Invalid Rule",
 		CelExpression: "model == gpt-4o'", // Syntax error
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1123,7 +1123,7 @@ func TestCompileAndCacheProgram_CacheInvalidation(t *testing.T) {
 		ID:            "rule-update",
 		Name:          "Update Rule",
 		CelExpression: "model == 'gpt-4o'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1155,7 +1155,7 @@ func TestCompileAndCacheProgram_CacheInvalidationOnDelete(t *testing.T) {
 		ID:            "rule-delete",
 		Name:          "Delete Rule",
 		CelExpression: "provider == 'openai'",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),
@@ -1182,7 +1182,7 @@ func TestCompileAndCacheProgram_EmptyExpression(t *testing.T) {
 		ID:            "rule-empty",
 		Name:          "Empty Rule",
 		CelExpression: "",
-		
+
 		Provider: bifrost.Ptr("openai"),
 
 		Enabled: bifrost.Ptr(true),

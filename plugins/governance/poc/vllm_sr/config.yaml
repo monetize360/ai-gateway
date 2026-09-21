@@ -1,0 +1,233 @@
+version: v0.3
+
+# Local vLLM-SR recipe for Bifrost Step 2 (decision sidecar only).
+# Do not attach generation backends: Bifrost still calls Gemini itself.
+# Serve the management API on a port that is not Bifrost :8080 (see README).
+
+listeners:
+  - name: http-8899
+    address: 127.0.0.1
+    port: 8899
+    timeout: 300s
+
+# backend_refs are required by the router image for any model a listener owns.
+# Nothing is ever dispatched here: Bifrost reads the preview and calls Gemini itself.
+providers:
+  models:
+    - name: gemini/gemini-2.5-flash-lite
+      provider_model_id: gemini-2.5-flash-lite
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: host.docker.internal:8080
+          protocol: http
+          weight: 100
+    - name: gemini/gemini-2.0-flash
+      provider_model_id: gemini-2.0-flash
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: host.docker.internal:8080
+          protocol: http
+          weight: 100
+    - name: gemini/gemini-2.5-flash
+      provider_model_id: gemini-2.5-flash
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: host.docker.internal:8080
+          protocol: http
+          weight: 100
+    - name: gemini/gemini-2.5-pro
+      provider_model_id: gemini-2.5-pro
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: host.docker.internal:8080
+          protocol: http
+          weight: 100
+
+routing:
+  strategy: priority
+  modelCards:
+    - name: gemini/gemini-2.5-flash-lite
+      modality: text
+      capabilities: [chat]
+      description: Fast, cheap Gemini for short open QA and light chat.
+    - name: gemini/gemini-2.0-flash
+      modality: text
+      capabilities: [chat]
+      description: Balanced Gemini 2.0 for general generation.
+    - name: gemini/gemini-2.5-flash
+      modality: text
+      capabilities: [chat]
+      description: Gemini 2.5 Flash for mid-complexity coding and analysis.
+    - name: gemini/gemini-2.5-pro
+      modality: text
+      capabilities: [chat]
+      description: Flagship Gemini for hard reasoning and complex code.
+  # Lexical/structural signals only. Embedding-backed signals (complexity,
+  # embedding, domain) need a prepared embedding model, which this minimal
+  # deployment does not load.
+  signals:
+    keywords:
+      - name: code_keywords
+        operator: OR
+        method: bm25
+        case_sensitive: false
+        bm25_threshold: 0.1
+        keywords:
+          - code
+          - function
+          - implement
+          - debug
+          - refactor
+          - algorithm
+          - compile
+          - python
+          - golang
+          - typescript
+          - sql
+      - name: deep_reasoning_keywords
+        operator: OR
+        method: bm25
+        case_sensitive: false
+        bm25_threshold: 0.1
+        keywords:
+          - prove
+          - proof
+          - theorem
+          - derive
+          - rigorous
+          - trade-offs
+          - tradeoffs
+          - architecture
+          - root cause
+          - step by step
+      - name: summarization_keywords
+        operator: OR
+        method: bm25
+        case_sensitive: false
+        bm25_threshold: 0.1
+        keywords:
+          - summarize
+          - summarise
+          - summary
+          - tl;dr
+          - condense
+          - shorten
+    context:
+      # Bifrost truncates the preview payload at 8000 chars (~2K tokens), so the
+      # router can never observe a true 32K prompt. 1500 tokens is the practical
+      # "this prompt was large enough to be truncated" line. Bifrost Layer 1
+      # remains authoritative for actual context-window fit.
+      - name: long_context
+        min_tokens: "1500"
+        max_tokens: "1M"
+        description: Requests large enough to need a bigger effective context window.
+    input_modality:
+      - name: image_input
+        description: Request carries at least one image content part.
+        modality: image
+
+  decisions:
+    # Higher priority is evaluated first; the catch-all sits at the bottom.
+    - name: image-pool
+      description: Image attachments go to a vision-strong model.
+      priority: 400
+      rules:
+        operator: AND
+        conditions:
+          - type: input_modality
+            name: image_input
+      modelRefs:
+        - model: gemini/gemini-2.5-pro
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        type: static
+
+    - name: long-context-pool
+      description: Large inputs go to a model with headroom.
+      priority: 350
+      rules:
+        operator: AND
+        conditions:
+          - type: context
+            name: long_context
+      modelRefs:
+        - model: gemini/gemini-2.5-pro
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        type: static
+
+    - name: deep-reasoning-pool
+      description: Proof, derivation, and architecture trade-off prompts.
+      priority: 300
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: deep_reasoning_keywords
+      modelRefs:
+        - model: gemini/gemini-2.5-pro
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        type: static
+
+    - name: code-pool
+      description: Code generation and debugging.
+      priority: 250
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: code_keywords
+      modelRefs:
+        - model: gemini/gemini-2.5-flash
+        - model: gemini/gemini-2.0-flash
+      algorithm:
+        type: static
+
+    - name: summarization-pool
+      description: Summarization and condensing.
+      priority: 200
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: summarization_keywords
+      modelRefs:
+        - model: gemini/gemini-2.0-flash
+        - model: gemini/gemini-2.5-flash-lite
+      algorithm:
+        type: static
+
+    - name: gemini-pool
+      description: Catch-all across the Bifrost virtual-key Gemini models.
+      priority: 100
+      rules:
+        operator: AND
+        conditions: []
+      modelRefs:
+        - model: gemini/gemini-2.5-flash-lite
+        - model: gemini/gemini-2.0-flash
+        - model: gemini/gemini-2.5-flash
+        - model: gemini/gemini-2.5-pro
+      algorithm:
+        type: multi_factor
+        # Only weights / slo / latency_percentile are accepted by both the
+        # 0.3.0 CLI validator and the router image.
+        multi_factor:
+          weights:
+            quality: 0.4
+            latency: 0.2
+            cost: 0.2
+            load: 0.2
+          latency_percentile: 95
+
+# The management API binds to container loopback by default, which makes the
+# published port unreachable. Bind all interfaces so Bifrost can reach :18080.
+global:
+  services:
+    management_api:
+      bind_address: 0.0.0.0

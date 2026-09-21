@@ -318,6 +318,23 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	}
 }
 
+// isProviderAndModelAccessible reports whether the VK may call provider/model under
+// the same identity checks EvaluateVirtualKeyRequest applies (provider access policy,
+// provider allowlist, and org+VK model allow/block). Budgets and rate limits are not
+// considered — callers that need spend gates use the dedicated helper methods.
+func (r *BudgetResolver) isProviderAndModelAccessible(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
+	if r == nil || vk == nil {
+		return false
+	}
+	if allowed, _ := isProviderAllowedByAccessPolicy(vk, provider); !allowed {
+		return false
+	}
+	if !r.isProviderAllowed(vk, provider) {
+		return false
+	}
+	return r.isModelAllowed(vk, provider, model)
+}
+
 // isModelAllowed checks if the requested model is allowed for this VK.
 // Enforcement is layered: org-level configs are checked first, then VK-level configs.
 // Within each layer blacklisted models win over allowed models (blacklist-wins semantics).

@@ -1190,6 +1190,9 @@ func GenerateRoutingRuleHash(r tables.TableRoutingRule) (string, error) {
 	// Hash CelExpression
 	hash.Write([]byte(r.CelExpression))
 
+	// Hash Action (empty treated as pin)
+	hash.Write([]byte(r.ActionValue()))
+
 	// Hash inline routing output fields.
 	payload := routingTargetHashPayload{
 		ProviderID: derefStr(r.ProviderID),

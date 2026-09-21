@@ -70,3 +70,33 @@ func TestUnmarshalJSON_LegacyVirtualKeyScope(t *testing.T) {
 	assert.Equal(t, "vk-legacy", *rule.VirtualKeyID)
 	assert.Nil(t, rule.ScopeOrgID)
 }
+
+func TestNormalizeRoutingAction(t *testing.T) {
+	pin, err := NormalizeRoutingAction("")
+	require.NoError(t, err)
+	assert.Equal(t, RoutingRuleActionPin, pin)
+
+	pin, err = NormalizeRoutingAction("PIN")
+	require.NoError(t, err)
+	assert.Equal(t, RoutingRuleActionPin, pin)
+
+	semantic, err := NormalizeRoutingAction("semantic")
+	require.NoError(t, err)
+	assert.Equal(t, RoutingRuleActionSemantic, semantic)
+
+	_, err = NormalizeRoutingAction("weighted")
+	require.Error(t, err)
+}
+
+func TestValidateSemanticActionRejectsChainRule(t *testing.T) {
+	assert.NoError(t, ValidateSemanticAction(RoutingRuleActionPin, true))
+	assert.NoError(t, ValidateSemanticAction(RoutingRuleActionSemantic, false))
+	assert.Error(t, ValidateSemanticAction(RoutingRuleActionSemantic, true))
+}
+
+func TestActionValueDefaultsToPin(t *testing.T) {
+	assert.Equal(t, RoutingRuleActionPin, (*TableRoutingRule)(nil).ActionValue())
+	assert.Equal(t, RoutingRuleActionPin, (&TableRoutingRule{}).ActionValue())
+	assert.True(t, (&TableRoutingRule{Action: RoutingRuleActionSemantic}).IsSemanticAction())
+	assert.False(t, (&TableRoutingRule{}).IsSemanticAction())
+}

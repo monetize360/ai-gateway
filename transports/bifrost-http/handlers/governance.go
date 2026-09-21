@@ -159,6 +159,7 @@ type CreateRoutingRuleRequest struct {
 	Enabled       *bool          `json:"enabled,omitempty"`    // nil = use DB default (true)
 	ChainRule     *bool          `json:"chain_rule,omitempty"` // nil = use DB default (false)
 	CelExpression string         `json:"cel_expression"`
+	Action        string         `json:"action,omitempty"`      // "pin" (default) or "semantic"
 	ProviderID    *string        `json:"provider_id,omitempty"` // nil = use incoming provider
 	ModelID       *string        `json:"model_id,omitempty"`    // nil = use incoming model
 	Provider      *string        `json:"provider,omitempty"`    // config/UI alias; resolved to provider_id on save
@@ -178,6 +179,7 @@ type UpdateRoutingRuleRequest struct {
 	Enabled       *bool          `json:"enabled,omitempty"`
 	ChainRule     *bool          `json:"chain_rule,omitempty"`
 	CelExpression *string        `json:"cel_expression,omitempty"`
+	Action        *string        `json:"action,omitempty"`
 	ProviderID    *string        `json:"provider_id,omitempty"`
 	ModelID       *string        `json:"model_id,omitempty"`
 	Provider      *string        `json:"provider,omitempty"`
@@ -3324,9 +3326,24 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := validateRoutingOutput(req.ProviderID, req.Provider, req.KeyID); err != nil {
+	action, err := configstoreTables.NormalizeRoutingAction(req.Action)
+	if err != nil {
 		SendError(ctx, 400, err.Error())
 		return
+	}
+	chainRule := false // DB default
+	if req.ChainRule != nil {
+		chainRule = *req.ChainRule
+	}
+	if err := configstoreTables.ValidateSemanticAction(action, chainRule); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if action != configstoreTables.RoutingRuleActionSemantic {
+		if err := validateRoutingOutput(req.ProviderID, req.Provider, req.KeyID); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
 	}
 	if err := validateRoutingFallbacks(req.Fallbacks); err != nil {
 		SendError(ctx, 400, err.Error())
@@ -3346,10 +3363,6 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 	if enabled == nil {
 		enabled = bifrost.Ptr(true)
 	}
-	chainRule := false // DB default
-	if req.ChainRule != nil {
-		chainRule = *req.ChainRule
-	}
 	rule := &configstoreTables.TableRoutingRule{
 		ID:              ruleID,
 		Name:            req.Name,
@@ -3357,6 +3370,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		Enabled:         enabled,
 		ChainRule:       chainRule,
 		CelExpression:   req.CelExpression,
+		Action:          action,
 		ProviderID:      req.ProviderID,
 		ModelID:         req.ModelID,
 		Provider:        req.Provider,
@@ -3429,6 +3443,14 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.CelExpression != nil {
 		rule.CelExpression = *req.CelExpression
 	}
+	if req.Action != nil {
+		action, err := configstoreTables.NormalizeRoutingAction(*req.Action)
+		if err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
+		rule.Action = action
+	}
 	if req.ProviderID != nil {
 		if strings.TrimSpace(*req.ProviderID) == "" {
 			rule.ProviderID = nil
@@ -3464,7 +3486,11 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 			rule.KeyID = req.KeyID
 		}
 	}
-	if req.ProviderID != nil || req.ModelID != nil || req.Provider != nil || req.Model != nil || req.KeyID != nil {
+	if err := configstoreTables.ValidateSemanticAction(rule.ActionValue(), rule.ChainRule); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if !rule.IsSemanticAction() && (req.ProviderID != nil || req.ModelID != nil || req.Provider != nil || req.Model != nil || req.KeyID != nil) {
 		if err := validateRoutingOutput(rule.ProviderID, rule.Provider, rule.KeyID); err != nil {
 			SendError(ctx, 400, err.Error())
 			return

@@ -1,0 +1,57 @@
+{
+  "info": {
+    "name": "vLLM-SR Routing Preview",
+    "description": "Direct calls to the vLLM-SR management API (same endpoint Bifrost uses). No Python select helper.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:18080"
+    }
+  ],
+  "item": [
+    {
+      "name": "Ready",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/ready"
+      }
+    },
+    {
+      "name": "Routing preview",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"vllm-sr/auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a Python function that reverses a linked list.\"\n    }\n  ]\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/routing/preview"
+      }
+    },
+    {
+      "name": "Routing preview (summarize)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"vllm-sr/auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Summarize this PR\"\n    }\n  ]\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/routing/preview"
+      }
+    }
+  ]
+}

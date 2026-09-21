@@ -25,13 +25,20 @@ type ScopeLevel struct {
 // RoutingDecision is the output of routing rule evaluation
 // Represents which provider/model to route to and fallback chain
 type RoutingDecision struct {
-	Provider        string   // Primary provider (e.g., "openai", "azure")
-	Model           string   // Model to use (or empty to use original)
+	Action          string   // "pin" (default) or "semantic"
+	Provider        string   // Primary provider (e.g., "openai", "azure"); unused when Action is semantic
+	Model           string   // Model to use (or empty to use original); unused when Action is semantic
 	KeyID           string   // Optional: pin a specific API key by UUID ("" = no pin)
-	Fallbacks       []string // Fallback chain: ["provider/model", ...]
+	Fallbacks       []string // Pin: fallback chain. Semantic: optional preference override.
 	MatchedRuleID   string   // ID of the rule that matched
 	MatchedRuleName string   // Name of the rule that matched
 	Block           bool     // When true, the request should be rejected with 403
+}
+
+// IsSemanticAction reports whether the matched rule asked for semantic selection
+// rather than pinning a provider/model.
+func (d *RoutingDecision) IsSemanticAction() bool {
+	return d != nil && strings.EqualFold(d.Action, configstoreTables.RoutingRuleActionSemantic)
 }
 
 // RoutingContext holds all data needed for routing rule evaluation
@@ -94,6 +101,11 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	re.logger.Debug("[RoutingEngine] Starting rule evaluation for provider=%s, model=%s", routingCtx.Provider, routingCtx.Model)
 	re.stampRoutingSourceModelIDsContext(ctx, routingCtx)
 
+	vkID := "none"
+	if routingCtx.VirtualKey != nil {
+		vkID = routingCtx.VirtualKey.ID
+	}
+
 	// Mutable provider/model that advances through the chain; all other context fields are immutable.
 	currentProvider := routingCtx.Provider
 	currentModel := routingCtx.Model
@@ -132,6 +144,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 		fmt.Sprintf("Evaluating routing rules for model=%s, provider=%s, requestType=%s", routingCtx.Model, routingCtx.Provider, routingCtx.RequestType))
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Scope chain: %v", scopeChainToStrings(scopeChain)))
+	re.logger.Info("[RoutingEngine] Evaluating vk=%s provider=%s model=%s scopes=%d", vkID, routingCtx.Provider, routingCtx.Model, len(rulesPerScope))
 
 	var finalDecision *RoutingDecision
 
@@ -208,27 +221,30 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 				re.logger.Debug("[RoutingEngine] Rule %s evaluation result: matched=%v", rule.Name, matched)
 
 				if !matched {
+					re.logger.Info("[RoutingEngine] NO MATCH vk=%s rule=%q cel=%q", vkID, rule.Name, rule.CelExpression)
 					ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 						fmt.Sprintf("Rule '%s' [%s] → no match (%s)", rule.Name, rule.CelExpression, buildNoMatchContext(rule.CelExpression, variables)))
 					continue
 				}
 
 				provider := string(currentProvider)
-				if rule.Provider != nil && *rule.Provider != "" {
-					provider = *rule.Provider
-				}
-
 				model := currentModel
-				if rule.Model != nil && *rule.Model != "" {
-					model = *rule.Model
-				}
-
 				keyID := ""
-				if rule.KeyID != nil {
-					keyID = *rule.KeyID
+				action := rule.ActionValue()
+				if !rule.IsSemanticAction() {
+					if rule.Provider != nil && *rule.Provider != "" {
+						provider = *rule.Provider
+					}
+					if rule.Model != nil && *rule.Model != "" {
+						model = *rule.Model
+					}
+					if rule.KeyID != nil {
+						keyID = *rule.KeyID
+					}
 				}
 
 				stepDecision = &RoutingDecision{
+					Action:          action,
 					Provider:        provider,
 					Model:           model,
 					KeyID:           keyID,
@@ -239,6 +255,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 				}
 				stampRoutingQueryParamContext(ctx, rule.CelExpression, variables)
 				matchedRule = rule
+				re.logger.Info("[RoutingEngine] MATCH vk=%s rule=%q cel=%q action=%s", vkID, rule.Name, rule.CelExpression, action)
 				break outerLoop
 			}
 		}
@@ -254,14 +271,21 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 		ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingRuleName, stepDecision.MatchedRuleName)
 
 		chainSuffix := ""
-		if matchedRule.ChainRule {
+		if matchedRule.ChainRule && !matchedRule.IsSemanticAction() {
 			chainSuffix = " [chain_rule=true, continuing]"
 		}
-		re.logger.Debug("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
-		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target: provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
+		if stepDecision.IsSemanticAction() {
+			re.logger.Info("[RoutingEngine] 0/handoff: rule %q matched action=semantic; handing off to semantic routing%s", matchedRule.Name, chainSuffix)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("0/handoff: Rule '%s' [%s] → matched, action=semantic; handing off to semantic routing%s", matchedRule.Name, matchedRule.CelExpression, chainSuffix))
+		} else {
+			re.logger.Info("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target: provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
+		}
 
 		// TERMINATION 2: Rule is terminal (chain_rule=false, the default).
-		if !matchedRule.ChainRule {
+		// Semantic selection is always terminal — chaining would re-enter CEL
+		// with a model that is only known after the classifier runs.
+		if !matchedRule.ChainRule || matchedRule.IsSemanticAction() {
 			break
 		}
 
@@ -274,16 +298,22 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	}
 
 	if finalDecision == nil {
-		re.logger.Debug("[RoutingEngine] No routing rule matched, using default routing")
+		re.logger.Info("[RoutingEngine] SUMMARY: no CEL match vk=%s; keeping %s/%s", vkID, routingCtx.Provider, routingCtx.Model)
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 			fmt.Sprintf("SUMMARY: No routing rule matched; using %s/%s", routingCtx.Provider, routingCtx.Model))
+	} else if finalDecision.IsSemanticAction() {
+		re.logger.Info("[RoutingEngine] SUMMARY: Rule %q matched; moving to semantic routing", finalDecision.MatchedRuleName)
+		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+			fmt.Sprintf("SUMMARY: Rule '%s' matched; moving to semantic routing", finalDecision.MatchedRuleName))
 	} else {
 		requested := fmt.Sprintf("%s/%s", routingCtx.Provider, routingCtx.Model)
 		resolved := fmt.Sprintf("%s/%s", finalDecision.Provider, finalDecision.Model)
 		if routingCtx.Model != finalDecision.Model || string(routingCtx.Provider) != finalDecision.Provider {
+			re.logger.Info("[RoutingEngine] SUMMARY: pin via %q → %s (vk=%s, requested %s)", finalDecision.MatchedRuleName, resolved, vkID, requested)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 				fmt.Sprintf("SUMMARY: Requested %s → routed to %s via rule '%s'", requested, resolved, finalDecision.MatchedRuleName))
 		} else {
+			re.logger.Info("[RoutingEngine] SUMMARY: pin via %q kept %s (vk=%s)", finalDecision.MatchedRuleName, resolved, vkID)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 				fmt.Sprintf("SUMMARY: Rule '%s' matched; kept %s", finalDecision.MatchedRuleName, resolved))
 		}

@@ -28,6 +28,21 @@ type PricingEntry struct {
 	MaxOutputTokens *int                  `json:"max_output_tokens,omitempty"`
 	Architecture    *schemas.Architecture `json:"architecture,omitempty"`
 
+	// Input modality capabilities. nil means the datasheet is silent for this
+	// model, which is not the same as unsupported.
+	SupportsVision     *bool `json:"supports_vision,omitempty"`
+	SupportsPDFInput   *bool `json:"supports_pdf_input,omitempty"`
+	SupportsAudioInput *bool `json:"supports_audio_input,omitempty"`
+
+	// Routing metadata used after Layer-1 filtering. Optional in the datasheet;
+	// operators can also supply these via semantic_routing.model_overrides.
+	Categories        []string           `json:"categories,omitempty"`
+	CapabilityTier    CapabilityTier     `json:"capability_tier,omitempty"`
+	SupportsReasoning *bool              `json:"supports_reasoning,omitempty"`
+	Status            ModelStatus        `json:"status,omitempty"`
+	LatencyClass      string             `json:"latency_class,omitempty"`
+	Sheet             *ModelRoutingSheet `json:"sheet,omitempty"`
+
 	PricingOptions
 }
 

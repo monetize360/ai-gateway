@@ -1150,6 +1150,9 @@ func (s *BifrostHTTPServer) ReloadPlugin(ctx context.Context, name string, path 
 	if semanticCachePlugin, ok := plugin.(*semanticcache.Plugin); ok {
 		semanticCachePlugin.SetEmbeddingRequestExecutor(s.Client.EmbeddingRequest)
 	}
+	if governancePlugin, ok := plugin.(*governance.GovernancePlugin); ok {
+		governancePlugin.SetKVStore(s.Config.GetKVStore())
+	}
 	return s.SyncLoadedPlugin(ctx, name, plugin, placement, order)
 }
 
@@ -1627,6 +1630,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	semanticCachePlugin, err := lib.FindPluginAs[*semanticcache.Plugin](s.Config, semanticcache.PluginName)
 	if err == nil && semanticCachePlugin != nil {
 		semanticCachePlugin.SetEmbeddingRequestExecutor(s.Client.EmbeddingRequest)
+	}
+	// Wire governance plugin kvstore for classifier verdict caching.
+	governancePlugin, err := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName)
+	if err == nil && governancePlugin != nil {
+		governancePlugin.SetKVStore(s.Config.GetKVStore())
 	}
 	// TenantMiddleware runs outermost so tenant ID is available to auth and handlers.
 	// API routes use OptionalMiddleware to skip JWT on whitelisted paths.

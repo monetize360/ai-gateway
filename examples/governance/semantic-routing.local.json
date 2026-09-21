@@ -1,0 +1,46 @@
+{
+  "_comment": "Local validation only. Requires vLLM-SR on :18080 (plugins/governance/poc/vllm_sr/start.sh). Paths are relative to the process working directory / -app-dir.",
+  "name": "governance",
+  "enabled": true,
+  "config": {
+    "semantic_routing": {
+      "enabled": true,
+      "default_for_all": true,
+      "default_class": "Other",
+      "router": {
+        "base_url": "http://127.0.0.1:18080",
+        "preview_path": "/api/v1/routing/preview",
+        "entrypoint": "vllm-sr/auto",
+        "timeout_ms": 2000
+      },
+      "task_weight": 1.0,
+      "tier_weight": 1.0,
+      "preference_weight": 0.5,
+      "cost_weight": 0.5,
+      "context_weight": 0.2,
+      "model_overrides_file": "plugins/governance/poc/gemini-model-routing.json",
+      "classes": {
+        "Code Generation": [
+          "gemini/gemini-2.5-pro",
+          "gemini/gemini-2.5-flash",
+          "gemini/gemini-2.0-flash"
+        ],
+        "Open QA": [
+          "gemini/gemini-2.5-flash-lite",
+          "gemini/gemini-2.5-flash",
+          "gemini/gemini-2.0-flash"
+        ],
+        "Summarization": [
+          "gemini/gemini-2.5-flash-lite",
+          "gemini/gemini-2.5-flash"
+        ],
+        "Other": [
+          "gemini/gemini-2.5-flash-lite",
+          "gemini/gemini-2.0-flash",
+          "gemini/gemini-2.5-flash",
+          "gemini/gemini-2.5-pro"
+        ]
+      }
+    }
+  }
+}
