@@ -4,6 +4,7 @@ package governance
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
@@ -24,6 +25,15 @@ const (
 	DecisionModelBlocked       Decision = "model_blocked"
 	DecisionProviderBlocked    Decision = "provider_blocked"
 	DecisionMCPToolBlocked     Decision = "mcp_tool_blocked"
+	// DecisionMissingServiceID is returned when the requested model has no billing service
+	// linked on config_models, so its spend cannot be attributed or limited.
+	DecisionMissingServiceID Decision = "missing_service_id"
+	// DecisionAccountAmbiguous is returned when an organization maps to more than one billing
+	// account, making the account-scoped spend limits impossible to resolve.
+	DecisionAccountAmbiguous Decision = "account_ambiguous"
+	// DecisionWalletInsufficient is returned when a prepaid leaf account has no eligible
+	// funded wallet, so the request cannot be billed from prepaid funds.
+	DecisionWalletInsufficient Decision = "wallet_insufficient"
 )
 
 // EvaluationRequest contains the context for evaluating a request
@@ -32,9 +42,7 @@ type EvaluationRequest struct {
 	Provider      schemas.ModelProvider `json:"provider"`
 	Model         string                `json:"model"`
 	UserID        string                `json:"user_id,omitempty"`         // Auth user ID (enterprise). Alone triggers VK budget skip when no tenant.
-	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for budgetusage__m.user_id checks (ai_infra)
-	AccountID     string                `json:"account_id,omitempty"`      // Account ID for BudgetUsage account checks (ai_infra)
-	ContractID    string                `json:"contract_id,omitempty"`     // Contract ID for BudgetUsage contract checks (ai_infra)
+	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for budgetusage__m.user_id checks
 }
 
 // EvaluationResult contains the complete result of governance evaluation
@@ -81,8 +89,9 @@ func NewBudgetResolver(store GovernanceStore, modelCatalog *modelcatalog.ModelCa
 	}
 }
 
-// EvaluateModelAndProviderRequest evaluates provider-level and model-level rate limits and budgets
-// This applies even when virtual keys are disabled or not present
+// EvaluateModelAndProviderRequest evaluates provider-level and model-level rate limits.
+// This applies even when virtual keys are disabled or not present. Spend limits are not
+// checked here — they live entirely on BudgetUsage (see EvaluateBudgetUsageRequest).
 func (r *BudgetResolver) EvaluateModelAndProviderRequest(ctx *schemas.BifrostContext, provider schemas.ModelProvider, model string) *EvaluationResult {
 	// Create evaluation request for the checks
 	request := &EvaluationRequest{
@@ -97,28 +106,13 @@ func (r *BudgetResolver) EvaluateModelAndProviderRequest(ctx *schemas.BifrostCon
 				Reason:   fmt.Sprintf("Provider-level rate limit check failed: %s", reasonFromErr(err, decision)),
 			}
 		}
-		// 2. Check provider-level budgets FIRST (before model-level checks)
-		if decision, err := r.store.CheckProviderBudget(ctx, request, nil); err != nil || isBudgetViolation(decision) {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Provider-level budget exceeded: %s", reasonFromErr(err, decision)),
-			}
-		}
 	}
-	// 3. Check model-level rate limits (after provider-level checks)
+	// 2. Check model-level rate limits (after provider-level checks)
 	if model != "" {
 		if decision, err := r.store.CheckModelRateLimit(ctx, request, nil, nil); err != nil || isRateLimitViolation(decision) {
 			return &EvaluationResult{
 				Decision: decision,
 				Reason:   fmt.Sprintf("Model-level rate limit check failed: %s", reasonFromErr(err, decision)),
-			}
-		}
-
-		// 4. Check model-level budgets (after provider-level checks)
-		if decision, err := r.store.CheckModelBudget(ctx, request, nil); err != nil || isBudgetViolation(decision) {
-			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Model-level budget exceeded: %s", reasonFromErr(err, decision)),
 			}
 		}
 	}
@@ -129,6 +123,7 @@ func (r *BudgetResolver) EvaluateModelAndProviderRequest(ctx *schemas.BifrostCon
 	}
 }
 
+// EvaluateOrgHierarchyRequest evaluates org-scoped rate limits, walking org → parent → … → root.
 func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext, orgID string, request *EvaluationRequest) *EvaluationResult {
 	if orgID == "" {
 		return &EvaluationResult{
@@ -142,79 +137,132 @@ func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext
 			Reason:   fmt.Sprintf("Org-level rate limit exceeded: %s", reasonFromErr(err, decision)),
 		}
 	}
-	if decision, err := r.store.CheckOrgHierarchyBudget(ctx, orgID, request, nil); err != nil || isBudgetViolation(decision) {
-		return &EvaluationResult{
-			Decision: decision,
-			Reason:   fmt.Sprintf("Org-level budget exceeded: %s", reasonFromErr(err, decision)),
-		}
-	}
 	return &EvaluationResult{
 		Decision: DecisionAllow,
 		Reason:   "Org-level checks passed",
 	}
 }
 
-// EvaluateUserRequest evaluates user-level rate limits and budgets
-// Returns DecisionAllow if userID is empty or user has no governance configured
-func (r *BudgetResolver) EvaluateUserRequest(ctx *schemas.BifrostContext, userID string, request *EvaluationRequest) *EvaluationResult {
-	// Skip if no userID (non-enterprise or anonymous request)
-	if userID == "" {
-		return &EvaluationResult{
-			Decision: DecisionAllow,
-			Reason:   "No user ID provided, skipping user-level checks",
-		}
-	}
-
-	// Check user-level rate limits
-	if decision, err := r.store.CheckUserRateLimit(ctx, userID, request, nil, nil); err != nil || isRateLimitViolation(decision) {
-		return &EvaluationResult{
-			Decision: decision,
-			Reason:   fmt.Sprintf("User-level rate limit exceeded: %s", reasonFromErr(err, decision)),
-		}
-	}
-
-	// Check user-level budget (budgetusage__m.user_id; ai_infra PreLLM)
-	if decision, err := r.store.CheckUserBudgetUsage(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
-		return &EvaluationResult{
-			Decision: decision,
-			Reason:   fmt.Sprintf("User-level budget exceeded: %s", reasonFromErr(err, decision)),
-		}
-	}
-
-	return &EvaluationResult{
-		Decision: DecisionAllow,
-		Reason:   "User-level checks passed",
-	}
-}
-
-// EvaluateBillingScopeRequest checks account/contract BudgetUsage when IDs are present on the request.
-// Missing IDs skip their respective checks. Intended for ai_infra PreLLM only.
-func (r *BudgetResolver) EvaluateBillingScopeRequest(ctx *schemas.BifrostContext, request *EvaluationRequest) *EvaluationResult {
+// EvaluateBudgetUsageRequest enforces every spend limit that applies to a request, reading
+// BudgetUsage (budgetusage__m) only. MPilot Rating owns the usage numbers; the gateway just
+// compares them against their limits, in order of increasing scope:
+//
+//  1. the billing service behind the requested model (a model with no service cannot be rated),
+//  2. the provider,
+//  3. the billing users on the key and the request,
+//  4. the org-unit chain of those users (independent of user-scoped BudgetUsage),
+//  5. the billing account of the key's organization and each of its ancestors,
+//  6. a funded prepaid wallet on the leaf account (when that account is prepaid).
+func (r *BudgetResolver) EvaluateBudgetUsageRequest(ctx *schemas.BifrostContext, request *EvaluationRequest, vk *configstoreTables.TableVirtualKey) *EvaluationResult {
 	if request == nil {
 		return &EvaluationResult{
 			Decision: DecisionAllow,
-			Reason:   "No evaluation request, skipping billing-scope checks",
+			Reason:   "No evaluation request, skipping budget usage checks",
 		}
 	}
-	if request.AccountID != "" {
-		if decision, err := r.store.CheckAccountBudgetUsage(ctx, request.AccountID, request, nil); err != nil || isBudgetViolation(decision) {
+
+	// 1. Billing service behind the model.
+	if model := strings.TrimSpace(request.Model); model != "" {
+		serviceID := strings.TrimSpace(r.store.ResolveConfigModelServiceID(request.Provider, model))
+		if serviceID == "" {
 			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
+				Decision:   DecisionMissingServiceID,
+				Reason:     fmt.Sprintf("Model '%s' is not mapped to a billing service", model),
+				VirtualKey: vk,
+			}
+		}
+		if decision, err := r.store.CheckServiceBudgetUsage(ctx, serviceID, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Service-level budget exceeded: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
 		}
 	}
-	if request.ContractID != "" {
-		if decision, err := r.store.CheckContractBudgetUsage(ctx, request.ContractID, request, nil); err != nil || isBudgetViolation(decision) {
+
+	// 2. Provider.
+	if providerID := strings.TrimSpace(r.store.ResolveConfigProviderID(request.Provider)); providerID != "" {
+		if decision, err := r.store.CheckProviderBudgetUsage(ctx, providerID, request, nil); err != nil || isBudgetViolation(decision) {
 			return &EvaluationResult{
-				Decision: decision,
-				Reason:   fmt.Sprintf("Contract-level budget exceeded: %s", reasonFromErr(err, decision)),
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Provider-level budget exceeded: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
 		}
 	}
+
+	// 3. Billing users: the key's own user plus any user carried on the request.
+	virtualKeyUserID := ""
+	if vk != nil && vk.UserID != nil {
+		virtualKeyUserID = strings.TrimSpace(*vk.UserID)
+	}
+	for _, userID := range uniqueNonEmptyStrings(virtualKeyUserID, request.UserID, request.BillingUserID) {
+		if decision, err := r.store.CheckUserBudgetUsage(ctx, userID, request, nil); err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("User-level budget exceeded: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
+			}
+		}
+	}
+
+	// 4. Org-unit hierarchy (independent of user-scoped BudgetUsage).
+	orgUnitUserIDs := uniqueNonEmptyStrings(virtualKeyUserID, request.UserID, request.BillingUserID)
+	if decision, err := r.store.CheckOrgUnitHierarchyBudgetUsage(ctx, orgUnitUserIDs, request, nil); err != nil || isBudgetViolation(decision) {
+		return &EvaluationResult{
+			Decision:   decision,
+			Reason:     fmt.Sprintf("Org-unit budget exceeded: %s", reasonFromErr(err, decision)),
+			VirtualKey: vk,
+		}
+	}
+
+	// 5. Account hierarchy of the key's organization.
+	if vk != nil {
+		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
+			decision, err := r.store.CheckAccountHierarchyBudgetUsage(ctx, orgID, request, nil)
+			if decision == DecisionAccountAmbiguous {
+				return &EvaluationResult{
+					Decision:   decision,
+					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+			if err != nil || isBudgetViolation(decision) {
+				return &EvaluationResult{
+					Decision:   decision,
+					Reason:     fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+		}
+	}
+
+	// 6. Prepaid wallet on the leaf billing account.
+	if vk != nil {
+		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
+			serviceID := strings.TrimSpace(r.store.ResolveConfigModelServiceID(request.Provider, request.Model))
+			decision, err := r.store.CheckPrepaidWallet(ctx, orgID, serviceID)
+			if decision == DecisionAccountAmbiguous {
+				return &EvaluationResult{
+					Decision:   decision,
+					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+			if err != nil || decision == DecisionWalletInsufficient {
+				return &EvaluationResult{
+					Decision:   DecisionWalletInsufficient,
+					Reason:     fmt.Sprintf("Prepaid wallet check failed: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+		}
+	}
+
 	return &EvaluationResult{
-		Decision: DecisionAllow,
-		Reason:   "Billing-scope checks passed",
+		Decision:   DecisionAllow,
+		Reason:     "Budget usage checks passed",
+		VirtualKey: vk,
 	}
 }
 
@@ -229,9 +277,11 @@ func (r *BudgetResolver) isModelRequired(requestType schemas.RequestType) bool {
 	return true
 }
 
-// EvaluateVirtualKeyRequest evaluates virtual key-specific checks including validation, filtering, rate limits, and budgets
-// skipRateLimitsAndBudgets evaluates to true when we want to skip rate limits and budgets. This is used when user auth is present (user governance handles limits).
-func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, virtualKeyValue string, provider schemas.ModelProvider, model string, requestType schemas.RequestType, skipRateLimitsAndBudgets bool) *EvaluationResult {
+// EvaluateVirtualKeyRequest evaluates virtual key-specific checks: validation, provider/model
+// filtering, and rate limits. Spend limits are not evaluated here — they live on BudgetUsage.
+// skipRateLimits is true when rate limits must be bypassed (metadata calls, or user auth where
+// user governance owns the limits).
+func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, virtualKeyValue string, provider schemas.ModelProvider, model string, requestType schemas.RequestType, skipRateLimits bool) *EvaluationResult {
 	// 1. Validate virtual key exists and is active
 	vk, exists := r.store.GetVirtualKey(ctx, virtualKeyValue)
 	if !exists {
@@ -284,14 +334,9 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	}
 
 	// 4. Check rate limits hierarchy (VK level)
-	if !skipRateLimitsAndBudgets {
+	if !skipRateLimits {
 		if rateLimitResult := r.checkRateLimitHierarchy(ctx, vk, evaluationRequest); rateLimitResult != nil {
 			return rateLimitResult
-		}
-
-		// 5. Check budget hierarchy (VK → Team → Customer)
-		if budgetResult := r.checkBudgetHierarchy(ctx, vk, evaluationRequest); budgetResult != nil {
-			return budgetResult
 		}
 	}
 
@@ -492,20 +537,6 @@ func (r *BudgetResolver) checkRateLimitHierarchy(ctx context.Context, vk *config
 	}
 
 	return nil // No rate limit violations
-}
-
-// checkBudgetHierarchy checks the budget hierarchy atomically (VK → Team → Customer)
-func (r *BudgetResolver) checkBudgetHierarchy(ctx context.Context, vk *configstoreTables.TableVirtualKey, request *EvaluationRequest) *EvaluationResult {
-	// Use atomic budget checking to prevent race conditions
-	if decision, err := r.store.CheckVirtualKeyBudget(ctx, vk, request, nil); err != nil || isBudgetViolation(decision) {
-		r.logger.Debug(fmt.Sprintf("Atomic budget exceeded for VK %s: %s", vk.ID, reasonFromErr(err, decision)))
-		return &EvaluationResult{
-			Decision:   decision,
-			Reason:     fmt.Sprintf("Budget exceeded: %s", reasonFromErr(err, decision)),
-			VirtualKey: vk,
-		}
-	}
-	return nil // No budget violations
 }
 
 // Helper methods for provider config validation (used by TransportInterceptor)

@@ -9,6 +9,7 @@ type TableModel struct {
 	CurrencyID         *string  `gorm:"column:currency;type:uuid" json:"currency,omitempty"` // FK to currency object (same column as ConfigModel.currency)
 	InputCostPerToken  *float64 `json:"input_cost_per_token,omitempty"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token,omitempty"`
+	ServiceID          *string  `gorm:"column:service_id;type:uuid" json:"service_id,omitempty"`
 
 	Budgets    []TableBudget    `gorm:"foreignKey:ModelConfigID;references:ID" json:"budgets,omitempty"`
 	RateLimits []TableRateLimit `gorm:"foreignKey:ModelConfigID;references:ID" json:"rate_limits,omitempty"`

@@ -25,6 +25,7 @@ import (
 	"github.com/maximhq/bifrost/core/mcp"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
@@ -71,8 +72,8 @@ type HandlerStore interface {
 	// Returns nil if no plugins are loaded or streaming interception is not needed.
 	GetStreamChunkInterceptor() StreamChunkInterceptor
 	// GetAsyncJobExecutor returns the cached async job executor.
-	// Returns nil if LogsStore or governance plugin is not configured.
-	GetAsyncJobExecutor() *logstore.AsyncJobExecutor
+	// Returns nil if governance plugin is not configured.
+	GetAsyncJobExecutor() *asyncjob.Executor
 	// GetAsyncJobResultTTL returns the default TTL for async job results in seconds.
 	GetAsyncJobResultTTL() int
 	// GetKVStore returns the shared in-memory kvstore instance.
@@ -356,8 +357,8 @@ type Config struct {
 	TokenRefreshWorker *oauth2.TokenRefreshWorker
 	OAuthSweepWorker   *oauth2.PerUserOAuthSweepWorker
 
-	// Async job executor (initialized during setup if LogsStore + governance are available)
-	AsyncJobExecutor *logstore.AsyncJobExecutor
+	// Async job executor is independent from audit logging.
+	AsyncJobExecutor *asyncjob.Executor
 	// Shared in-memory kvstore for transport-level protocol coordination.
 	KVStore *kvstore.Store
 
@@ -405,7 +406,6 @@ var DefaultClientConfig = configstore.ClientConfig{
 	MCPEnableTempTokenAuth:          false,
 	HideDeletedVirtualKeysInFilters: false,
 	RoutingChainMaxDepth:            governance.DefaultRoutingChainMaxDepth,
-	GatewayDeploymentType:           configstore.GatewayDeploymentTypeUnifiedLLM,
 }
 
 // applyV1Compat normalizes ConfigData to restore v1.4.x allow-list semantics.
@@ -813,34 +813,6 @@ func applyClientConfigDefaults(cc *configstore.ClientConfig) {
 	if cc.EnableLogging == nil {
 		cc.EnableLogging = new(true)
 	}
-	resolveGatewayDeploymentType(cc)
-}
-
-// resolveGatewayDeploymentType normalizes gateway_deployment_type, supporting
-// env.VAR indirection and defaulting to unified_llm.
-func resolveGatewayDeploymentType(cc *configstore.ClientConfig) {
-	if cc == nil {
-		return
-	}
-	raw := strings.TrimSpace(cc.GatewayDeploymentType)
-	if raw == "" {
-		raw = DefaultClientConfig.GatewayDeploymentType
-	}
-	if envKey, ok := strings.CutPrefix(raw, "env."); ok {
-		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
-			raw = v
-		} else if v := strings.TrimSpace(os.Getenv("BIFROST_GATEWAY_DEPLOYMENT_TYPE")); v != "" {
-			raw = v
-		} else {
-			raw = configstore.GatewayDeploymentTypeUnifiedLLM
-		}
-	} else if raw == configstore.GatewayDeploymentTypeUnifiedLLM || raw == "" {
-		// Allow process env to override default when config leaves unified default / empty
-		if v := strings.TrimSpace(os.Getenv("BIFROST_GATEWAY_DEPLOYMENT_TYPE")); v != "" && cc.GatewayDeploymentType == "" {
-			raw = v
-		}
-	}
-	cc.GatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(raw)
 }
 
 // sanitizeMCPExternalOAuthURLs validates the MCP external OAuth URL overrides
@@ -3502,8 +3474,8 @@ func (c *Config) GetStreamChunkInterceptor() StreamChunkInterceptor {
 }
 
 // GetAsyncJobExecutor returns the async job executor.
-// Returns nil if LogsStore or governance plugin is not configured.
-func (c *Config) GetAsyncJobExecutor() *logstore.AsyncJobExecutor {
+// Returns nil if governance plugin is not configured.
+func (c *Config) GetAsyncJobExecutor() *asyncjob.Executor {
 	return c.AsyncJobExecutor
 }
 
@@ -3512,7 +3484,7 @@ func (c *Config) GetAsyncJobResultTTL() int {
 	if c.ClientConfig.AsyncJobResultTTL > 0 {
 		return c.ClientConfig.AsyncJobResultTTL
 	}
-	return logstore.DefaultAsyncJobResultTTL
+	return asyncjob.DefaultAsyncJobResultTTL
 }
 
 // GetKVStore returns the shared in-memory kvstore instance.

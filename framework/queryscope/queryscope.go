@@ -1,6 +1,6 @@
 // Package queryscope provides the primitive that wrappers use to push a
 // per-call SQL constraint onto the request context for inner stores to
-// consume. The configstore and logstore packages both import it so the
+// consume. The configstore package imports it so the
 // same QueryScope mechanism powers their ScopedDB read paths without
 // introducing a cycle between the two stores.
 package queryscope

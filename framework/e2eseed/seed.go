@@ -14,6 +14,7 @@ import (
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/logstore"
@@ -537,7 +538,7 @@ func CountKnownTables(ctx context.Context, configDB, logsDB *gorm.DB) (map[strin
 		}
 		out[table] = count
 	}
-	for _, table := range []string{"logs", "mcp_tool_logs", "async_jobs"} {
+	for _, table := range []string{"mcp_tool_logs", "async_jobs"} {
 		var count int64
 		if err := logsDB.WithContext(ctx).Table(table).Count(&count).Error; err != nil {
 			return nil, fmt.Errorf("count table %s: %w", table, err)
@@ -656,31 +657,10 @@ func seedMCP(ctx context.Context, db *gorm.DB, prefix string, now time.Time) err
 	return db.WithContext(ctx).Where("client_id = ?", client.ClientID).Assign(client).FirstOrCreate(&client).Error
 }
 
-// seedLogs writes the DAC matrix LLM logs. Each shape gets exactly
-// opts.LogRowsPerShape rows, so admin sees len(shapes) * LogRowsPerShape
-// total.
+// seedLogs writes MCP tool-log fixtures and an async-job companion row.
 func seedLogs(ctx context.Context, db *gorm.DB, opts Options, manifest ExpectedManifest) error {
 	if db == nil {
 		return fmt.Errorf("logs db is required")
-	}
-	shapes := manifest.Shapes
-	batch := make([]logstore.Log, 0, opts.BatchSize)
-	for shapeIdx, shape := range shapes {
-		for j := 0; j < opts.LogRowsPerShape; j++ {
-			i := shapeIdx*opts.LogRowsPerShape + j
-			batch = append(batch, buildLog(opts.Prefix, shape, i))
-			if len(batch) == opts.BatchSize {
-				if err := db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&batch).Error; err != nil {
-					return err
-				}
-				batch = batch[:0]
-			}
-		}
-	}
-	if len(batch) > 0 {
-		if err := db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&batch).Error; err != nil {
-			return err
-		}
 	}
 	if err := seedMCPLogs(ctx, db, opts, manifest); err != nil {
 		return err
@@ -688,9 +668,7 @@ func seedLogs(ctx context.Context, db *gorm.DB, opts Options, manifest ExpectedM
 	return seedAsyncJobCompanion(ctx, db, opts.Prefix)
 }
 
-// seedMCPLogs writes the DAC matrix MCP tool logs in the same shape and
-// volume as the LLM logs so MCP visibility tests can assert against the
-// expected.mcp_log_ids manifest the same way the LLM tests do.
+// seedMCPLogs writes the DAC matrix MCP tool logs used by visibility tests.
 func seedMCPLogs(ctx context.Context, db *gorm.DB, opts Options, manifest ExpectedManifest) error {
 	shapes := manifest.Shapes
 	batch := make([]logstore.MCPToolLog, 0, opts.BatchSize)
@@ -720,7 +698,7 @@ func seedAsyncJobCompanion(ctx context.Context, db *gorm.DB, prefix string) erro
 	now := seedBaseTime
 	vk := prefix + "-vk-user-team"
 	completed := now
-	job := logstore.AsyncJob{ID: prefix + "-async-job", Status: schemas.AsyncJobStatusCompleted, RequestType: schemas.ChatCompletionRequest, Response: `{}`, StatusCode: 200, VirtualKeyID: &vk, ResultTTL: 3600, CreatedAt: now, CompletedAt: &completed}
+	job := asyncjob.Job{ID: prefix + "-async-job", Status: schemas.AsyncJobStatusCompleted, RequestType: schemas.ChatCompletionRequest, Response: `{}`, StatusCode: 200, VirtualKeyID: &vk, ResultTTL: 3600, CreatedAt: now, CompletedAt: &completed}
 	return db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&job).Error
 }
 
@@ -773,15 +751,15 @@ func buildLog(prefix string, shape Shape, index int) logstore.Log {
 		status = "error"
 	}
 	return logstore.Log{
-		ID:               fmt.Sprintf("%s-log-%06d", prefix, index),
-		Timestamp:        timestamp,
-		Object:           "chat.completion",
-		Provider:         "openai",
-		Model:            "gpt-4o-mini",
-		SelectedKeyID:    prefix + "-openai-key",
-		SelectedKeyName:  "E2E OpenAI Key",
-		VirtualKeyID:     emptyPtr(shape.VirtualKeyID),
-		VirtualKeyName:   emptyPtr(vkName),
+		ID:              fmt.Sprintf("%s-log-%06d", prefix, index),
+		Timestamp:       timestamp,
+		Object:          "chat.completion",
+		Provider:        "openai",
+		Model:           "gpt-4o-mini",
+		SelectedKeyID:   prefix + "-openai-key",
+		SelectedKeyName: "E2E OpenAI Key",
+		VirtualKeyID:    emptyPtr(shape.VirtualKeyID),
+		VirtualKeyName:  emptyPtr(vkName),
 		InputHistoryParsed: []schemas.ChatMessage{{
 			Role:    schemas.ChatMessageRoleUser,
 			Content: &schemas.ChatMessageContent{ContentStr: ptr(shape.Marker + " prompt")},

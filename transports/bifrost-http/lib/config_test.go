@@ -691,6 +691,22 @@ func (m *MockConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBu
 	return nil, nil
 }
 
+func (m *MockConfigStore) GetAccounts(ctx context.Context) ([]tables.TableAccount, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetWallets(ctx context.Context) ([]tables.TableWallet, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetUserOrgUnits(ctx context.Context) ([]tables.TableUserOrgUnit, error) {
+	return nil, nil
+}
+
 func (m *MockConfigStore) CreateRateLimit(ctx context.Context, rateLimit *tables.TableRateLimit, tx ...*gorm.DB) error {
 	if m.governanceConfig == nil {
 		m.governanceConfig = &configstore.GovernanceConfig{}

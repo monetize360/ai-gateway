@@ -210,29 +210,6 @@ func (h *LoggingHandler) shouldHideDeletedVirtualKeysInFilters() bool {
 
 // RegisterRoutes registers all logging-related routes
 func (h *LoggingHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
-	// LLM Log retrieval with filtering, search, and pagination
-	r.GET("/api/logs", lib.ChainMiddlewares(h.getLogs, middlewares...))
-	r.GET("/api/logs/sessions/{session_id}/summary", lib.ChainMiddlewares(h.getLogSessionSummaryByID, middlewares...))
-	r.GET("/api/logs/sessions/{session_id}", lib.ChainMiddlewares(h.getLogSessionByID, middlewares...))
-	r.GET("/api/logs/{id}", lib.ChainMiddlewares(h.getLogByID, middlewares...))
-	r.GET("/api/logs/stats", lib.ChainMiddlewares(h.getLogsStats, middlewares...))
-	r.GET("/api/logs/histogram", lib.ChainMiddlewares(h.getLogsHistogram, middlewares...))
-	r.GET("/api/logs/histogram/tokens", lib.ChainMiddlewares(h.getLogsTokenHistogram, middlewares...))
-	r.GET("/api/logs/histogram/cost", lib.ChainMiddlewares(h.getLogsCostHistogram, middlewares...))
-	r.GET("/api/logs/histogram/models", lib.ChainMiddlewares(h.getLogsModelHistogram, middlewares...))
-	r.GET("/api/logs/histogram/latency", lib.ChainMiddlewares(h.getLogsLatencyHistogram, middlewares...))
-	r.GET("/api/logs/histogram/cost/by-provider", lib.ChainMiddlewares(h.getLogsProviderCostHistogram, middlewares...))
-	r.GET("/api/logs/histogram/tokens/by-provider", lib.ChainMiddlewares(h.getLogsProviderTokenHistogram, middlewares...))
-	r.GET("/api/logs/histogram/latency/by-provider", lib.ChainMiddlewares(h.getLogsProviderLatencyHistogram, middlewares...))
-	r.GET("/api/logs/histogram/cost/by-dimension", lib.ChainMiddlewares(h.getLogsDimensionCostHistogram, middlewares...))
-	r.GET("/api/logs/histogram/tokens/by-dimension", lib.ChainMiddlewares(h.getLogsDimensionTokenHistogram, middlewares...))
-	r.GET("/api/logs/histogram/latency/by-dimension", lib.ChainMiddlewares(h.getLogsDimensionLatencyHistogram, middlewares...))
-	r.GET("/api/logs/dropped", lib.ChainMiddlewares(h.getDroppedRequests, middlewares...))
-	r.GET("/api/logs/filterdata", lib.ChainMiddlewares(h.getAvailableFilterData, middlewares...))
-	r.GET("/api/logs/rankings", lib.ChainMiddlewares(h.getModelRankings, middlewares...))
-	r.DELETE("/api/logs", lib.ChainMiddlewares(h.deleteLogs, middlewares...))
-	r.POST("/api/logs/recalculate-cost", lib.ChainMiddlewares(h.recalculateLogCosts, middlewares...))
-
 	// MCP Tool Log retrieval with filtering, search, and pagination
 	r.GET("/api/mcp-logs", lib.ChainMiddlewares(h.getMCPLogs, middlewares...))
 	r.GET("/api/mcp-logs/stats", lib.ChainMiddlewares(h.getMCPLogsStats, middlewares...))

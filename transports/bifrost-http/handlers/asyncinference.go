@@ -7,7 +7,7 @@ import (
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -17,7 +17,7 @@ import (
 // AsyncHandler handles async job HTTP endpoints.
 type AsyncHandler struct {
 	client       *bifrost.Bifrost
-	executor     *logstore.AsyncJobExecutor
+	executor     *asyncjob.Executor
 	handlerStore lib.HandlerStore
 	config       *lib.Config
 }
@@ -50,7 +50,7 @@ func RegisterAsyncRequestTypeMiddleware(next fasthttp.RequestHandler) fasthttp.R
 }
 
 // NewAsyncHandler creates a new AsyncHandler.
-// If the async job executor is not available (e.g., LogsStore or governance plugin not configured),
+// If the async job executor is not available (e.g., governance plugin not configured),
 // the handler is created with a nil executor and RegisterRoutes will skip async route registration.
 func NewAsyncHandler(client *bifrost.Bifrost, config *lib.Config) *AsyncHandler {
 	return &AsyncHandler{
@@ -64,7 +64,7 @@ func NewAsyncHandler(client *bifrost.Bifrost, config *lib.Config) *AsyncHandler 
 // RegisterRoutes registers async job endpoints.
 func (h *AsyncHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	if h.executor == nil {
-		return // LogStore not configured, skip async routes
+		return // Async job executor not configured, skip async routes
 	}
 
 	baseMiddlewares := append([]schemas.BifrostHTTPMiddleware{RegisterAsyncRequestTypeMiddleware}, middlewares...)

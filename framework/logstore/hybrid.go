@@ -1162,30 +1162,3 @@ func (h *HybridLogStore) GetAvailableServerLabels(ctx context.Context, limit int
 func (h *HybridLogStore) GetAvailableMCPVirtualKeys(ctx context.Context, limit int, query string) ([]MCPToolLog, error) {
 	return h.inner.GetAvailableMCPVirtualKeys(ctx, limit, query)
 }
-
-// Async Job methods — delegated directly.
-
-// CreateAsyncJob creates a new async job.
-func (h *HybridLogStore) CreateAsyncJob(ctx context.Context, job *AsyncJob) error {
-	return h.inner.CreateAsyncJob(ctx, job)
-}
-
-// FindAsyncJobByID finds an async job by its ID.
-func (h *HybridLogStore) FindAsyncJobByID(ctx context.Context, id string) (*AsyncJob, error) {
-	return h.inner.FindAsyncJobByID(ctx, id)
-}
-
-// UpdateAsyncJob updates an async job with the given ID using the provided updates.
-func (h *HybridLogStore) UpdateAsyncJob(ctx context.Context, id string, updates map[string]interface{}) error {
-	return h.inner.UpdateAsyncJob(ctx, id, updates)
-}
-
-// DeleteExpiredAsyncJobs deletes async jobs that have not been updated since the given time.
-func (h *HybridLogStore) DeleteExpiredAsyncJobs(ctx context.Context) (int64, error) {
-	return h.inner.DeleteExpiredAsyncJobs(ctx)
-}
-
-// DeleteStaleAsyncJobs deletes async jobs that have not been updated since the given time.
-func (h *HybridLogStore) DeleteStaleAsyncJobs(ctx context.Context, staleSince time.Time) (int64, error) {
-	return h.inner.DeleteStaleAsyncJobs(ctx, staleSince)
-}

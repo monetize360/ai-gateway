@@ -297,6 +297,7 @@ type LoggerPlugin struct {
 	logStoreResolver       tenantstore.LogStoreResolver
 	disableContentLogging  *bool
 	loggingHeaders         *[]string // Pointer to live config slice for headers to capture in metadata
+	mcpOnly                bool
 	configModelPricing     *configModelPricingCache
 	mcpCatalog             *mcpcatalog.MCPCatalog // MCP catalog for tool cost calculation
 	mu                     sync.Mutex
@@ -347,6 +348,7 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 		mcpCatalog:            mcpCatalog,
 		disableContentLogging: config.DisableContentLogging,
 		loggingHeaders:        config.LoggingHeaders,
+		mcpOnly:               true,
 		done:                  make(chan struct{}),
 		logger:                logger,
 		writeQueue:            make(chan *writeQueueEntry, writeQueueCapacity),
@@ -429,15 +431,6 @@ func (p *LoggerPlugin) cleanupOldProcessingLogs() {
 	// Calculate timestamp for 30 minutes ago in UTC to match log entry timestamps
 	thirtyMinutesAgo := time.Now().UTC().Add(-1 * 30 * time.Minute)
 
-	// Delete LLM processing logs older than 30 minutes
-	flushLLM := func(store logstore.LogStore) {
-		if store == nil {
-			return
-		}
-		if err := store.Flush(p.ctx, thirtyMinutesAgo); err != nil {
-			p.logger.Warn("failed to cleanup old processing LLM logs: %v", err)
-		}
-	}
 	flushMCP := func(store logstore.LogStore) {
 		if store == nil {
 			return
@@ -448,15 +441,13 @@ func (p *LoggerPlugin) cleanupOldProcessingLogs() {
 	}
 	if p.logStoreResolver != nil {
 		p.logStoreResolver.ForEachStore(func(_ string, store logstore.LogStore) {
-			flushLLM(store)
 			flushMCP(store)
 		})
 	} else {
-		flushLLM(p.store)
 		flushMCP(p.store)
 	}
 
-	// Clean up stale pending log entries (requests where PostLLMHook never fired)
+	// Clean up stale MCP entries that never received a post-hook.
 	p.cleanupStalePendingLogs()
 }
 
@@ -546,6 +537,12 @@ func (p *LoggerPlugin) captureLoggingHeaders(ctx *schemas.BifrostContext) map[st
 //   - *schemas.LLMPluginShortCircuit: The plugin short circuit if the request is not allowed
 //   - error: Any error that occurred during processing
 func (p *LoggerPlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+	// Main LLM audit logging is retired. The plugin remains loaded only for
+	// PreMCPHook/PostMCPHook so mcp_tool_logs continues to be populated.
+	if p.mcpOnly {
+		return req, nil, nil
+	}
+
 	if ctx == nil {
 		// Log error but don't fail the request
 		p.logger.Error("context is nil in PreLLMHook")
@@ -791,6 +788,11 @@ func (p *LoggerPlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.Bifr
 //   - *schemas.BifrostError: The processed error
 //   - error: Any error that occurred during processing
 func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	// Main LLM audit logging is retired; MCP tool logging remains active.
+	if p.mcpOnly {
+		return result, bifrostErr, nil
+	}
+
 	if ctx == nil {
 		// Log error but don't fail the request
 		p.logger.Error("context is nil in PostLLMHook")
@@ -1255,6 +1257,9 @@ func (p *LoggerPlugin) storeOrEnqueueEntry(ctx *schemas.BifrostContext, entry *l
 // Inject receives a completed trace and writes the log entries with plugin logs to DB.
 // This implements the ObservabilityPlugin interface.
 func (p *LoggerPlugin) Inject(_ context.Context, trace *schemas.Trace) error {
+	if p.mcpOnly {
+		return nil
+	}
 	if trace == nil {
 		return nil
 	}

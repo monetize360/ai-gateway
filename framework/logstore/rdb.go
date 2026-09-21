@@ -2815,12 +2815,12 @@ func (s *RDBLogStore) GetDistinctAliases(ctx context.Context, limit int, query s
 // allowedKeyPairColumns is a whitelist of column names that can be used in GetDistinctKeyPairs
 // to prevent SQL injection from interpolated column names.
 var allowedKeyPairColumns = map[string]struct{}{
-	"selected_key_id":    {},
-	"selected_key_name":  {},
-	"virtual_key_id":     {},
-	"virtual_key_name":   {},
-	"routing_rule_id":    {},
-	"routing_rule_name":  {},
+	"selected_key_id":   {},
+	"selected_key_name": {},
+	"virtual_key_id":    {},
+	"virtual_key_name":  {},
+	"routing_rule_id":   {},
+	"routing_rule_name": {},
 }
 
 // GetDistinctKeyPairs returns unique non-empty ID-Name pairs for the given columns using SELECT DISTINCT.
@@ -3650,61 +3650,4 @@ func (s *RDBLogStore) GetMCPTopTools(ctx context.Context, filters MCPToolLogSear
 	}
 
 	return &MCPTopToolsResult{Tools: tools}, nil
-}
-
-// CreateAsyncJob creates a new async job record in the database.
-func (s *RDBLogStore) CreateAsyncJob(ctx context.Context, job *AsyncJob) error {
-	return s.db.WithContext(ctx).Create(job).Error
-}
-
-// FindAsyncJobByID retrieves an async job by its ID.
-func (s *RDBLogStore) FindAsyncJobByID(ctx context.Context, id string) (*AsyncJob, error) {
-	var job AsyncJob
-	result := s.db.WithContext(ctx).Where("id = ? AND (expires_at IS NULL OR expires_at > ?)", id, time.Now().UTC()).First(&job)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, result.Error
-	}
-	return &job, nil
-}
-
-// UpdateAsyncJob updates an async job record with the provided fields.
-func (s *RDBLogStore) UpdateAsyncJob(ctx context.Context, id string, updates map[string]interface{}) error {
-	return s.db.WithContext(ctx).Model(&AsyncJob{}).Where("id = ?", id).Updates(updates).Error
-}
-
-// DeleteExpiredAsyncJobs deletes async jobs whose expires_at has passed.
-// Only deletes jobs that have a non-null expires_at (i.e., completed or failed jobs).
-// Deletes in batches to avoid long-running transactions that hold row locks.
-func (s *RDBLogStore) DeleteExpiredAsyncJobs(ctx context.Context) (int64, error) {
-	now := time.Now().UTC()
-	const batchLimit = 100
-	var totalDeleted int64
-	for {
-		result := s.db.WithContext(ctx).
-			Where("id IN (?)",
-				s.db.Model(&AsyncJob{}).Select("id").
-					Where("expires_at IS NOT NULL AND expires_at < ?", now).
-					Limit(batchLimit),
-			).Delete(&AsyncJob{})
-		if result.Error != nil {
-			return totalDeleted, result.Error
-		}
-		totalDeleted += result.RowsAffected
-		if result.RowsAffected < batchLimit {
-			break
-		}
-	}
-	return totalDeleted, nil
-}
-
-// DeleteStaleAsyncJobs deletes async jobs stuck in "processing" status since before the given time.
-// This handles edge cases like marshal failures or server crashes that leave jobs permanently stuck.
-func (s *RDBLogStore) DeleteStaleAsyncJobs(ctx context.Context, staleSince time.Time) (int64, error) {
-	result := s.db.WithContext(ctx).
-		Where("status = ? AND created_at < ?", "processing", staleSince).
-		Delete(&AsyncJob{})
-	return result.RowsAffected, result.Error
 }

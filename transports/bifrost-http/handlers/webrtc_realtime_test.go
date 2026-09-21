@@ -8,7 +8,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/kvstore"
-	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
 	"github.com/valyala/fasthttp"
@@ -23,7 +23,7 @@ func (s testHandlerStore) GetProvidersForModel(model string) []schemas.ModelProv
 func (s testHandlerStore) GetStreamChunkInterceptor() lib.StreamChunkInterceptor {
 	return nil
 }
-func (s testHandlerStore) GetAsyncJobExecutor() *logstore.AsyncJobExecutor  { return nil }
+func (s testHandlerStore) GetAsyncJobExecutor() *asyncjob.Executor  { return nil }
 func (s testHandlerStore) GetAsyncJobResultTTL() int                        { return 0 }
 func (s testHandlerStore) GetKVStore() *kvstore.Store                       { return s.kv }
 func (s testHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList { return nil }

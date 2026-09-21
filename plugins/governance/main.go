@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,8 +44,6 @@ type Config struct {
 	IsEnterprise          bool      `json:"is_enterprise"`
 	DisableAutoToolInject *bool     `json:"disable_auto_tool_inject"`
 	RoutingChainMaxDepth  *int      `json:"routing_chain_max_depth"` // Pointer to live config value; changes are reflected immediately without restart
-	// GatewayDeploymentType: "unified_llm" (default) or "ai_infra". See configstore.GatewayDeploymentType*.
-	GatewayDeploymentType string `json:"gateway_deployment_type,omitempty"`
 }
 
 type InMemoryStore interface {
@@ -98,7 +97,6 @@ type GovernancePlugin struct {
 	isEnterprise          bool
 	disableAutoToolInject *bool
 	routingChainMaxDepth  *int
-	gatewayDeploymentType string
 
 	// usagePublisher publishes InferenceUsage to Kafka (injected by HTTP transport).
 	usagePublisher UsageEventPublisher
@@ -166,17 +164,12 @@ func Init(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
-	gatewayDeploymentType := configstore.GatewayDeploymentTypeUnifiedLLM
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
-		if config.GatewayDeploymentType != "" {
-			gatewayDeploymentType = config.GatewayDeploymentType
-		}
 	}
-	gatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(gatewayDeploymentType)
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
@@ -196,7 +189,6 @@ func Init(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
-		gatewayDeploymentType: gatewayDeploymentType,
 		inMemoryStore:         inMemoryStore,
 	}
 	return plugin, nil
@@ -241,27 +233,18 @@ func InitFromStore(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
-	gatewayDeploymentType := configstore.GatewayDeploymentTypeUnifiedLLM
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
-		if config.GatewayDeploymentType != "" {
-			gatewayDeploymentType = config.GatewayDeploymentType
-		}
 	}
-	gatewayDeploymentType = configstore.NormalizeGatewayDeploymentType(gatewayDeploymentType)
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
 	}
 	resolver := NewBudgetResolver(governanceStore, modelCatalog, logger, inMemoryStore)
 	tracker := NewUsageTracker(ctx, governanceStore, resolver, configStore, logger)
-	tracker.SetOwnsLocalBudgetUsage(!configstore.IsAIInfraGatewayDeployment(gatewayDeploymentType))
-	if localStore, ok := governanceStore.(*LocalGovernanceStore); ok {
-		localStore.SetSyncBudgetUsageFromDatabase(configstore.IsAIInfraGatewayDeployment(gatewayDeploymentType))
-	}
 	engine, err := NewRoutingEngine(governanceStore, logger, routingChainMaxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize routing engine: %w", err)
@@ -297,7 +280,6 @@ func InitFromStore(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
-		gatewayDeploymentType: gatewayDeploymentType,
 	}
 	plugin.tenantComponents.Store(testTenantID, &tenantGovernanceComponents{
 		store:    governanceStore,
@@ -348,29 +330,11 @@ func (p *GovernancePlugin) getStoreAndResolverForContext(ctx context.Context) (G
 
 // SetUsageEventPublisher injects the Kafka InferenceUsage publisher (HTTP transport).
 // Nil disables publish; failures are logged only and never fail the LLM path.
-// Publish runs only when gateway deployment type is ai_infra.
 func (p *GovernancePlugin) SetUsageEventPublisher(publisher UsageEventPublisher) {
 	if p == nil {
 		return
 	}
 	p.usagePublisher = publisher
-}
-
-// isAIInfraDeployment reports whether this plugin runs in AI infra gateway mode
-// (Kafka usage publish + DB→cache budget sync; no local DumpBudgets).
-func (p *GovernancePlugin) isAIInfraDeployment() bool {
-	if p == nil {
-		return false
-	}
-	p.cfgMutex.RLock()
-	defer p.cfgMutex.RUnlock()
-	return configstore.IsAIInfraGatewayDeployment(p.gatewayDeploymentType)
-}
-
-// ownsLocalBudgetUsage reports whether the gateway prices and persists budget usage locally
-// (unified_llm default).
-func (p *GovernancePlugin) ownsLocalBudgetUsage() bool {
-	return !p.isAIInfraDeployment()
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -1287,79 +1251,65 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 	}
 	p.cfgMutex.RUnlock()
 
-	// Budget systems are mutually exclusive by deployment:
-	//   unified_llm → governance_budgets (VK / org / provider / model)
-	//   ai_infra    → budgetusage__m (account / contract / user)
-	useGovernanceBudgets := p.ownsLocalBudgetUsage()
-	useBudgetUsage := p.isAIInfraDeployment()
+	// Spend limits come exclusively from budgetusage__m (service / provider / user / account).
+	// governance_budgets are never consulted for spend; governance_rate_limits still own
+	// token and request throttling.
 
 	// Read-only metadata calls (e.g. list models) set this flag to skip budget/rate-limit
 	// checks while still enforcing VK identity (existence, active status, provider/model filtering).
 	skipBudgetsAndRateLimits := bifrost.GetBoolFromContext(ctx, schemas.BifrostContextKeySkipBudgetAndRateLimits)
 
-	// Provider/model governance budgets + rate limits — unified_llm only.
+	// Provider/model rate limits.
 	var result *EvaluationResult
-	if useGovernanceBudgets && !skipBudgetsAndRateLimits {
+	if !skipBudgetsAndRateLimits {
 		result = resolver.EvaluateModelAndProviderRequest(ctx, evaluationRequest.Provider, evaluationRequest.Model)
 	} else {
 		result = &EvaluationResult{
 			Decision: DecisionAllow,
-			Reason:   "Skipping provider/model governance budget checks",
+			Reason:   "Skipping provider/model rate limit checks",
 		}
 	}
 
 	// The flow for governance checks is:
-	//   VK (identity + VK-level budget/rate-limit) -> Customer -> Team -> User
+	//   VK (identity + rate limits) -> org rate limits -> BudgetUsage spend limits
 	// VK identity runs FIRST so that revoked, provider-disallowed, or model-disallowed
-	// keys are blocked before any hierarchy state is consulted. Running Customer/Team/
-	// User ahead of VK would leak topology: a revoked key attached to an over-budget
-	// team would return 429 team-budget-exceeded instead of 403 VK-blocked, telling
-	// an attacker the key's team structure was validated.
+	// keys are blocked before any hierarchy state is consulted. Running the org or billing
+	// scopes ahead of VK would leak topology: a revoked key attached to an over-budget
+	// account would return 402 budget-exceeded instead of 403 VK-blocked, telling
+	// an attacker the key's billing structure was validated.
 
-	// Resolve the VK once; it feeds both the VK evaluation and hierarchy-ID extraction.
+	// Resolve the VK once; it feeds the VK evaluation, org rate limits, and billing scopes.
 	var hierarchyVK *configstoreTables.TableVirtualKey
 	if evaluationRequest.VirtualKey != "" {
 		if vk, ok := store.GetVirtualKey(ctx, evaluationRequest.VirtualKey); ok && vk != nil {
 			hierarchyVK = vk
 		}
 	}
+	stampVirtualKeyOrgContext(ctx, hierarchyVK)
 
 	// Step 1: Evaluate virtual key.
-	// Identity + provider/model filtering always run when a VK is present.
-	// VK budget/rate-limit hierarchy runs only for unified_llm.
+	// Identity + provider/model filtering always run when a VK is present; VK rate limits
+	// are skipped for metadata calls and for the enterprise user-auth path.
 	if result.Decision == DecisionAllow && evaluationRequest.VirtualKey != "" {
-		// Skip VK budget/rate-limit when: metadata skip flag, enterprise user-auth path,
-		// or ai_infra (BudgetUsage owns spend limits instead of governance_budgets).
-		skipVKBudgetLimit := skipBudgetsAndRateLimits || !useGovernanceBudgets
-		if !skipVKBudgetLimit && evaluationRequest.UserID != "" {
+		skipVKRateLimits := skipBudgetsAndRateLimits
+		if !skipVKRateLimits && evaluationRequest.UserID != "" {
 			if tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID); tenantID == "" {
-				skipVKBudgetLimit = true
+				skipVKRateLimits = true
 			}
 		}
-		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKBudgetLimit)
+		result = resolver.EvaluateVirtualKeyRequest(ctx, evaluationRequest.VirtualKey, evaluationRequest.Provider, evaluationRequest.Model, requestType, skipVKRateLimits)
 	}
 
-	// Step 2: Org hierarchy governance budgets — unified_llm only.
-	if useGovernanceBudgets && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
-		stampVirtualKeyOrgContext(ctx, hierarchyVK)
+	// Step 2: Org hierarchy rate limits.
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow && hierarchyVK != nil {
 		if scopeOrgID := hierarchyVK.GovernanceScopeOrgID(); scopeOrgID != nil {
 			result = resolver.EvaluateOrgHierarchyRequest(ctx, *scopeOrgID, evaluationRequest)
 		}
 	}
 
-	// Step 3: Billing-scope BudgetUsage (account / contract) — ai_infra only.
-	if useBudgetUsage && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
-		result = resolver.EvaluateBillingScopeRequest(ctx, evaluationRequest)
-	}
-
-	// Step 4: User-scoped BudgetUsage — ai_infra only.
-	if useBudgetUsage && !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
-		for _, userID := range uniqueNonEmptyStrings(evaluationRequest.UserID, evaluationRequest.BillingUserID) {
-			result = resolver.EvaluateUserRequest(ctx, userID, evaluationRequest)
-			if result.Decision != DecisionAllow {
-				break
-			}
-		}
+	// Step 3: BudgetUsage spend limits (service / provider / user / org-unit / account hierarchy / prepaid wallet).
+	if !skipBudgetsAndRateLimits && result.Decision == DecisionAllow {
+		result = resolver.EvaluateBudgetUsageRequest(ctx, evaluationRequest, hierarchyVK)
 	}
 
 	// Check the actual MCP tools injected into the request against the VK MCPConfigs.
@@ -1433,6 +1383,17 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 		return result, &schemas.BifrostError{
 			Type:       new(string(result.Decision)),
 			StatusCode: new(402),
+			Error: &schemas.ErrorField{
+				Message: result.Reason,
+			},
+		}
+
+	case DecisionMissingServiceID, DecisionAccountAmbiguous, DecisionWalletInsufficient:
+		// Billing metadata is incomplete, so the request cannot be rated — reject it as a
+		// bad request rather than letting unrated spend through.
+		return result, &schemas.BifrostError{
+			Type:       new(string(result.Decision)),
+			StatusCode: new(400),
 			Error: &schemas.ErrorField{
 				Message: result.Reason,
 			},
@@ -1528,9 +1489,6 @@ func (p *GovernancePlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.
 	// Auth user (enterprise) vs body billing user_id — kept separate so body input cannot skip VK budgets.
 	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
 	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
-	// Account/contract from top-level request body fields (stamped by HTTP router)
-	accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID)
-	contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID)
 	// Getting provider and mode from the request
 	provider, model, _ := req.GetRequestFields()
 	// Create request context for evaluation
@@ -1540,8 +1498,6 @@ func (p *GovernancePlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.
 		Model:         model,
 		UserID:        authUserID,
 		BillingUserID: billingUserID,
-		AccountID:     accountID,
-		ContractID:    contractID,
 	}
 	// Evaluate governance using common function
 	_, bifrostError := p.EvaluateGovernanceRequest(ctx, evaluationRequest, req.RequestType)
@@ -1666,17 +1622,12 @@ func (p *GovernancePlugin) PreMCPHook(ctx *schemas.BifrostContext, req *schemas.
 	// Auth user vs body billing user_id — kept separate so body input cannot skip VK budgets.
 	authUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyUserID)
 	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
-	// Account/contract from top-level request body fields (stamped by HTTP router)
-	accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID)
-	contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID)
 
 	// Create request context for evaluation (MCP requests don't have provider/model)
 	evaluationRequest := &EvaluationRequest{
 		VirtualKey:    virtualKeyValue,
 		UserID:        authUserID,
 		BillingUserID: billingUserID,
-		AccountID:     accountID,
-		ContractID:    contractID,
 	}
 
 	// Evaluate governance using common function
@@ -1959,25 +1910,19 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 			}
 		}
 
-		// Publish InferenceUsage to Kafka only for AI infra gateway (MPilot/Rating owns budget DB writes).
-		if p.isAIInfraDeployment() {
-			p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
-				promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs)
-		}
+		// Spend is always rated by MPilot from the published InferenceUsage event.
+		p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
+			promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs)
 
-		// Unified LLM gateway: calculate cost and bump budgets locally.
-		// AI infra: Cost=0 — rate limits only; budget usage comes from DB sync after MPilot updates.
-		cost := float64(0)
-		if p.ownsLocalBudgetUsage() && comp.store != nil {
-			cost = comp.store.CalculateBudgetCost(provider, model, promptTokens, completionTokens)
-		}
+		// Cost stays 0: the tracker only advances rate-limit counters, and BudgetUsage spend
+		// arrives back from the database once MPilot Rating has priced the request.
 		usageUpdate := &UsageUpdate{
 			VirtualKey:   virtualKey,
 			Provider:     provider,
 			Model:        model,
 			Success:      success,
 			TokensUsed:   int64(tokensUsed),
-			Cost:         cost,
+			Cost:         0,
 			RequestID:    requestID,
 			UserID:       userID,
 			IsStreaming:  isStreaming,
@@ -2000,9 +1945,6 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	if p.usagePublisher == nil {
 		return
 	}
-	if !p.isAIInfraDeployment() {
-		return
-	}
 	tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID)
 	if tenantID == "" {
 		if tid, ok := ctx.Value(schemas.BifrostContextKeyTenantID).(string); ok {
@@ -2014,49 +1956,72 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		return
 	}
 
-	message := map[string]any{
-		"provider":              string(provider),
-		"model":                 model,
-		"prompt_tokens":         promptTokens,
-		"completion_tokens":     completionTokens,
-		"total_tokens":          totalTokens,
-		"cached_input_tokens":   cachedInputTokens,
-		"cache_creation_tokens": cacheCreationTokens,
-		"reasoning_tokens":      reasoningTokens,
+	serviceID := ""
+	billingAccountRef := ""
+	comp := p.getComponentsForContext(ctx)
+	if comp != nil && comp.store != nil {
+		serviceID = strings.TrimSpace(comp.store.ResolveConfigModelServiceID(provider, model))
 	}
-	if durationMs > 0 {
-		message["duration_ms"] = durationMs
-		endTime := time.Now().UTC()
-		startTime := endTime.Add(-time.Duration(durationMs) * time.Millisecond)
-		message["end_time"] = endTime.Format(time.RFC3339Nano)
-		message["start_time"] = startTime.Format(time.RFC3339Nano)
-	}
-	// Prefer body billing user_id for MPilot BudgetUsage attribution; fall back to auth user.
-	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
-	if billingUserID != "" {
-		message["user_id"] = billingUserID
-	} else if userID != "" {
-		message["user_id"] = userID
-	}
-	if accountID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyAccountID); accountID != "" {
-		message["account_id"] = accountID
-	}
-	if contractID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyContractID); contractID != "" {
-		message["contract_id"] = contractID
-	}
-	if orgID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID); orgID != "" {
-		message["org_unit"] = orgID
+	if serviceID == "" {
+		p.logger.Debug("skipping InferenceUsage kafka publish: service_id missing for model %s", model)
+		return
 	}
 
-	key := requestID
-	if key == "" {
-		key = virtualKey
+	organizationID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID)
+	if organizationID == "" {
+		p.logger.Debug("skipping InferenceUsage kafka publish: organizationId missing")
+		return
 	}
-	if key == "" {
-		if accountID, ok := message["account_id"].(string); ok {
-			key = accountID
+
+	// billingAccountRef is the leaf Account.external_id for the VK's organization.
+	// Rating resolves the account by external id — no request-body account_id required.
+	if comp != nil && comp.store != nil {
+		billingAccountRef = strings.TrimSpace(comp.store.ResolveLeafAccountExternalID(organizationID))
+	}
+	if billingAccountRef == "" {
+		p.logger.Debug("skipping InferenceUsage kafka publish: leaf account external_id missing for org %s", organizationID)
+		return
+	}
+
+	vkUserID := ""
+	if virtualKey != "" && comp != nil && comp.store != nil {
+		if vk, ok := comp.store.GetVirtualKey(ctx, virtualKey); ok && vk != nil && vk.UserID != nil {
+			vkUserID = strings.TrimSpace(*vk.UserID)
 		}
 	}
+	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
+	orgUnitID := ""
+	if comp != nil && comp.store != nil {
+		orgUnitID = strings.TrimSpace(comp.store.ResolveLeafOrgUnitID(vkUserID, userID, billingUserID))
+	}
+
+	externalTransactionID := requestID
+	if externalTransactionID == "" {
+		externalTransactionID = uuid.NewString()
+	}
+	eventTimestamp := time.Now().UTC()
+	if durationMs > 0 {
+		eventTimestamp = eventTimestamp.Add(-time.Duration(durationMs) * time.Millisecond)
+	}
+
+	message := map[string]any{
+		"externalTransactionId": externalTransactionID,
+		"organizationId":        organizationID,
+		"serviceId":             serviceID,
+		"eventTimestamp":        eventTimestamp.Format(time.RFC3339Nano),
+		"billingAccountRef":     billingAccountRef,
+		"dimensions": map[string]string{
+			"Input_Tokens":  strconv.Itoa(promptTokens),
+			"Output_Tokens": strconv.Itoa(completionTokens),
+			"Model":         model,
+			"Provider":      string(provider),
+		},
+	}
+	if orgUnitID != "" {
+		message["orgUnitId"] = orgUnitID
+	}
+
+	key := externalTransactionID
 	if err := p.usagePublisher.PublishUsage(ctx, tenantID, key, message); err != nil {
 		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
 	}
