@@ -101,6 +101,11 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 			logger.Warn("tenant log store sync: failed to refresh tenant log stores: %v", err)
 		}
 	}
+	if cfg.TenantStore.AsyncJobManager != nil {
+		if err := cfg.TenantStore.AsyncJobManager.SyncTenantsFromGlobalDB(ctx); err != nil {
+			logger.Warn("tenant async job store sync: failed to refresh tenant async job stores: %v", err)
+		}
+	}
 
 	idleTimeout := TenantPoolIdleTimeout(cfg.TenantStoreConfig)
 	if cfg.TenantStore.Manager != nil {
@@ -112,6 +117,9 @@ func syncAllTenantProviders(ctx context.Context, cfg *Config, client tenantProvi
 	}
 	if cfg.TenantStore.LogStoreManager != nil {
 		_ = cfg.TenantStore.LogStoreManager.EvictIdle(ctx, idleTimeout)
+	}
+	if cfg.TenantStore.AsyncJobManager != nil {
+		_ = cfg.TenantStore.AsyncJobManager.EvictIdle(ctx, idleTimeout)
 	}
 
 	// Detect tenants evicted during this sync cycle (soft-deleted in MPilot) and

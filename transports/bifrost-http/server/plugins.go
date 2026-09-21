@@ -215,7 +215,6 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 			RequiredHeaders:        &s.Config.ClientConfig.RequiredHeaders,
 			DisableAutoToolInject:  &s.Config.ClientConfig.MCPDisableAutoToolInject,
 			RoutingChainMaxDepth:   &s.Config.ClientConfig.RoutingChainMaxDepth,
-			GatewayDeploymentType:  s.Config.ClientConfig.GatewayDeploymentType,
 		}
 		s.registerPluginWithStatus(ctx, governance.PluginName, nil, config, false)
 	} else {

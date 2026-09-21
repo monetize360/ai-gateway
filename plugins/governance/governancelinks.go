@@ -2,6 +2,7 @@ package governance
 
 import (
 	"context"
+	"time"
 
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
@@ -202,21 +203,21 @@ func applyRateLimitStatusFromSlice(gs *LocalGovernanceStore, rateLimits []config
 	}
 }
 
-func applyBudgetStatusFromSlice(gs *LocalGovernanceStore, budgets []configstoreTables.TableBudget, budgetBaselines map[string]float64, result *BudgetAndRateLimitStatus) {
-	for i := range budgets {
-		if budgetValue, ok := gs.budgets.Load(budgets[i].ID); ok && budgetValue != nil {
-			if budget, ok := budgetValue.(*configstoreTables.TableBudget); ok && budget != nil {
-				baseline := budgetBaselines[budget.ID]
-				if budget.MaxLimit > 0 {
-					budgetPercent := float64(budget.CurrentUsage+baseline) / budget.MaxLimit * 100
-					if budgetPercent > result.BudgetPercentUsed {
-						result.BudgetPercentUsed = budgetPercent
-					}
-					if budget.SoftLimit != nil && *budget.SoftLimit && budgetPercent >= 100 {
-						result.SoftLimitExceeded = true
-					}
-				}
-			}
+// applyBudgetUsageStatus records the highest spend percentage across the BudgetUsage rows that
+// govern a request, and flags soft limits that have been crossed so routing rules can react.
+// Rows whose period has already elapsed are ignored: their usage belongs to a closed window.
+func applyBudgetUsageStatus(usages []*configstoreTables.TableBudgetUsage, budgetBaselines map[string]float64, result *BudgetAndRateLimitStatus) {
+	now := time.Now()
+	for _, usage := range usages {
+		if usage == nil || usage.MaxLimit <= 0 || isBudgetUsagePeriodExpired(usage, now) {
+			continue
+		}
+		usagePercent := (usage.CurrentUsage + budgetBaselines[usage.ID]) / usage.MaxLimit * 100
+		if usagePercent > result.BudgetPercentUsed {
+			result.BudgetPercentUsed = usagePercent
+		}
+		if usage.SoftLimit && usagePercent >= 100 {
+			result.SoftLimitExceeded = true
 		}
 	}
 }

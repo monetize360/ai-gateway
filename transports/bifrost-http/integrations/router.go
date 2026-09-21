@@ -65,7 +65,7 @@ import (
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/providers/bedrock"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -1575,7 +1575,7 @@ func (g *GenericRouter) handleAsyncCreate(
 	executor := g.handlerStore.GetAsyncJobExecutor()
 	if executor == nil {
 		g.sendError(ctx, bifrostCtx, config.ErrorConverter,
-			newBifrostError(nil, "async operations not available: logs store not configured"))
+			newBifrostError(nil, "async operations not available: async job store not configured"))
 		return
 	}
 
@@ -1647,7 +1647,7 @@ func (g *GenericRouter) handleAsyncRetrieve(
 	executor := g.handlerStore.GetAsyncJobExecutor()
 	if executor == nil {
 		g.sendError(ctx, bifrostCtx, config.ErrorConverter,
-			newBifrostError(nil, "async operations not available: logs store not configured"))
+			newBifrostError(nil, "async operations not available: async job store not configured"))
 		return
 	}
 
@@ -1662,7 +1662,7 @@ func (g *GenericRouter) handleAsyncRetrieve(
 
 	job, err := executor.RetrieveJob(bifrostCtx, jobID, vkValue, config.GetHTTPRequestType(ctx))
 	if err != nil {
-		if errors.Is(err, logstore.ErrJobInternal) {
+		if errors.Is(err, asyncjob.ErrJobInternal) {
 			g.sendError(ctx, bifrostCtx, config.ErrorConverter,
 				newBifrostErrorWithCode(err, "failed to retrieve async job", fasthttp.StatusInternalServerError))
 		} else {
@@ -1675,7 +1675,7 @@ func (g *GenericRouter) handleAsyncRetrieve(
 	g.handleAsyncJobResponse(ctx, bifrostCtx, config, job)
 }
 
-func (g *GenericRouter) handleAsyncJobResponse(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, config RouteConfig, job *logstore.AsyncJob) {
+func (g *GenericRouter) handleAsyncJobResponse(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, config RouteConfig, job *asyncjob.Job) {
 	ctx.SetContentType("application/json")
 
 	resp := job.ToResponse()

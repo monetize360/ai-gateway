@@ -224,8 +224,13 @@ type ConfigStore interface {
 	UpdateBudgetUsage(ctx context.Context, id string, currentUsage float64) error
 	UpdateRateLimitUsage(ctx context.Context, id string, tokenCurrentUsage int64, requestCurrentUsage int64) error
 
-	// BudgetUsage (billing budgetusage__m — ai_infra PreLLM scopes)
+	// BudgetUsage (billing budgetusage__m — PreLLM spend scopes)
 	GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error)
+	// Accounts (billing account__m — PreLLM account hierarchy walk)
+	GetAccounts(ctx context.Context) ([]tables.TableAccount, error)
+	GetWallets(ctx context.Context) ([]tables.TableWallet, error)
+	GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error)
+	GetUserOrgUnits(ctx context.Context) ([]tables.TableUserOrgUnit, error)
 
 	// Routing Rules CRUD
 	GetRoutingRules(ctx context.Context) ([]tables.TableRoutingRule, error)

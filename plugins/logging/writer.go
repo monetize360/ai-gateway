@@ -141,7 +141,6 @@ func (p *LoggerPlugin) processBatch(batch []*writeQueueEntry) {
 	}
 
 	type tenantBatch struct {
-		logs    []*logstore.Log
 		mcpLogs []*logstore.MCPToolLog
 	}
 	byTenant := make(map[string]*tenantBatch)
@@ -152,9 +151,6 @@ func (p *LoggerPlugin) processBatch(batch []*writeQueueEntry) {
 			group = &tenantBatch{}
 			byTenant[tenantID] = group
 		}
-		if entry.log != nil {
-			group.logs = append(group.logs, entry.log)
-		}
 		if entry.mcpLog != nil {
 			group.mcpLogs = append(group.mcpLogs, entry.mcpLog)
 		}
@@ -163,20 +159,9 @@ func (p *LoggerPlugin) processBatch(batch []*writeQueueEntry) {
 	for tenantID, group := range byTenant {
 		store := p.logStoreForTenant(tenantID)
 		if store == nil {
-			p.logger.Warn("log store not available for tenant %q; dropping %d entries", tenantID, len(group.logs)+len(group.mcpLogs))
-			p.droppedRequests.Add(int64(len(group.logs) + len(group.mcpLogs)))
+			p.logger.Warn("log store not available for tenant %q; dropping %d MCP entries", tenantID, len(group.mcpLogs))
+			p.droppedRequests.Add(int64(len(group.mcpLogs)))
 			continue
-		}
-		if len(group.logs) > 0 {
-			if err := store.BatchCreateIfNotExists(p.ctx, group.logs); err != nil {
-				p.logger.Warn("batch insert failed for %d entries (tenant=%s), falling back to individual inserts: %v", len(group.logs), tenantID, err)
-				for _, log := range group.logs {
-					if err := store.BatchCreateIfNotExists(p.ctx, []*logstore.Log{log}); err != nil {
-						p.logger.Warn("individual insert failed for log %s (tenant=%s): %v", log.ID, tenantID, err)
-						p.droppedRequests.Add(1)
-					}
-				}
-			}
 		}
 		if len(group.mcpLogs) > 0 {
 			if err := store.BatchCreateMCPToolLogsIfNotExists(p.ctx, group.mcpLogs); err != nil {
@@ -195,38 +180,27 @@ func (p *LoggerPlugin) processBatch(batch []*writeQueueEntry) {
 	// This avoids blocking the batch writer (synchronous was causing 1+ second stalls
 	// during WebSocket broadcast) without creating a goroutine per entry (which caused
 	// goroutine explosion to 13K+).
-	type cbPair struct {
-		cb  func(*logstore.Log)
-		log *logstore.Log
-	}
 	type mcpCbPair struct {
 		cb  func(*logstore.MCPToolLog)
 		log *logstore.MCPToolLog
 	}
-	var callbacks []cbPair
 	var mcpCallbacks []mcpCbPair
 	for _, entry := range batch {
-		if entry.callback != nil {
-			callbacks = append(callbacks, cbPair{cb: entry.callback, log: entry.log})
-		}
 		if entry.mcpCallback != nil {
 			mcpCallbacks = append(mcpCallbacks, mcpCbPair{cb: entry.mcpCallback, log: entry.mcpLog})
 		}
 	}
-	if len(callbacks) > 0 || len(mcpCallbacks) > 0 {
-		go func(callbacks []cbPair, mcpCallbacks []mcpCbPair) {
+	if len(mcpCallbacks) > 0 {
+		go func(mcpCallbacks []mcpCbPair) {
 			defer func() {
 				if r := recover(); r != nil {
 					p.logger.Warn("log callback panicked: %v", r)
 				}
 			}()
-			for _, pair := range callbacks {
-				pair.cb(pair.log)
-			}
 			for _, pair := range mcpCallbacks {
 				pair.cb(pair.log)
 			}
-		}(callbacks, mcpCallbacks)
+		}(mcpCallbacks)
 	}
 }
 

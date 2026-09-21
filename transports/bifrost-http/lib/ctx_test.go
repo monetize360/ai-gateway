@@ -6,7 +6,7 @@ import (
 
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/kvstore"
-	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
@@ -20,7 +20,7 @@ type testHandlerStore struct {
 func (s testHandlerStore) GetHeaderMatcher() *HeaderMatcher                      { return s.matcher }
 func (s testHandlerStore) GetProvidersForModel(_ string) []schemas.ModelProvider { return nil }
 func (s testHandlerStore) GetStreamChunkInterceptor() StreamChunkInterceptor     { return nil }
-func (s testHandlerStore) GetAsyncJobExecutor() *logstore.AsyncJobExecutor       { return nil }
+func (s testHandlerStore) GetAsyncJobExecutor() *asyncjob.Executor                { return nil }
 func (s testHandlerStore) GetAsyncJobResultTTL() int                             { return 0 }
 func (s testHandlerStore) GetKVStore() *kvstore.Store                            { return nil }
 func (s testHandlerStore) GetMCPHeaderCombinedAllowlist() schemas.WhiteList {

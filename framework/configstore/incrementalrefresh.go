@@ -21,6 +21,10 @@ type GovernanceRefreshDelta struct {
 	VirtualKeys                    []tables.TableVirtualKey
 	Budgets                        []tables.TableBudget
 	BudgetUsages                   []tables.TableBudgetUsage
+	Accounts                       []tables.TableAccount
+	Wallets                        []tables.TableWallet
+	OrgUnits                       []tables.TableOrgUnit
+	UserOrgUnits                   []tables.TableUserOrgUnit
 	RateLimits                     []tables.TableRateLimit
 	ModelConfigs                   []tables.TableModelConfig
 	Providers                      []tables.TableProvider
@@ -40,6 +44,10 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
 		len(d.BudgetUsages) == 0 &&
+		len(d.Accounts) == 0 &&
+		len(d.Wallets) == 0 &&
+		len(d.OrgUnits) == 0 &&
+		len(d.UserOrgUnits) == 0 &&
 		len(d.RateLimits) == 0 &&
 		len(d.ModelConfigs) == 0 &&
 		len(d.Providers) == 0 &&
@@ -88,6 +96,42 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 			return nil, fmt.Errorf("budget usages changed since: %w", err)
 		}
 		if err := appendDeletedRowsSince(db, since, &delta.BudgetUsages); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableAccount{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.Accounts).Error; err != nil {
+			return nil, fmt.Errorf("accounts changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.Accounts); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableWallet{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.Wallets).Error; err != nil {
+			return nil, fmt.Errorf("wallets changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.Wallets); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableOrgUnit{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.OrgUnits).Error; err != nil {
+			return nil, fmt.Errorf("org units changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.OrgUnits); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableUserOrgUnit{}) && db.Migrator().HasColumn(&tables.TableUserOrgUnit{}, "org_unit_id") {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.UserOrgUnits).Error; err != nil {
+			return nil, fmt.Errorf("user org units changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.UserOrgUnits); err != nil {
 			return nil, err
 		}
 	}

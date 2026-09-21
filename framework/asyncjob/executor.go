@@ -1,4 +1,4 @@
-package logstore
+package asyncjob
 
 import (
 	"context"
@@ -16,46 +16,55 @@ import (
 )
 
 const (
-	// DefaultAsyncJobResultTTL is the default TTL for async job results in seconds (1 hour).
 	DefaultAsyncJobResultTTL = 3600
-)
 
-const (
 	asyncJobCleanupInterval      = 1 * time.Minute
 	asyncJobCleanupTimeout       = 1 * time.Minute
 	asyncJobStaleProcessingHours = 24
 )
 
-// --- AsyncJobExecutor ---
-
-// AsyncOperation represents a function that can be executed asynchronously.
-// It returns the response and an optional BifrostError.
+// AsyncOperation runs in the background and returns a response or BifrostError.
 type AsyncOperation func(ctx *schemas.BifrostContext) (any, *schemas.BifrostError)
 
-// GovernanceStore is an interface that provides access to the governance store.
+// GovernanceStore looks up virtual keys for job ownership checks.
 type GovernanceStore interface {
 	GetVirtualKey(ctx context.Context, vkValue string) (*configstoreTables.TableVirtualKey, bool)
 }
 
-// AsyncJobExecutor manages async job creation and background execution.
-type AsyncJobExecutor struct {
-	logstore        LogStore
+// Executor manages async job creation and background execution.
+type Executor struct {
+	store           Store
+	resolver        Resolver
 	governanceStore GovernanceStore
 	logger          schemas.Logger
 }
 
-// NewAsyncJobExecutor creates a new AsyncJobExecutor.
-func NewAsyncJobExecutor(logstore LogStore, governanceStore GovernanceStore, logger schemas.Logger) *AsyncJobExecutor {
-	return &AsyncJobExecutor{
-		logstore:        logstore,
+// NewExecutor creates an executor. Provide a single store and/or a tenant resolver.
+func NewExecutor(store Store, resolver Resolver, governanceStore GovernanceStore, logger schemas.Logger) *Executor {
+	return &Executor{
+		store:           store,
+		resolver:        resolver,
 		governanceStore: governanceStore,
 		logger:          logger,
 	}
 }
 
+func (e *Executor) storeFor(ctx context.Context) Store {
+	if e.resolver != nil {
+		if store := e.resolver.GetStoreFromContext(ctx); store != nil {
+			return store
+		}
+	}
+	return e.store
+}
+
 // RetrieveJob retrieves a job by its ID.
-func (e *AsyncJobExecutor) RetrieveJob(ctx context.Context, jobID string, vkValue *string, operationType schemas.RequestType) (*AsyncJob, error) {
-	job, err := e.logstore.FindAsyncJobByID(ctx, jobID)
+func (e *Executor) RetrieveJob(ctx context.Context, jobID string, vkValue *string, operationType schemas.RequestType) (*Job, error) {
+	store := e.storeFor(ctx)
+	if store == nil {
+		return nil, fmt.Errorf("async job store is not configured")
+	}
+	job, err := store.FindByID(ctx, jobID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("job not found or expired")
@@ -81,9 +90,14 @@ func (e *AsyncJobExecutor) RetrieveJob(ctx context.Context, jobID string, vkValu
 }
 
 // SubmitJob creates a pending job, starts background execution, and returns the job record.
-func (e *AsyncJobExecutor) SubmitJob(bifrostCtx *schemas.BifrostContext, resultTTL int, operation AsyncOperation, operationType schemas.RequestType) (*AsyncJob, error) {
+func (e *Executor) SubmitJob(bifrostCtx *schemas.BifrostContext, resultTTL int, operation AsyncOperation, operationType schemas.RequestType) (*Job, error) {
 	if resultTTL <= 0 {
 		resultTTL = DefaultAsyncJobResultTTL
+	}
+
+	store := e.storeFor(bifrostCtx)
+	if store == nil {
+		return nil, fmt.Errorf("async job store is not configured")
 	}
 
 	virtualKeyValue := getVirtualKeyFromContext(bifrostCtx)
@@ -98,8 +112,8 @@ func (e *AsyncJobExecutor) SubmitJob(bifrostCtx *schemas.BifrostContext, resultT
 	}
 
 	now := time.Now().UTC()
-	job := &AsyncJob{
-		ID:           uuid.New().String(),
+	job := &Job{
+		ID:           uuid.NewString(),
 		Status:       schemas.AsyncJobStatusPending,
 		RequestType:  operationType,
 		VirtualKeyID: virtualKeyID,
@@ -107,8 +121,7 @@ func (e *AsyncJobExecutor) SubmitJob(bifrostCtx *schemas.BifrostContext, resultT
 		CreatedAt:    now,
 	}
 
-	ctx := context.Background()
-	if err := e.logstore.CreateAsyncJob(ctx, job); err != nil {
+	if err := store.Create(context.Background(), job); err != nil {
 		return nil, fmt.Errorf("failed to create async job: %w", err)
 	}
 
@@ -116,30 +129,38 @@ func (e *AsyncJobExecutor) SubmitJob(bifrostCtx *schemas.BifrostContext, resultT
 	if bifrostCtx != nil {
 		contextValues = bifrostCtx.GetUserValues()
 	}
-	go e.executeJob(job.ID, job.ResultTTL, operation, contextValues)
+	go e.executeJob(store, job.ID, job.ResultTTL, operation, contextValues)
 
 	return job, nil
 }
 
-// executeJob runs the operation in the background and updates the job record.
-func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation AsyncOperation, contextValues map[any]any) {
+func (e *Executor) executeJob(store Store, jobID string, resultTTL int, operation AsyncOperation, contextValues map[any]any) {
 	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 
-	// Restore original request context values (virtual key, tracing headers, etc.)
 	for k, v := range contextValues {
 		ctx.SetValue(k, v)
 	}
 
-	// Clear trace context inherited from the original HTTP request.
 	ctx.ClearValue(schemas.BifrostContextKeyTraceID)
 	ctx.ClearValue(schemas.BifrostContextKeyParentSpanID)
 	ctx.ClearValue(schemas.BifrostContextKeySpanID)
+
+	updateJob := func(updates map[string]any) error {
+		currentStore := e.storeFor(ctx)
+		if currentStore == nil {
+			currentStore = store
+		}
+		if currentStore == nil {
+			return fmt.Errorf("async job store is not configured")
+		}
+		return currentStore.Update(ctx, jobID, updates)
+	}
 
 	markFailed := func(msg string) {
 		now := time.Now().UTC()
 		expiresAt := now.Add(time.Duration(resultTTL) * time.Second)
 		errJSON, _ := sonic.Marshal(&schemas.BifrostError{Error: &schemas.ErrorField{Message: msg}})
-		if err := e.logstore.UpdateAsyncJob(ctx, jobID, map[string]any{
+		if err := updateJob(map[string]any{
 			"status":       schemas.AsyncJobStatusFailed,
 			"status_code":  fasthttp.StatusInternalServerError,
 			"error":        string(errJSON),
@@ -150,9 +171,6 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 		}
 	}
 
-	// The bifrost execution flow is very stable and panics are not expected.
-	// This recover is purely defensive to ensure the job always reaches a terminal
-	// state rather than being stuck in "processing" if an unexpected panic occurs.
 	defer func() {
 		if r := recover(); r != nil {
 			e.logger.Warn("async job %s panicked: %v", jobID, r)
@@ -160,8 +178,7 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 		}
 	}()
 
-	// Mark as processing
-	if err := e.logstore.UpdateAsyncJob(ctx, jobID, map[string]any{
+	if err := updateJob(map[string]any{
 		"status": schemas.AsyncJobStatusProcessing,
 	}); err != nil {
 		e.logger.Warn("failed to update async job: %v", err)
@@ -169,7 +186,6 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 
 	ctx.SetValue(schemas.BifrostIsAsyncRequest, true)
 
-	// Execute the operation
 	resp, bifrostErr := operation(ctx)
 
 	now := time.Now().UTC()
@@ -186,7 +202,7 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 		if bifrostErr.StatusCode != nil {
 			statusCode = *bifrostErr.StatusCode
 		}
-		if err := e.logstore.UpdateAsyncJob(ctx, jobID, map[string]interface{}{
+		if err := updateJob(map[string]any{
 			"status":       schemas.AsyncJobStatusFailed,
 			"status_code":  statusCode,
 			"error":        string(errJSON),
@@ -204,7 +220,7 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 		markFailed(fmt.Sprintf("failed to serialize result: %v", err))
 		return
 	}
-	if err := e.logstore.UpdateAsyncJob(ctx, jobID, map[string]interface{}{
+	if err := updateJob(map[string]any{
 		"status":       schemas.AsyncJobStatusCompleted,
 		"status_code":  fasthttp.StatusOK,
 		"response":     string(respJSON),
@@ -215,26 +231,24 @@ func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation Asy
 	}
 }
 
-// --- Cleaner ---
-
-// AsyncJobCleaner manages the cleanup of expired async jobs.
-type AsyncJobCleaner struct {
-	store       LogStore
+// Cleaner periodically deletes expired and stale async jobs.
+type Cleaner struct {
+	store       Store
+	resolver    Resolver
 	logger      schemas.Logger
 	stopCleanup chan struct{}
 	mu          sync.Mutex
 }
 
-// NewAsyncJobCleaner creates a new AsyncJobCleaner instance.
-func NewAsyncJobCleaner(store LogStore, logger schemas.Logger) *AsyncJobCleaner {
-	return &AsyncJobCleaner{
-		store:  store,
-		logger: logger,
+func NewCleaner(store Store, resolver Resolver, logger schemas.Logger) *Cleaner {
+	return &Cleaner{
+		store:    store,
+		resolver: resolver,
+		logger:   logger,
 	}
 }
 
-// StartCleanupRoutine starts a goroutine that periodically cleans up expired async jobs.
-func (c *AsyncJobCleaner) StartCleanupRoutine() {
+func (c *Cleaner) StartCleanupRoutine() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -246,7 +260,6 @@ func (c *AsyncJobCleaner) StartCleanupRoutine() {
 	stopCh := c.stopCleanup
 
 	go func() {
-		// Run initial cleanup
 		ctx, cancel := context.WithTimeout(context.Background(), asyncJobCleanupTimeout)
 		c.cleanupExpiredJobs(ctx)
 		cancel()
@@ -268,8 +281,7 @@ func (c *AsyncJobCleaner) StartCleanupRoutine() {
 	c.logger.Debug("async job cleanup routine started (interval: %s)", asyncJobCleanupInterval)
 }
 
-// StopCleanupRoutine gracefully stops the cleanup goroutine.
-func (c *AsyncJobCleaner) StopCleanupRoutine() {
+func (c *Cleaner) StopCleanupRoutine() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -282,30 +294,36 @@ func (c *AsyncJobCleaner) StopCleanupRoutine() {
 	c.stopCleanup = nil
 }
 
-// cleanupExpiredJobs deletes expired async jobs and stale processing jobs.
-func (c *AsyncJobCleaner) cleanupExpiredJobs(ctx context.Context) {
-	deleted, err := c.store.DeleteExpiredAsyncJobs(ctx)
-	if err != nil {
-		c.logger.Warn("failed to delete expired async jobs: %v", err)
-	} else if deleted > 0 {
-		c.logger.Debug("async job cleanup completed: deleted %d expired jobs", deleted)
+func (c *Cleaner) cleanupExpiredJobs(ctx context.Context) {
+	run := func(store Store) {
+		if store == nil {
+			return
+		}
+		deleted, err := store.DeleteExpired(ctx)
+		if err != nil {
+			c.logger.Warn("failed to delete expired async jobs: %v", err)
+		} else if deleted > 0 {
+			c.logger.Debug("async job cleanup completed: deleted %d expired jobs", deleted)
+		}
+
+		staleSince := time.Now().UTC().Add(-asyncJobStaleProcessingHours * time.Hour)
+		staleDeleted, err := store.DeleteStale(ctx, staleSince)
+		if err != nil {
+			c.logger.Warn("failed to delete stale processing async jobs: %v", err)
+		} else if staleDeleted > 0 {
+			c.logger.Warn("async job cleanup: deleted %d stale processing jobs (stuck > %dh)", staleDeleted, asyncJobStaleProcessingHours)
+		}
 	}
 
-	// Clean up jobs stuck in "processing" for more than 24 hours
-	// This handles edge cases like marshal failures or server crashes
-	staleSince := time.Now().UTC().Add(-asyncJobStaleProcessingHours * time.Hour)
-	staleDeleted, err := c.store.DeleteStaleAsyncJobs(ctx, staleSince)
-	if err != nil {
-		c.logger.Warn("failed to delete stale processing async jobs: %v", err)
-	} else if staleDeleted > 0 {
-		c.logger.Warn("async job cleanup: deleted %d stale processing jobs (stuck > %dh)", staleDeleted, asyncJobStaleProcessingHours)
+	if c.resolver != nil {
+		c.resolver.ForEachStore(func(_ string, store Store) {
+			run(store)
+		})
+		return
 	}
+	run(c.store)
 }
 
-// getVirtualKeyFromContext extracts the virtual key value from context.
-// Returns nil if no VK is present (e.g., direct key mode or no governance),
-// or if the context itself is nil (callers like SubmitJob may be invoked with
-// a nil ctx by background paths that don't carry a VK).
 func getVirtualKeyFromContext(ctx *schemas.BifrostContext) *string {
 	if ctx == nil {
 		return nil

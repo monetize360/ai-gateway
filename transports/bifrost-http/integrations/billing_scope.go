@@ -10,40 +10,26 @@ import (
 )
 
 // billingScopeBodyKeys are top-level request body fields (same placement as "model")
-// used for governance budget checks. They are not forwarded to providers.
-var billingScopeBodyKeys = []string{"account_id", "contract_id", "user_id"}
+// used for optional user BudgetUsage checks. They are not forwarded to providers.
+// billingAccountRef for InferenceUsage is resolved from the VK org's leaf Account.external_id.
+var billingScopeBodyKeys = []string{"user_id"}
 
-// stampBillingScopeIDsFromBody reads optional top-level account_id / contract_id / user_id
-// from the JSON body (or multipart form fields) and stores them on the Bifrost context.
-// Missing values are left unset so PreLLM skips those budget checks.
+// stampBillingScopeIDsFromBody reads optional top-level user_id from the JSON body
+// (or multipart form fields) and stores it on the Bifrost context for user BudgetUsage checks.
 func stampBillingScopeIDsFromBody(bifrostCtx *schemas.BifrostContext, fasthttpCtx *fasthttp.RequestCtx, rawBody []byte) {
 	if bifrostCtx == nil {
 		return
 	}
 
-	accountID := billingScopeStringFromBody(rawBody, "account_id")
-	contractID := billingScopeStringFromBody(rawBody, "contract_id")
 	userID := billingScopeStringFromBody(rawBody, "user_id")
 
 	// Multipart / form-encoded requests (e.g. audio) may carry the same fields as form values.
 	if fasthttpCtx != nil {
-		if accountID == "" {
-			accountID = strings.TrimSpace(string(fasthttpCtx.FormValue("account_id")))
-		}
-		if contractID == "" {
-			contractID = strings.TrimSpace(string(fasthttpCtx.FormValue("contract_id")))
-		}
 		if userID == "" {
 			userID = strings.TrimSpace(string(fasthttpCtx.FormValue("user_id")))
 		}
 	}
 
-	if accountID != "" {
-		bifrostCtx.SetValue(schemas.BifrostContextKeyAccountID, accountID)
-	}
-	if contractID != "" {
-		bifrostCtx.SetValue(schemas.BifrostContextKeyContractID, contractID)
-	}
 	if userID != "" {
 		bifrostCtx.SetValue(schemas.BifrostContextKeyBillingUserID, userID)
 	}
@@ -64,6 +50,17 @@ func stripBillingScopeIDsFromBody(rawBody []byte) []byte {
 	}
 	out := rawBody
 	for _, key := range billingScopeBodyKeys {
+		if !gjson.GetBytes(out, key).Exists() {
+			continue
+		}
+		next, err := sjson.DeleteBytes(out, key)
+		if err != nil {
+			continue
+		}
+		out = next
+	}
+	// Also strip legacy account_id / contract_id if a client still sends them.
+	for _, key := range []string{"account_id", "contract_id"} {
 		if !gjson.GetBytes(out, key).Exists() {
 			continue
 		}
