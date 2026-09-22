@@ -540,7 +540,7 @@ Decision model IDs in the sidecar/plugin recipe must match Bifrost `provider/mod
 **Local validation** (in-process plugin, no Docker):
 
 1. Enable the `semantic-router` plugin with `recipe_file` pointing at `plugins/governance/vllm_sr/config.yaml`
-2. Set governance `semantic_routing.router.mode` to `plugin` (see [examples/governance/semantic-routing.local.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.local.json))
+2. Set governance `semantic_routing.router.mode` to `plugin`
 3. Hit Bifrost with a VK; logs should show `2/route: plugin response` / `layer2 selected=...`
 
 **Optional HTTP sidecar** (rollback; management API, typically `:18080`):
@@ -556,7 +556,7 @@ Decision model IDs in the sidecar/plugin recipe must match Bifrost `provider/mod
 2. For HTTP mode, set `router.base_url` to the internal service URL; inject `router.api_key` via secrets
 3. Prefer `action: "semantic"` routing rules (`default_for_all: false`) and inline `model_overrides`
 4. Keep `timeout_ms` sized for your SLO (HTTP mode); monitor decline / circuit-open rates in logs (`2/route: layer2 failed`, `declining semantic rewrite`, `circuit open`)
-5. Sample shapes: [examples/governance/semantic-routing.local.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.local.json) (plugin) and [examples/governance/semantic-routing.prod.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.prod.json) (HTTP)
+5. Plugin mode uses `router.mode=plugin`; HTTP sidecar mode uses `router.mode=http` plus `router.base_url`
 
 `classes` / `default_class` are optional preference lists used when ranking VK-pool models
 alongside a vLLM-SR recommendation. They are not a standalone Layer 2 router.
