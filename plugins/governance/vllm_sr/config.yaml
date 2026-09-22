@@ -1,0 +1,629 @@
+version: v0.3
+
+# Embedded Semantic Router recipe for Nemotron models (+ screenshot catalog).
+# Bifrost performs generation. These loopback backends only satisfy the
+# canonical Semantic Router registry and are never dispatched by Preview.
+providers:
+  defaults:
+    model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  models:
+    - name: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      provider_model_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    # The SR catalog currently describes the BF16 deployment of this logical
+    # model. Keep the runtime card explicit for the NVFP4 variant.
+    - name: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+      provider_model_id: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    # Screenshot catalog models. The three aliases marked "deployed" are
+    # currently exposed by this Bifrost tenant. The remaining aliases are
+    # routing-ready and become dispatchable when matching provider configs are
+    # added to the virtual-key pool.
+    - name: fakellm-openai/gpt-4o
+      provider_model_id: gpt-4o
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: nvidia/nemotron-ultra
+      provider_model_id: nvidia/nemotron-ultra
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: gemini/gemini-3.5-flash-lite
+      provider_model_id: gemini-3.5-flash-lite
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    # Deployed fallbacks present in the Developer User virtual-key pool.
+    - name: gemini/gemini-2.5-pro
+      provider_model_id: gemini-2.5-pro
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: gemini/gemini-2.5-flash
+      provider_model_id: gemini-2.5-flash
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: gemini/gemini-2.5-flash-lite
+      provider_model_id: gemini-2.5-flash-lite
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: anthropic/claude-3.5-sonnet
+      provider_model_id: claude-3-5-sonnet
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: fakellm-qwen/qwen2.5-72b-instruct
+      provider_model_id: qwen2.5-72b-instruct
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: qwen/qwen2.5-vl-72b-instruct
+      provider_model_id: Qwen/Qwen2.5-VL-72B-Instruct
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: meta/llama-3.1-70b-instruct
+      provider_model_id: meta-llama/Llama-3.1-70B-Instruct
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: mistral/mistral-small-3
+      provider_model_id: mistralai/Mistral-Small-3
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: meta/llama-3.1-70b-instruct-int4
+      provider_model_id: meta-llama/Llama-3.1-70B-Instruct-INT4
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: deepseek/deepseek-r1-distill-32b
+      provider_model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: google/gemma-2-27b
+      provider_model_id: google/gemma-2-27b-it
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: microsoft/phi-4-14b
+      provider_model_id: microsoft/phi-4
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: meta/llama-3.1-8b-instruct
+      provider_model_id: meta-llama/Llama-3.1-8B-Instruct
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+    - name: aifactory/factory-embed-3
+      provider_model_id: aifactory/factory-embed-3
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+routing:
+  strategy: priority
+  candidate_requirements:
+    capabilities: declared
+
+  modelCards:
+    - name: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      description: Frontier text model for hard reasoning and agentic work.
+      modality: text
+      context_window_size: 1048576
+      capabilities: [chat, reasoning, tools, structured_output, long_context]
+      tags: [tier:frontier, cost:highest]
+
+    - name: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+      description: Efficient text reasoning model for tools and structured output.
+      modality: text
+      context_window_size: 1048576
+      capabilities: [chat, reasoning, tools, structured_output, long_context]
+      tags: [tier:balanced, latency:fast]
+
+    - name: fakellm-openai/gpt-4o
+      description: Premium multimodal model for general, tool, and image workloads.
+      modality: omni
+      context_window_size: 131072
+      capabilities: [chat, reasoning, tools, structured_output, vision]
+      tags: [tier:premium, quality:9.2, throughput:2500]
+
+    - name: nvidia/nemotron-ultra
+      description: High-throughput NVIDIA text model for quality-sensitive traffic.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, reasoning, tools, structured_output]
+      tags: [tier:frontier, quality:9.2, throughput:14000]
+
+    - name: gemini/gemini-3.5-flash-lite
+      description: Fast economical multimodal model with a one-million-token context.
+      modality: omni
+      context_window_size: 1048576
+      capabilities: [chat, tools, structured_output, vision, audio, long_context]
+      tags: [tier:fast, quality:9.0, throughput:10000]
+
+    - name: gemini/gemini-2.5-pro
+      description: Deployed high-quality Gemini fallback for reasoning, code, tools, and vision.
+      modality: omni
+      context_window_size: 1048576
+      capabilities: [chat, reasoning, tools, structured_output, vision, audio, long_context]
+      tags: [tier:premium, deployed]
+
+    - name: gemini/gemini-2.5-flash
+      description: Deployed balanced Gemini fallback for general, tool, and multimodal traffic.
+      modality: omni
+      context_window_size: 1048576
+      capabilities: [chat, reasoning, tools, structured_output, vision, audio, long_context]
+      tags: [tier:balanced, deployed]
+
+    - name: gemini/gemini-2.5-flash-lite
+      description: Deployed low-cost Gemini fallback for simple and general traffic.
+      modality: omni
+      context_window_size: 1048576
+      capabilities: [chat, tools, structured_output, vision, audio, long_context]
+      tags: [tier:fast, deployed]
+
+    - name: anthropic/claude-3.5-sonnet
+      description: Strong reasoning and coding model with image understanding.
+      modality: omni
+      context_window_size: 204800
+      capabilities: [chat, reasoning, tools, structured_output, vision, long_context]
+      tags: [tier:premium, quality:9.0, throughput:1800]
+
+    - name: fakellm-qwen/qwen2.5-72b-instruct
+      description: Balanced general and coding model with multilingual strength.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, tools, structured_output, long_context]
+      tags: [tier:balanced, quality:9.0, throughput:6000]
+
+    - name: qwen/qwen2.5-vl-72b-instruct
+      description: Vision-language model for image and video understanding.
+      modality: omni
+      context_window_size: 131072
+      capabilities: [chat, reasoning, structured_output, vision, video, long_context]
+      tags: [tier:balanced, quality:8.8, throughput:3800]
+
+    - name: meta/llama-3.1-70b-instruct
+      description: General-purpose open-weight model for text and coding traffic.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, tools, structured_output, long_context]
+      tags: [tier:balanced, quality:8.7, throughput:6400]
+
+    - name: mistral/mistral-small-3
+      description: Compact economical model for ordinary text traffic.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, tools, structured_output, long_context]
+      tags: [tier:small, quality:8.6, throughput:9500]
+
+    - name: meta/llama-3.1-70b-instruct-int4
+      description: Quantized Llama 70B deployment for efficient general traffic.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, tools, structured_output, long_context]
+      tags: [tier:balanced, quantization:int4, quality:8.5, throughput:12000]
+
+    - name: deepseek/deepseek-r1-distill-32b
+      description: Economical distilled reasoning model for math and code analysis.
+      modality: text
+      context_window_size: 65536
+      capabilities: [chat, reasoning, structured_output]
+      tags: [tier:reasoning-economy, quality:8.5, throughput:11000]
+
+    - name: google/gemma-2-27b
+      description: Inexpensive mid-size text model for ordinary short requests.
+      modality: text
+      context_window_size: 32768
+      capabilities: [chat]
+      tags: [tier:small, quality:8.1, throughput:8200]
+
+    - name: microsoft/phi-4-14b
+      description: Compact reasoning model for STEM questions with small inputs.
+      modality: text
+      context_window_size: 16384
+      capabilities: [chat, reasoning]
+      tags: [tier:small, quality:7.9, throughput:16000]
+
+    - name: meta/llama-3.1-8b-instruct
+      description: Small fast model for simple questions and summaries.
+      modality: text
+      context_window_size: 131072
+      capabilities: [chat, long_context]
+      tags: [tier:small, quality:7.8, throughput:22000]
+
+    - name: aifactory/factory-embed-3
+      description: Embedding-only model; intentionally excluded from chat decisions.
+      modality: text
+      context_window_size: 8192
+      capabilities: [embeddings]
+      tags: [tier:embedding, quality:8.9, throughput:60000]
+
+  # Learned complexity/domain/embedding classifiers are not bound here. They
+  # need Candle artifacts (Vela encoder + domain mapping). Without those,
+  # declaring them would fail plugin startup. Heuristic signals below cover
+  # mixed traffic until those artifacts are mounted.
+  signals:
+    keywords:
+      - name: simple_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - quick answer
+          - answer briefly
+          - one sentence
+          - simple explanation
+          - briefly define
+          - summarize briefly
+          - what is
+          - what's
+          - whats
+          - who is
+          - when was
+          - how many
+          - define
+          - meaning of
+          - capital of
+
+      - name: code_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - \bcode\b
+          - \bfunction\b
+          - \bimplement\b
+          - \bdebug\b
+          - \brefactor\b
+          - \bapi\b
+          - \bsql\b
+          - \bpython\b
+          - \bjava\b
+          - \bgolang\b
+          - \bgo\b
+          - \btypescript\b
+          - \bjavascript\b
+          - \brust\b
+          - \bkubernetes\b
+          - \bdocker\b
+          - \balgorithm\b
+          - \bbug\b
+          - stack trace
+          - unit test
+          - \bsnippet\b
+          - \bclass\b
+          - \bmethod\b
+          - compile error
+
+      - name: deep_reasoning_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - step by step
+          - \bprove\b
+          - \bproof\b
+          - \btheorem\b
+          - \blemma\b
+          - \bderive\b
+          - \brigorous\b
+          - root cause
+          - first principles
+          - compare trade-offs
+          - compare tradeoffs
+          - trade-off
+          - distributed system
+          - system architecture
+          - design a system
+          - \bintegral\b
+          - \bproof by\b
+          - by contradiction
+          - asymptotic
+          - time complexity
+          - \bO\(n
+          - analyze the
+          - evaluate the
+          - why does
+
+      - name: agentic_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - use tools
+          - function call
+          - tool call
+          - \bagent\b
+          - multi-step
+          - \bworkflow\b
+          - \bplan and execute\b
+          - orchestrat
+
+    conversation:
+      - name: has_tools
+        description: Request includes at least one tool definition.
+        feature:
+          type: exists
+          source:
+            type: tool_definition
+      - name: multi_turn
+        description: Follow-up conversation with more than one user turn.
+        feature:
+          type: count
+          source:
+            type: message
+            role: user
+        predicate:
+          gte: 2
+
+    context:
+      # Governance currently bounds preview text near 8K characters. This
+      # threshold identifies the large-input lane within that preview envelope;
+      # Governance remains authoritative for the full request context fit.
+      - name: long_context
+        min_tokens: "1500"
+        max_tokens: "1M"
+        description: A large request that needs substantial context headroom.
+
+    input_modality:
+      - name: image_input
+        description: Request contains an image content part.
+        modality: image
+      - name: video_input
+        description: Request contains a video content part.
+        modality: video
+
+  # Ordering invariant: every lane leads with a different model so each card is
+  # reachable as a primary selection. Lightning leads only the catch-all
+  # (general), matching providers.defaults.model. Remaining modelRefs stay as
+  # ordered fallbacks for when the leader is absent from the virtual-key pool.
+  decisions:
+    - name: video
+      description: Rank the declared video-understanding models.
+      priority: 600
+      rules:
+        operator: AND
+        conditions:
+          - type: input_modality
+            name: video_input
+      modelRefs:
+        - model: qwen/qwen2.5-vl-72b-instruct
+      algorithm:
+        type: static
+
+    - name: vision
+      description: Rank the image-capable models.
+      priority: 550
+      rules:
+        operator: AND
+        conditions:
+          - type: input_modality
+            name: image_input
+      modelRefs:
+        - model: fakellm-openai/gpt-4o
+        - model: gemini/gemini-3.5-flash-lite
+        - model: anthropic/claude-3.5-sonnet
+        - model: qwen/qwen2.5-vl-72b-instruct
+        - model: gemini/gemini-2.5-pro
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        # Embedded Preview has no live provider telemetry. Static here means
+        # deterministic preference plus the remaining modelRefs as fallbacks.
+        type: static
+
+    - name: deep-reasoning
+      description: Prefer frontier quality for proofs, root-cause analysis, math, and architecture.
+      priority: 500
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: deep_reasoning_request
+      modelRefs:
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+          use_reasoning: true
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          use_reasoning: true
+        - model: anthropic/claude-3.5-sonnet
+          use_reasoning: true
+        - model: nvidia/nemotron-ultra
+          use_reasoning: true
+        - model: deepseek/deepseek-r1-distill-32b
+          use_reasoning: true
+        - model: microsoft/phi-4-14b
+          use_reasoning: true
+        - model: gemini/gemini-2.5-pro
+          use_reasoning: true
+        - model: gemini/gemini-2.5-flash
+          use_reasoning: true
+      algorithm:
+        type: static
+
+    - name: tools
+      description: Tool-calling and agentic requests need models that declared tools.
+      priority: 480
+      rules:
+        operator: OR
+        conditions:
+          - type: conversation
+            name: has_tools
+          - type: keyword
+            name: agentic_request
+      # Agentic loops issue many short calls, so the highest-throughput card
+      # that still declares tools leads. Lightning remains the balanced backup.
+      modelRefs:
+        - model: nvidia/nemotron-ultra
+        - model: fakellm-openai/gpt-4o
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+          use_reasoning: true
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - model: anthropic/claude-3.5-sonnet
+        - model: gemini/gemini-3.5-flash-lite
+        - model: fakellm-qwen/qwen2.5-72b-instruct
+        - model: gemini/gemini-2.5-pro
+          use_reasoning: true
+        - model: gemini/gemini-2.5-flash
+          use_reasoning: true
+      algorithm:
+        type: static
+
+    - name: code
+      description: Rank capable coding models rather than pinning one model.
+      priority: 450
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: code_request
+      # Leads with the card whose datasheet claims coding strength; the
+      # distilled reasoning model covers cheaper math/code analysis below it.
+      modelRefs:
+        - model: anthropic/claude-3.5-sonnet
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+        - model: deepseek/deepseek-r1-distill-32b
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - model: fakellm-qwen/qwen2.5-72b-instruct
+        - model: meta/llama-3.1-70b-instruct
+        - model: gemini/gemini-2.5-pro
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        type: static
+
+    - name: long-context
+      description: Rank long-context models for large requests.
+      priority: 400
+      rules:
+        operator: AND
+        conditions:
+          - type: context
+            name: long_context
+      # Large inputs are cost-sensitive, so the economical million-token card
+      # leads; the 1M-context Nemotron pair follows for reasoning-heavy bulk.
+      modelRefs:
+        - model: gemini/gemini-3.5-flash-lite
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - model: gemini/gemini-2.5-pro
+        - model: anthropic/claude-3.5-sonnet
+        - model: gemini/gemini-2.5-flash
+        - model: gemini/gemini-2.5-flash-lite
+      algorithm:
+        type: static
+
+    - name: simple
+      description: Short factual or explicitly simple text stays on the smallest model.
+      priority: 300
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: simple_request
+          - operator: NOT
+            conditions:
+              - type: conversation
+                name: multi_turn
+      modelRefs:
+        - model: meta/llama-3.1-8b-instruct
+        - model: microsoft/phi-4-14b
+        - model: google/gemma-2-27b
+        - model: mistral/mistral-small-3
+        - model: gemini/gemini-3.5-flash-lite
+        - model: gemini/gemini-2.5-flash-lite
+        - model: gemini/gemini-2.5-flash
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      algorithm:
+        type: static
+
+    - name: general
+      description: Ordinary text, including multi-turn chat, on efficient capable models.
+      priority: 100
+      rules:
+        operator: AND
+        conditions: []
+      modelRefs:
+        - model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+        - model: gemini/gemini-3.5-flash-lite
+        - model: mistral/mistral-small-3
+        - model: nvidia/nemotron-ultra
+        - model: fakellm-qwen/qwen2.5-72b-instruct
+        - model: meta/llama-3.1-70b-instruct-int4
+        - model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - model: gemini/gemini-2.5-flash-lite
+        - model: gemini/gemini-2.5-flash
+        - model: gemini/gemini-2.5-pro
+      algorithm:
+        type: static
+
+global:
+  router:
+    auto_model_names: [vllm-sr/auto]
+    model_selection:
+      enabled: true

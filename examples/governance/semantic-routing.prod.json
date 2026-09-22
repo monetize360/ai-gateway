@@ -8,6 +8,7 @@
       "default_for_all": false,
       "default_class": "Other",
       "router": {
+        "mode": "http",
         "base_url": "http://vllm-sr-mgmt.internal:8080",
         "preview_path": "/api/v1/routing/preview",
         "entrypoint": "vllm-sr/auto",

@@ -71,32 +71,15 @@ func TestUnmarshalJSON_LegacyVirtualKeyScope(t *testing.T) {
 	assert.Nil(t, rule.ScopeOrgID)
 }
 
-func TestNormalizeRoutingAction(t *testing.T) {
-	pin, err := NormalizeRoutingAction("")
-	require.NoError(t, err)
-	assert.Equal(t, RoutingRuleActionPin, pin)
-
-	pin, err = NormalizeRoutingAction("PIN")
-	require.NoError(t, err)
-	assert.Equal(t, RoutingRuleActionPin, pin)
-
-	semantic, err := NormalizeRoutingAction("semantic")
-	require.NoError(t, err)
-	assert.Equal(t, RoutingRuleActionSemantic, semantic)
-
-	_, err = NormalizeRoutingAction("weighted")
-	require.Error(t, err)
+func TestSemanticRoutingCELExpression(t *testing.T) {
+	assert.True(t, IsSemanticRoutingCELExpression("semantic_routing"))
+	assert.True(t, IsSemanticRoutingCELExpression(" Semantic_Routing "))
+	assert.False(t, IsSemanticRoutingCELExpression("true"))
+	assert.False(t, IsSemanticRoutingCELExpression("budget_used >= 50"))
 }
 
-func TestValidateSemanticActionRejectsChainRule(t *testing.T) {
-	assert.NoError(t, ValidateSemanticAction(RoutingRuleActionPin, true))
-	assert.NoError(t, ValidateSemanticAction(RoutingRuleActionSemantic, false))
-	assert.Error(t, ValidateSemanticAction(RoutingRuleActionSemantic, true))
-}
-
-func TestActionValueDefaultsToPin(t *testing.T) {
-	assert.Equal(t, RoutingRuleActionPin, (*TableRoutingRule)(nil).ActionValue())
-	assert.Equal(t, RoutingRuleActionPin, (&TableRoutingRule{}).ActionValue())
-	assert.True(t, (&TableRoutingRule{Action: RoutingRuleActionSemantic}).IsSemanticAction())
-	assert.False(t, (&TableRoutingRule{}).IsSemanticAction())
+func TestValidateSemanticRoutingRejectsChainRule(t *testing.T) {
+	assert.NoError(t, ValidateSemanticRouting("budget_used >= 50", true))
+	assert.NoError(t, ValidateSemanticRouting(CelExpressionSemanticRouting, false))
+	assert.Error(t, ValidateSemanticRouting(CelExpressionSemanticRouting, true))
 }

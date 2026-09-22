@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -9,11 +10,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadGeminiPOCModelOverridesFile(t *testing.T) {
-	path := filepath.Join("poc", "gemini-model-routing.json")
+func TestLoadModelOverridesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "overrides.json")
+	raw := `{
+  "models": {
+    "gemini/gemini-2.5-pro": {
+      "display_name": "Gemini 2.5 Pro",
+      "vendor": "Google",
+      "category": "Reasoning, flagship",
+      "context_window": "Up to 1M tokens",
+      "capability_tier": "flagship",
+      "supports_reasoning": true,
+      "status": "live",
+      "categories": ["Code Generation"]
+    },
+    "gemini/gemini-2.5-flash-lite": {
+      "capability_tier": "small",
+      "supports_reasoning": false
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+
 	overrides, err := loadModelOverridesFile(path)
 	require.NoError(t, err)
-	require.Len(t, overrides, 4)
+	require.Len(t, overrides, 2)
 
 	pro, ok := overrides["gemini/gemini-2.5-pro"]
 	require.True(t, ok)
@@ -33,9 +54,6 @@ func TestLoadGeminiPOCModelOverridesFile(t *testing.T) {
 	assert.Equal(t, "small", flashLite.CapabilityTier)
 	require.NotNil(t, flashLite.SupportsReasoning)
 	assert.False(t, *flashLite.SupportsReasoning)
-
-	_, ok = overrides["gemini/gemini-2.0-flash"]
-	assert.True(t, ok)
 }
 
 func TestMergeModelOverridesInlineWins(t *testing.T) {

@@ -102,6 +102,20 @@ customer_id == "acme-corp"
 virtual_key_name.startsWith("prod-")
 ```
 
+#### Monetize360 Token Optimization Rules
+
+In Monetize360 (**Tokenomics Config → Token Optimization Rules**), the same Bifrost contract is configured as a **GovernanceRoutingRule**:
+
+| Monetize field | Bifrost / DB |
+|----------------|--------------|
+| Query (AND/OR builder) | `cel_expression` (+ `query` JSON) — *when* the rule matches |
+| **Selection** (`pin` \| `semantic`) | `action` — *what* happens on match |
+| Scope Organization | `scope_org_id` (mutually exclusive with Virtual Key Id) |
+| Virtual Key Id | `virtual_key_id` |
+| Provider / Model | `provider` / `model` (empty when Selection is Semantic) |
+
+**Selection = Semantic** hands matching org-scoped traffic to Layer 1 (VK / org pool) + Layer 2 Preview. Do not encode Semantic as a CEL string — Query stays boolean match only. Org hierarchy still uses Scope Organization (VK → org ancestors → global). Pin rules at higher precedence still win and skip semantic.
+
 #### Capacity Metrics (as percentages: 0-100)
 ```cel
 budget_used      // Budget usage percentage for provider/model (0.0 to 100.0)
@@ -257,7 +271,7 @@ Access routing rules from the dashboard:
 - **Description** (optional): Internal notes
 - **Enabled**: Toggle rule on/off
 - **Chain Rule**: When enabled, the routing engine re-evaluates all rules after this one matches, using the resolved provider/model as the new context. See [Rule Chaining](#rule-chaining). Not available when Selection is Semantic.
-- **Selection**: **Pin provider/model** (default) writes a specific target when CEL matches. **Semantic** picks a capable model from the intersection of the virtual key's allowlist and org/provider access policy (the same checks PreLLMHook enforces). Layer 1 extracts the request profile (modalities, tools, context size) and hard-filters the pool. When configured, Layer 2 calls vLLM-SR preview and intersects its recommendation with that filtered pool. Router failures, out-of-pool answers, or an unset router decline the rewrite (the incoming model is kept). The caller's requested provider/model does not bias selection when a rewrite commits. Semantic is not the default — a rule must set `action: "semantic"`, or `default_for_all` must be true.
+- **Selection**: **Pin provider/model** (default) writes a specific target when CEL matches. **Semantic** enumerates the models associated with the virtual key after org/provider access checks, then calls Layer 2 with the request. Bifrost intersects the selected and recommended models with that VK pool and only then applies hard catalog/capability validation (modality, tools, context size, and request type) before committing. Layer 2 is therefore still observable when a VK model is missing catalog metadata, while unsafe recommendations remain blocked from inference. Router failures, out-of-pool answers, or an unset router decline the rewrite (the incoming model is kept). The caller's requested provider/model does not bias selection when a rewrite commits. Semantic is not the default — a rule must set `action: "semantic"`, or `default_for_all` must be true.
 - **CEL Expression**: Visual or manual expression builder
 - **Targets** (required): One or more weighted routing targets - each has Provider (optional), Model (optional), API Key (optional, requires Provider to be set), and Weight (%). Weights must sum to 1. When multiple targets are defined, one is selected probabilistically at request time.
 - **Fallbacks** (optional): Array of fallback providers
@@ -443,7 +457,7 @@ Define routing rules in your `config.json` file under the governance configurati
 - **scope_id** (string, optional): ID of scoped entity (null for global scope)
 - **priority** (number): Rule evaluation order within scope (lower = evaluated first)
 
-**Semantic selection example** — CEL still decides when the rule fires; Layer 1 filters the virtual key pool, then vLLM-SR preview picks a model from that pool:
+**Semantic selection example** — CEL still decides when the rule fires; governance enumerates the virtual-key pool, Layer 2 returns its selected and recommended models, and governance then intersects and capability-validates the result:
 
 ```json
 {
@@ -460,15 +474,20 @@ Define routing rules in your `config.json` file under the governance configurati
   },
   "plugins": [
     {
+      "name": "semantic-router",
+      "enabled": true,
+      "config": {
+        "recipe_file": "plugins/governance/vllm_sr/config.yaml",
+        "entrypoint": "vllm-sr/auto"
+      }
+    },
+    {
       "name": "governance",
       "config": {
         "semantic_routing": {
           "enabled": true,
           "router": {
-            "base_url": "http://127.0.0.1:18080",
-            "preview_path": "/api/v1/routing/preview",
-            "entrypoint": "vllm-sr/auto",
-            "timeout_ms": 2000
+            "mode": "plugin"
           },
           "model_overrides": {
             "openai/gpt-4o": {
@@ -485,57 +504,66 @@ Define routing rules in your `config.json` file under the governance configurati
 }
 ```
 
-When `router.base_url` is configured, Layer 2 calls the vLLM-SR routing preview API synchronously.
-The request contains the configured entrypoint and OpenAI-style messages. The preview endpoint does
-not accept `eligible_models`, so Bifrost intersects `selected_model` and `recommended_models` with
-the Layer 1 capability-filtered pool before committing. Unknown or out-of-pool model IDs are dropped.
-If the router times out, returns an error, leaves no eligible recommendation, or is unset,
-Bifrost declines the rewrite and keeps the incoming model. There is no local keyword/lexical
-Layer 2. The router's `timeout_ms` applies to the HTTP call separately from the 10ms local-work
-budget. The deprecated `classifier` config block is ignored.
+When `router.mode` is `plugin` (or `mode` is omitted and the `semantic-router` plugin is loaded),
+Layer 2 runs **in-process**: the semantic-router plugin evaluates the recipe YAML (keyword BM25,
+context, input modality, decision priority) and returns the same fields as the HTTP preview
+(`selected_model`, `candidates`, `selection_status`, …). No Docker sidecar is required.
+
+When `router.mode` is `http` and `router.base_url` is configured, Layer 2 calls the vLLM-SR routing
+preview API synchronously. The request contains the configured entrypoint and OpenAI-style messages.
+The preview endpoint does not accept `eligible_models`, so Bifrost intersects `selected_model` and
+`recommended_models` with the virtual-key pool, then capability-validates the intersected result
+before committing. Unknown or out-of-pool model IDs are dropped. If the router times out, returns an error, leaves no eligible
+recommendation, or is unset, Bifrost declines the rewrite and keeps the incoming model. The
+router's `timeout_ms` applies to the HTTP call separately from the 10ms local-work budget (plugin
+mode stays within the local budget). The deprecated `classifier` config block is ignored.
 
 Attachment parts are forwarded with their payloads replaced by short markers, so the router's
 `input_modality` signals can fire without inline base64 media crossing the wire. Message text is
-truncated at 8000 characters, which caps what the router's `context` signals can observe — Layer 1
-remains authoritative for whether a model's context window actually fits the request.
+truncated at 8000 characters, which caps what the router's `context` signals can observe — the
+post-router capability filter remains authoritative for whether a model's context window fits.
 
 The router only differentiates prompts if its own config defines signals and more than one decision.
 A recipe with a single catch-all decision returns the same model for every request: `multi_factor`
 runs with `quality_disabled=true` when no quality index is loaded, and without live telemetry all
 candidates tie, so `modelRefs` order decides. When the router's first choice is absent from the
-Layer 1 pool, Bifrost uses the next recommendation from the same decision and logs the substitution
+VK pool, Bifrost uses the next recommendation from the same decision and logs the substitution
 at `2/route`.
 
-Prefer **inline `model_overrides`** (or catalog DB fields) in production. `model_overrides_file` is
-for local/PoC catalogs and should use a path relative to the process working directory / `-app-dir`.
-Decision model IDs in the sidecar must match Bifrost `provider/model` allowlist strings.
+Prefer **inline `model_overrides`** (or catalog DB fields) when you need ranking metadata overlays.
+`model_overrides_file` is optional and is not required for in-process `semantic-router` plugin mode —
+the plugin recipe (`recipe_file`) is the Layer 2 source of truth.
+Decision model IDs in the sidecar/plugin recipe must match Bifrost `provider/model` allowlist strings.
 
 ### Local vs production runbooks
 
-**Local validation** (loopback management API on `:18080`):
+**Local validation** (in-process plugin, no Docker):
 
-1. Start Docker Desktop, then `cd plugins/governance/poc/vllm_sr && ./start.sh`
+1. Enable the `semantic-router` plugin with `recipe_file` pointing at `plugins/governance/vllm_sr/config.yaml`
+2. Set governance `semantic_routing.router.mode` to `plugin` (see [examples/governance/semantic-routing.local.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.local.json))
+3. Hit Bifrost with a VK; logs should show `2/route: plugin response` / `layer2 selected=...`
+
+**Optional HTTP sidecar** (rollback; management API, typically `:18080`):
+
+1. Start a vLLM-SR management API yourself if you need `router.mode=http`
 2. `curl -sS http://127.0.0.1:18080/ready`
-3. Merge [examples/governance/semantic-routing.local.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.local.json) into the governance plugin config (`router.base_url=http://127.0.0.1:18080`)
+3. Set `router.mode=http` and `router.base_url=http://127.0.0.1:18080`
 4. Hit Bifrost with a VK; logs should show `2/route: vllm-sr selected=...`
-5. Optional sidecar-only debug: Postman collection in `plugins/governance/poc/vllm_sr/postman.json`
-
-See also `plugins/governance/poc/README.md`.
 
 **Production**:
 
-1. Deploy the vLLM-SR management API; use the checklist in `plugins/governance/poc/vllm_sr/PROD-CHECKLIST.md`
-2. Set `router.base_url` to the internal service URL; inject `router.api_key` via secrets
+1. Prefer in-process: deploy with the `semantic-router` plugin + `router.mode=plugin`, or deploy the vLLM-SR management API with `router.mode=http`
+2. For HTTP mode, set `router.base_url` to the internal service URL; inject `router.api_key` via secrets
 3. Prefer `action: "semantic"` routing rules (`default_for_all: false`) and inline `model_overrides`
-4. Keep `timeout_ms` sized for your SLO; monitor decline / circuit-open rates in logs (`2/route: vllm-sr failed`, `declining semantic rewrite`, `circuit open`)
-5. Sample shape: [examples/governance/semantic-routing.prod.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.prod.json)
+4. Keep `timeout_ms` sized for your SLO (HTTP mode); monitor decline / circuit-open rates in logs (`2/route: layer2 failed`, `declining semantic rewrite`, `circuit open`)
+5. Sample shapes: [examples/governance/semantic-routing.local.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.local.json) (plugin) and [examples/governance/semantic-routing.prod.json](https://github.com/maximhq/bifrost/blob/main/examples/governance/semantic-routing.prod.json) (HTTP)
 
-`classes` / `default_class` are optional preference lists used when ranking L1 survivors
+`classes` / `default_class` are optional preference lists used when ranking VK-pool models
 alongside a vLLM-SR recommendation. They are not a standalone Layer 2 router.
 
 **Default for all (`default_for_all`)** — When `semantic_routing.enabled` and `default_for_all` are both true, every request that carries a virtual key enters semantic selection after CEL **unless** a pin rule matched. You do not need a per-VK `action: "semantic"` rule or an `x-semantic-route` header. Pin rules (for example Token-Limits) still override. Opt out of a single request with `x-bf-disable-semantic-routing`. Semantic still requires a virtual key; without one, the incoming model is kept.
 
-**Omitted `model`** — Additional trigger only. If the request has a virtual key, semantic routing is enabled, no pin matched, and the body has no `model` (OpenAI-style JSON; Gemini/Bedrock path models still count as present), the same Layer 1 filter + Layer 2 router/ranker runs even when `default_for_all` is false. Pin, CEL `action: "semantic"`, and `default_for_all` are unchanged. If selection cannot commit, the handler still returns `model is required`.
+**Omitted `model`** — Additional trigger only. If the request has a virtual key, semantic routing is enabled, no pin matched, and the body has no `model` (OpenAI-style JSON; Gemini/Bedrock path models still count as present), the same VK-pool lookup + Layer 2 router + post-router capability validation runs even when `default_for_all` is false. Pin, CEL `action: "semantic"`, and `default_for_all` are unchanged. If selection cannot commit, the handler still returns `model is required`.
 
 ```bash
 curl --location 'http://localhost:8080/v1/chat/completions' \

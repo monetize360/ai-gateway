@@ -865,6 +865,120 @@
       },
       "additionalProperties": false
     },
+    "tenant_store": {
+      "type": "object",
+      "description": "Multi-tenant store settings. Must be enabled; the filesystem config store is no longer supported.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable multi-tenant mode"
+        },
+        "refresh_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Interval for refreshing tenant configuration from the global DB"
+        },
+        "max_idle_conns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Default maximum idle connections for per-tenant pools"
+        },
+        "max_open_conns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Default maximum open connections for per-tenant pools"
+        },
+        "conn_max_lifetime_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Default maximum lifetime of a pooled connection"
+        },
+        "conn_max_idle_time_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Default maximum idle time of a pooled connection"
+        },
+        "pool_idle_timeout_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Idle timeout before an unused per-tenant pool is released"
+        },
+        "global": {
+          "type": "object",
+          "description": "Global Postgres database holding tenant registry and configuration",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Database host"
+            },
+            "port": {
+              "type": "string",
+              "description": "Database port"
+            },
+            "user": {
+              "type": "string",
+              "description": "Database user"
+            },
+            "password": {
+              "type": "string",
+              "description": "Database password"
+            },
+            "db_name": {
+              "type": "string",
+              "description": "Database name"
+            },
+            "ssl_mode": {
+              "type": "string",
+              "enum": [
+                "disable",
+                "allow",
+                "prefer",
+                "require",
+                "verify-ca",
+                "verify-full"
+              ],
+              "description": "Postgres SSL mode"
+            },
+            "max_idle_conns": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum idle connections for the global pool"
+            },
+            "max_open_conns": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum open connections for the global pool"
+            },
+            "conn_max_lifetime_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum lifetime of a global pool connection"
+            },
+            "conn_max_idle_time_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum idle time of a global pool connection"
+            }
+          },
+          "required": ["host", "port", "user", "password", "db_name"],
+          "additionalProperties": false
+        },
+        "jwt_public_key": {
+          "type": "string",
+          "description": "Base64-encoded RSA public key used to verify tenant JWTs"
+        },
+        "jwt_secret": {
+          "type": "string",
+          "description": "Shared secret used to verify tenant JWTs when no public key is set"
+        },
+        "admin_jwt_public_key": {
+          "type": "string",
+          "description": "Base64-encoded RSA public key for admin tokens carrying only tenantId"
+        }
+      },
+      "required": ["enabled"],
+      "additionalProperties": false
+    },
     "config_store": {
       "type": "object",
       "description": "Configuration store settings",
@@ -1191,7 +1305,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Name of the plugin (built-in: telemetry, prompts, logging, governance, maxim, semantic_cache, otel, kafka, or custom plugin name)"
+            "description": "Name of the plugin (built-in: telemetry, prompts, logging, governance, semantic-router, maxim, semantic_cache, otel, kafka, or custom plugin name)"
           },
           "config": {
             "type": "object",
@@ -1429,30 +1543,35 @@
                         },
                         "router": {
                           "type": "object",
-                          "description": "Primary Layer 2 surface: vLLM Semantic Router management API. Bifrost calls POST preview only (OpenAI-chat shaped body; eligible_models is rejected by the sidecar and intersected locally). Local routing work budget is ~10ms; total semantic budget ≈ 10ms + router.timeout_ms. Prefer secrets/env for api_key.",
+                          "description": "Layer 2 decision surface. mode=plugin uses the in-process semantic-router Bifrost plugin; mode=http calls the vLLM-SR management API preview. Bifrost intersects the recommendation with the Layer 1 pool. Router errors, out-of-pool answers, or an unset router decline the rewrite (incoming model is kept). Local routing work budget is ~10ms; for HTTP mode total semantic budget ≈ 10ms + router.timeout_ms.",
                           "properties": {
+                            "mode": {
+                              "type": "string",
+                              "enum": ["plugin", "http"],
+                              "description": "plugin = in-process semantic-router plugin; http = vLLM-SR sidecar. When omitted: base_url set → http, otherwise plugin when the semantic-router plugin is loaded."
+                            },
                             "base_url": {
                               "type": "string",
-                              "description": "Absolute http(s) management API origin, for example http://127.0.0.1:18080 (local) or http://vllm-sr-mgmt.internal:8080 (prod). Must not share Bifrost's listen port."
+                              "description": "Absolute http(s) management API origin for mode=http, for example http://127.0.0.1:18080 (local) or http://vllm-sr-mgmt.internal:8080 (prod). Must not share Bifrost's listen port."
                             },
                             "preview_path": {
                               "type": "string",
-                              "description": "Preview path appended to base_url.",
+                              "description": "Preview path appended to base_url (HTTP mode).",
                               "default": "/api/v1/routing/preview"
                             },
                             "entrypoint": {
                               "type": "string",
-                              "description": "Virtual model / recipe alias sent as request model.",
+                              "description": "Virtual model / recipe alias sent as request model (HTTP mode).",
                               "default": "vllm-sr/auto"
                             },
                             "api_key": {
                               "type": "string",
-                              "description": "Optional Bearer token for the management API. Prefer env/secret injection; do not commit production keys."
+                              "description": "Optional Bearer token for the management API (HTTP mode). Prefer env/secret injection; do not commit production keys."
                             },
                             "timeout_ms": {
                               "type": "integer",
                               "minimum": 1,
-                              "description": "Preview HTTP deadline in milliseconds. Production typically uses a small value (e.g. 50); local validation may use larger values.",
+                              "description": "Preview HTTP deadline in milliseconds (HTTP mode only). Production typically uses a small value (e.g. 50); local validation may use larger values.",
                               "default": 2000
                             }
                           },
@@ -1526,7 +1645,7 @@
                         },
                         "model_overrides_file": {
                           "type": "string",
-                          "description": "Path to a POC/catalog JSON of model routing metadata (see plugins/governance/poc/gemini-model-routing.json). Prefer relative paths from the process working directory / -app-dir. Merged with model_overrides; inline entries win. Prefer inline model_overrides in production."
+                          "description": "Optional path to a JSON catalog of model routing metadata. Prefer relative paths from the process working directory / -app-dir. Merged with model_overrides; inline entries win. Not required for in-process semantic-router plugin mode; prefer inline model_overrides or catalog DB fields in production."
                         },
                         "model_overrides": {
                           "type": "object",
@@ -1562,6 +1681,37 @@
                       "additionalProperties": false
                     }
                   },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
+                  "const": "semantic-router"
+                }
+              }
+            },
+            "then": {
+              "required": ["config"],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "description": "In-process vLLM Semantic Router runtime. Loads canonical signals, decisions, model selectors, and configured native classifiers before governance, then exposes Preview when semantic_routing.router.mode is plugin.",
+                  "properties": {
+                    "recipe_file": {
+                      "type": "string",
+                      "description": "Path to a canonical vLLM Semantic Router configuration. Relative model artifacts resolve using the Semantic Router config base directory."
+                    },
+                    "entrypoint": {
+                      "type": "string",
+                      "description": "Routing-model entrypoint used to select the canonical recipe, for example vllm-sr/auto.",
+                      "default": "vllm-sr/auto"
+                    }
+                  },
+                  "required": ["recipe_file"],
                   "additionalProperties": false
                 }
               }

@@ -85,9 +85,10 @@ type SemanticRoutingConfig struct {
 	// Prefer inline overrides (or catalog DB fields) in production.
 	ModelOverrides map[string]modelcatalog.ModelRoutingOverride `json:"model_overrides,omitempty"`
 
-	// ModelOverridesFile is a path to a POC/catalog JSON (see poc/gemini-model-routing.json).
+	// ModelOverridesFile is an optional path to a JSON catalog of routing metadata.
 	// Relative paths resolve against the process working directory / -app-dir.
 	// Entries are loaded at plugin init and merged with ModelOverrides (inline wins).
+	// Not required for in-process semantic-router plugin mode (recipe_file is enough).
 	ModelOverridesFile string `json:"model_overrides_file,omitempty"`
 
 	AllowPreviewModels bool `json:"allow_preview_models,omitempty"`
@@ -228,7 +229,8 @@ func (p *GovernancePlugin) modelsForConfig(provider schemas.ModelProvider, confi
 	return models
 }
 
-// candidateSatisfiesProfile is the hard capability filter — Layer 1.
+// candidateSatisfiesProfile is the hard post-router capability filter.
+// Layer 2 sees the VK pool before this catalog/capability validation runs.
 func (p *GovernancePlugin) candidateSatisfiesProfile(candidate routeCandidate, profile *RequestProfile, requestType schemas.RequestType) (bool, string) {
 	if p.modelCatalog == nil {
 		return false, "model catalog unavailable"
@@ -552,11 +554,12 @@ func (p *GovernancePlugin) logSemantic(ctx *schemas.BifrostContext, level schema
 	}
 }
 
-// shouldApplySemanticRouting reports whether applySemanticRouting should run after CEL.
+// shouldApplySemanticRouting is the Layer 1 handoff gate. It does not re-evaluate
+// CEL; it only reads the RoutingDecision already produced by EvaluateRoutingRules.
 func (p *GovernancePlugin) shouldApplySemanticRouting(ctx *schemas.BifrostContext, virtualKey *configstoreTables.TableVirtualKey, decision *RoutingDecision, hasIncomingModel bool) (run bool, preferenceOverride []string, handoff string) {
 	if virtualKey == nil {
-		if decision != nil && decision.IsSemanticAction() {
-			p.logSemantic(ctx, schemas.LogLevelWarn, "Rule %q matched action=semantic but no virtual key is present; declining; keeping incoming model", decision.MatchedRuleName)
+		if decision != nil && decision.IsSemanticRouting() {
+			p.logSemantic(ctx, schemas.LogLevelWarn, "Rule %q matched semantic_routing but no virtual key is present; declining; keeping incoming model", decision.MatchedRuleName)
 		}
 		return false, nil, ""
 	}
@@ -564,12 +567,14 @@ func (p *GovernancePlugin) shouldApplySemanticRouting(ctx *schemas.BifrostContex
 	if cfg == nil || !cfg.Enabled {
 		return false, nil, ""
 	}
-	if decision != nil && !decision.IsSemanticAction() {
-		return false, nil, ""
-	}
-	if decision != nil && decision.IsSemanticAction() {
+	if decision != nil {
+		if !decision.IsSemanticRouting() {
+			return false, nil, ""
+		}
 		return true, decision.Fallbacks, fmt.Sprintf("moving to semantic routing (rule=%q)", decision.MatchedRuleName)
 	}
+	// No CEL match: keep the requested model unless the operator opted into
+	// default_for_all, or the request omitted model entirely.
 	if cfg.DefaultForAll {
 		return true, nil, "default semantic routing"
 	}
@@ -582,7 +587,9 @@ func (p *GovernancePlugin) shouldApplySemanticRouting(ctx *schemas.BifrostContex
 func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, body map[string]any, virtualKey *configstoreTables.TableVirtualKey, preferenceOverride []string) (map[string]any, bool) {
 	cfg := p.semanticRoutingConfig()
 	routingBudget := semanticRoutingBudget
-	if cfg != nil && cfg.routerEnabled() {
+	// Layer 2 inference time is additive to the existing local governance-work
+	// budget for both the HTTP and embedded runtimes.
+	if cfg != nil && (cfg.usesHTTPRouter() || cfg.usesPluginRouter()) {
 		routingBudget += cfg.Router.timeout()
 	}
 	routingDeadline := time.Now().Add(routingBudget)
@@ -650,39 +657,49 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 		return body, false
 	}
 
+	if !time.Now().Before(routingDeadline) {
+		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: semantic routing budget exhausted after VK pool lookup; %s", declineTail)
+		logSemanticTotal(false)
+		return body, false
+	}
+
 	step = time.Now()
-	eligible := make([]routeCandidate, 0, len(candidates))
+	ranked, skipRewrite := p.selectWithLayer2(ctx, body, profile, candidates, cfg, preferenceOverride)
+	p.logSemantic(ctx, schemas.LogLevelInfo, "2/select: router-ordered %s took=%s", describeRanking(ranked), formatTook(time.Since(step)))
+	if skipRewrite {
+		p.logSemantic(ctx, schemas.LogLevelInfo, "Skipped: Layer 2 did not require a model rewrite; %s", declineTail)
+		logSemanticTotal(false)
+		return body, false
+	}
+	if !time.Now().Before(routingDeadline) {
+		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: semantic routing budget exhausted after Layer 2 selection; %s", declineTail)
+		logSemanticTotal(false)
+		return body, false
+	}
+	if len(ranked) == 0 {
+		logSemanticTotal(false)
+		return body, false
+	}
+
+	step = time.Now()
+	eligible := make([]routeCandidate, 0, len(ranked))
 	rejections := make(map[string][]string, 4)
-	for _, candidate := range candidates {
+	for _, candidate := range ranked {
 		if satisfied, reason := p.candidateSatisfiesProfile(candidate, profile, requestType); satisfied {
 			eligible = append(eligible, candidate)
 		} else {
 			rejections[reason] = append(rejections[reason], candidate.qualified())
 		}
 	}
-	p.logSemantic(ctx, schemas.LogLevelInfo, "1/filter: %d/%d capable%s took=%s",
-		len(eligible), len(candidates), describeRejections(rejections), formatTook(time.Since(step)))
+	p.logSemantic(ctx, schemas.LogLevelInfo, "3/filter: %d/%d router recommendations capable%s took=%s",
+		len(eligible), len(ranked), describeRejections(rejections), formatTook(time.Since(step)))
 	if len(eligible) == 0 {
-		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: no candidate satisfied the request profile; %s", declineTail)
+		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: no Layer 2 recommendation satisfied the request profile; %s", declineTail)
 		logSemanticTotal(false)
 		return body, false
 	}
 	if !time.Now().Before(routingDeadline) {
 		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: semantic routing budget exhausted after capability filter; %s", declineTail)
-		logSemanticTotal(false)
-		return body, false
-	}
-
-	step = time.Now()
-	ranked, skipRewrite := p.selectAfterFilter(ctx, body, profile, eligible, cfg, preferenceOverride)
-	p.logSemantic(ctx, schemas.LogLevelInfo, "2/select: ranked %s took=%s", describeRanking(ranked), formatTook(time.Since(step)))
-	if skipRewrite {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "Skipped: vllm-sr did not require a model rewrite; %s", declineTail)
-		logSemanticTotal(false)
-		return body, false
-	}
-	if !time.Now().Before(routingDeadline) {
-		p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: semantic routing budget exhausted after local selection; %s", declineTail)
 		logSemanticTotal(false)
 		return body, false
 	}
@@ -694,23 +711,23 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 		runnersUp    []string
 		maxFallbacks = cfg.maxFallbacks()
 	)
-	for i := range ranked {
+	for i := range eligible {
 		if !time.Now().Before(routingDeadline) {
 			p.logSemantic(ctx, schemas.LogLevelWarn, "Skipped: semantic routing budget exhausted during final validation; %s", declineTail)
 			logSemanticTotal(false)
 			return body, false
 		}
-		refined, valid := p.validateCandidate(comp, virtualKey, ranked[i])
+		refined, valid := p.validateCandidate(comp, virtualKey, eligible[i])
 		if !valid {
 			continue
 		}
 		if winner == nil {
-			winner = &ranked[i]
+			winner = &eligible[i]
 			winnerModel = refined
 			continue
 		}
 		if len(runnersUp) < maxFallbacks {
-			runnersUp = append(runnersUp, string(ranked[i].Provider)+"/"+refined)
+			runnersUp = append(runnersUp, string(eligible[i].Provider)+"/"+refined)
 		}
 	}
 
@@ -740,44 +757,44 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 	return body, true
 }
 
-// selectAfterFilter is Step 2: vLLM-SR decides when configured. On router errors,
-// out-of-pool answers, or when router is unset, selection declines (no local
-// keyword/heuristic router) so the request keeps its incoming model.
-func (p *GovernancePlugin) selectAfterFilter(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, eligible []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string) ([]routeCandidate, bool) {
-	if !cfg.routerEnabled() {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: vllm-sr router unset; declining semantic rewrite")
+// selectWithLayer2 is Step 2: Layer 2 (in-process plugin or vLLM-SR HTTP)
+// orders the models associated with the virtual key. Capability/catalog filtering
+// intentionally happens afterward so Layer 1 never prevents the router call.
+func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string) ([]routeCandidate, bool) {
+	if !p.layer2Enabled(cfg) {
+		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 router unset; declining semantic rewrite")
 		return nil, false
 	}
 
-	route, err := p.previewVLLMSRRoute(ctx, body, profile, eligible, cfg)
+	route, err := p.previewLayer2Route(ctx, body, profile, pool, cfg)
 	if err != nil {
-		p.logSemantic(ctx, schemas.LogLevelWarn, "2/route: vllm-sr failed (%v); declining semantic rewrite", err)
+		p.logSemantic(ctx, schemas.LogLevelWarn, "2/route: layer2 failed (%v); declining semantic rewrite", err)
 		return nil, false
 	}
 	if route.skipRewrite() {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: vllm-sr selection_status=%q selection_method=%q; no model rewrite required",
+		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 selection_status=%q selection_method=%q; no model rewrite required",
 			route.SelectionStatus, route.SelectionMethod)
 		return nil, true
 	}
 
-	// Score L1 survivors for observability and deterministic tail fallbacks;
-	// the vLLM-SR selected model still controls the first position.
-	locallyRanked := p.rankCandidates(eligible, profile, cfg, preferenceOverride)
+	// Score the VK pool for observability and deterministic tail fallbacks;
+	// the Layer 2 selected model still controls the first position.
+	locallyRanked := p.rankCandidates(pool, profile, cfg, preferenceOverride)
 	ranked := intersectRouteWithEligible(locallyRanked, route)
 	if len(ranked) == 0 {
 		p.logSemantic(ctx, schemas.LogLevelWarn,
-			"2/route: vllm-sr selected=%q outside L1 eligible pool; declining semantic rewrite",
+			"2/route: layer2 selected=%q and recommendations do not overlap the VK pool; declining semantic rewrite",
 			route.SelectedModel)
 		return nil, false
 	}
 	if winner := ranked[0].qualified(); !strings.EqualFold(winner, route.SelectedModel) {
 		p.logSemantic(ctx, schemas.LogLevelInfo,
-			"2/route: vllm-sr selected=%s decision=%q algorithm=%q status=%q; selected model not in L1 pool, using next recommendation %s; ranking %d eligible",
+			"2/route: layer2 selected=%s decision=%q algorithm=%q status=%q; selected model not in VK pool, using next recommendation %s; ordering %d VK models",
 			route.SelectedModel, route.Decision, route.Algorithm, route.SelectionStatus, winner, len(ranked))
 		return ranked, false
 	}
 	p.logSemantic(ctx, schemas.LogLevelInfo,
-		"2/route: vllm-sr selected=%s decision=%q algorithm=%q status=%q; ranking %d eligible",
+		"2/route: layer2 selected=%s decision=%q algorithm=%q status=%q; ordering %d VK models",
 		route.SelectedModel, route.Decision, route.Algorithm, route.SelectionStatus, len(ranked))
 	return ranked, false
 }
@@ -802,9 +819,8 @@ func describeRanking(ranked []routeCandidate) string {
 	return out
 }
 
-// describeRejections names the dropped models, not just a count: "3/4 capable"
-// with an unnamed exclusion makes it impossible to tell whether a router pick
-// went missing because of the capability filter or a catalog gap.
+// describeRejections names the dropped router recommendations, not just a count.
+// This makes post-router capability and catalog decisions observable.
 func describeRejections(rejections map[string][]string) string {
 	if len(rejections) == 0 {
 		return ""

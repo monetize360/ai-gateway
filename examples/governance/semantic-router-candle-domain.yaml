@@ -1,0 +1,68 @@
+version: v0.3
+
+# Embedded-routing example. Bifrost performs generation; these backend refs only
+# satisfy the canonical Semantic Router model registry and are never dispatched
+# by routercore Preview.
+providers:
+  defaults:
+    model: gemini/gemini-2.5-flash-lite
+  models:
+    - name: gemini/gemini-2.5-flash
+      backend_refs:
+        - name: bifrost
+          endpoint: 127.0.0.1:8082
+          provider: openai
+    - name: gemini/gemini-2.5-flash-lite
+      backend_refs:
+        - name: bifrost
+          endpoint: 127.0.0.1:8082
+          provider: openai
+
+routing:
+  signals:
+    domains:
+      - name: computer science
+        description: Programming and computer-science requests.
+        mmlu_categories: [computer science]
+  decisions:
+    - name: code-domain
+      priority: 100
+      rules:
+        operator: AND
+        on_unknown: fail_request
+        conditions:
+          - type: domain
+            name: computer science
+      modelRefs:
+        - model: gemini/gemini-2.5-flash
+      algorithm:
+        type: static
+    - name: general
+      priority: 1
+      rules:
+        operator: AND
+        conditions: []
+      modelRefs:
+        - model: gemini/gemini-2.5-flash-lite
+      algorithm:
+        type: static
+
+global:
+  router:
+    auto_model_names: [vllm-sr/auto]
+  model_catalog:
+    bindings:
+      domain_classifier:
+        deployment: vela-domain-cpu
+        contract: label_distribution.v1
+        adapter: modernbert
+        mapping_path: models/Vela-1.0-Encoder-307M-Domain/category_mapping.json
+    deployments:
+      vela-domain-cpu:
+        artifact: models/Vela-1.0-Encoder-307M-Domain
+        provider: candle
+        device: cpu
+        precision: fp32
+        input:
+          max_tokens: 512
+          overflow: reject

@@ -23,9 +23,9 @@ var (
 	maxTokenFields     = []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
 )
 
-// RequestProfile is the deterministic analysis of an inbound request payload —
-// Layer 1 of semantic routing. Every field is derived from the parsed body alone:
-// no network calls, no model inference, no LLM.
+// RequestProfile is the deterministic analysis of an inbound request payload.
+// It runs in-process after CEL Layer 1 hands off to semantic routing.
+// Every field is derived from the parsed body alone: no network calls, no model inference, no LLM.
 type RequestProfile struct {
 	// Recognized reports whether any known content field was found. A payload whose
 	// shape we cannot read must not be routed on: a missed image part would let an

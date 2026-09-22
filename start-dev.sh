@@ -19,6 +19,21 @@ cd "$ROOT"
 # Go + dev tools (air, etc.) — extend if your install paths differ
 export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${PATH}"
 
+# Embedded Semantic Router native runtimes (Candle/selection/NLP). The Go
+# bindings link from these sibling build outputs; keep them discoverable when
+# the hot-reload child process starts.
+SEMANTIC_ROUTER_ROOT="${SEMANTIC_ROUTER_ROOT:-${ROOT}/../semantic-router}"
+NATIVE_LIBRARY_DIRS=(
+	"${SEMANTIC_ROUTER_ROOT}/candle-binding/target/release"
+	"${SEMANTIC_ROUTER_ROOT}/ml-binding/target/release"
+	"${SEMANTIC_ROUTER_ROOT}/nlp-binding/target/release"
+	"${SEMANTIC_ROUTER_ROOT}/onnx-binding/target/release"
+)
+NATIVE_LIBRARY_PATH="$(IFS=:; echo "${NATIVE_LIBRARY_DIRS[*]}")"
+export DYLD_LIBRARY_PATH="${NATIVE_LIBRARY_PATH}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="${NATIVE_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export CGO_ENABLED="${CGO_ENABLED:-1}"
+
 # Optional local secrets (Makefile default when USE_INFISICAL is not set)
 if [[ -f "${ROOT}/.env" ]]; then
 	set -a
@@ -47,6 +62,9 @@ echo "Starting AI gateway from ${ROOT}"
 echo "  App:  http://localhost:${PORT:-8080}"
 if [[ -n "${APP_DIR:-}" ]]; then
 	echo "  Dir:  ${APP_DIR}"
+fi
+if [[ ! -f "${ROOT}/ui/package.json" ]]; then
+	echo "  Mode: API-only (ui/package.json missing)"
 fi
 echo ""
 

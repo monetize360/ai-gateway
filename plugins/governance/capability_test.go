@@ -527,7 +527,7 @@ func TestShouldApplySemanticRoutingFlagOffRequiresSemanticRule(t *testing.T) {
 
 	sem := &RoutingDecision{
 		MatchedRuleName: "Pick capable",
-		Action:          configstoreTables.RoutingRuleActionSemantic,
+		SemanticRouting: true,
 		Fallbacks:       []string{"openai/gpt-4o"},
 	}
 	run, pref, handoff := p.shouldApplySemanticRouting(nil, vk, sem, true)
@@ -541,7 +541,7 @@ func TestShouldApplySemanticRoutingNoVirtualKey(t *testing.T) {
 	p.semanticRouting = &SemanticRoutingConfig{Enabled: true, DefaultForAll: true}
 	sem := &RoutingDecision{
 		MatchedRuleName: "Pick capable",
-		Action:          configstoreTables.RoutingRuleActionSemantic,
+		SemanticRouting: true,
 	}
 
 	run, _, _ := p.shouldApplySemanticRouting(nil, nil, nil, true)
@@ -718,6 +718,6 @@ func TestNoLocalRouterWhenVLLMSRUnsetDeclines(t *testing.T) {
 	assert.Equal(t, "openai/"+testTextModel, out["model"])
 
 	joined := strings.Join(routingLogMessages(ctx), "\n")
-	assert.Contains(t, joined, "2/route: vllm-sr router unset; declining semantic rewrite")
+	assert.Contains(t, joined, "2/route: layer2 router unset; declining semantic rewrite")
 	assert.NotContains(t, joined, "2/classify")
 }

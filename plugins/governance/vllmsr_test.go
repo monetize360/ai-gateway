@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -188,7 +190,7 @@ func TestApplySemanticRoutingVLLMSRConfiguredUsesRouterWinner(t *testing.T) {
 	require.True(t, routed)
 	assert.Equal(t, "openai/"+testVisionModel, out["model"])
 	assert.Equal(t, int32(1), hits.Load())
-	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "2/route: vllm-sr selected=openai/"+testVisionModel)
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "2/route: layer2 selected=openai/"+testVisionModel)
 }
 
 func TestApplySemanticRoutingIgnoresOutOfPoolSidecarAnswer(t *testing.T) {
@@ -212,7 +214,7 @@ func TestApplySemanticRoutingIgnoresOutOfPoolSidecarAnswer(t *testing.T) {
 	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
 	assert.False(t, routed, "out-of-pool sidecar answer must not fall back to a local heuristic router")
 	assert.Equal(t, "openai/"+testVisionModel, out["model"], "incoming model must be kept")
-	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "outside L1 eligible pool; declining semantic rewrite")
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "recommendations do not overlap the VK pool; declining semantic rewrite")
 }
 
 func TestApplySemanticRoutingSlowVLLMSRTimesOutAndDeclines(t *testing.T) {
@@ -245,7 +247,7 @@ func TestApplySemanticRoutingSlowVLLMSRTimesOutAndDeclines(t *testing.T) {
 	assert.Equal(t, int32(1), hits.Load())
 	assert.GreaterOrEqual(t, elapsed, 20*time.Millisecond)
 	assert.Less(t, elapsed, 100*time.Millisecond, "CI wall time allows scheduler tolerance; the configured budget remains 10ms")
-	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "vllm-sr failed")
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "layer2 failed")
 	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "declining semantic rewrite")
 }
 
@@ -392,4 +394,170 @@ func TestValidateRouterBaseURL(t *testing.T) {
 
 	err = (&SemanticRoutingConfig{Router: &VLLMSRRouterConfig{BaseURL: "http://127.0.0.1:18080", TimeoutMs: 50}}).validateAndNormalizeSemanticRouting(nil)
 	require.NoError(t, err)
+
+	err = (&SemanticRoutingConfig{Router: &VLLMSRRouterConfig{Mode: routerModePlugin}}).validateAndNormalizeSemanticRouting(nil)
+	require.NoError(t, err)
+
+	err = (&SemanticRoutingConfig{Router: &VLLMSRRouterConfig{Mode: routerModeHTTP}}).validateAndNormalizeSemanticRouting(nil)
+	require.Error(t, err)
+}
+
+type stubLayer2Router struct {
+	result *semanticrouter.PreviewResult
+	err    error
+	hits   atomic.Int32
+	last   semanticrouter.PreviewInput
+}
+
+func (s *stubLayer2Router) Preview(_ context.Context, input semanticrouter.PreviewInput) (*semanticrouter.PreviewResult, error) {
+	s.hits.Add(1)
+	s.last = input
+	return s.result, s.err
+}
+
+type deadlineLayer2Router struct{}
+
+func (deadlineLayer2Router) Preview(ctx context.Context, _ semanticrouter.PreviewInput) (*semanticrouter.PreviewResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestApplySemanticRoutingPluginModeUsesInjectedRouter(t *testing.T) {
+	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
+		[]configstoreTables.TableVirtualKeyProviderConfig{
+			buildProviderConfig("openai", []string{testTextModel, testVisionModel}),
+		})
+	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
+	defer ctx.Cancel()
+	stub := &stubLayer2Router{
+		result: &semanticrouter.PreviewResult{
+			SelectedModel:   "openai/" + testVisionModel,
+			Candidates:      []string{"openai/" + testVisionModel, "openai/" + testTextModel},
+			Decision:        "vision",
+			Algorithm:       "static",
+			SelectionStatus: "selected",
+			SelectionMethod: "static",
+		},
+	}
+	p.SetSemanticLayer2(stub)
+	p.semanticRouting.Router = &VLLMSRRouterConfig{Mode: routerModePlugin}
+
+	body := map[string]any{
+		"model":    "openai/" + testTextModel,
+		"messages": []any{map[string]any{"role": "user", "content": "describe this image"}},
+	}
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
+	require.True(t, routed)
+	assert.Equal(t, "openai/"+testVisionModel, out["model"])
+	assert.Equal(t, int32(1), stub.hits.Load())
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "2/route: layer2 selected=openai/"+testVisionModel)
+}
+
+func TestPreviewPluginRouteForwardsCompleteRoutingFacts(t *testing.T) {
+	p := &GovernancePlugin{}
+	stub := &stubLayer2Router{result: &semanticrouter.PreviewResult{
+		SelectedModel:   "openai/" + testTextModel,
+		Candidates:      []string{"openai/" + testTextModel},
+		SelectionStatus: "selected",
+		SelectionMethod: "static",
+	}}
+	p.SetSemanticLayer2(stub)
+	cfg := &SemanticRoutingConfig{Router: &VLLMSRRouterConfig{
+		Mode:       routerModePlugin,
+		Entrypoint: "vllm-sr/custom",
+		TimeoutMs:  100,
+	}}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	defer ctx.Cancel()
+	body := map[string]any{
+		"messages":        []any{map[string]any{"role": "user", "content": "use a tool"}},
+		"tools":           []any{map[string]any{"type": "function"}},
+		"tool_choice":     "auto",
+		"response_format": map[string]any{"type": "json_object"},
+		"max_tokens":      128,
+		"metadata":        map[string]any{"tenant": "one"},
+		"preview_context": map[string]any{"session_id": "session-one"},
+	}
+
+	route, err := p.previewPluginRoute(ctx, body, &RequestProfile{}, nil, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, route)
+	assert.Equal(t, "vllm-sr/custom", stub.last.Model)
+	assert.Len(t, stub.last.Messages, 1)
+	assert.NotNil(t, stub.last.Tools)
+	assert.Equal(t, "auto", stub.last.ToolChoice)
+	assert.Equal(t, 128, stub.last.MaxTokens)
+	assert.Equal(t, "one", stub.last.Metadata["tenant"])
+	assert.Equal(t, "session-one", stub.last.PreviewContext["session_id"])
+}
+
+func TestPreviewPluginRouteHonorsTimeoutAndRecordsIt(t *testing.T) {
+	p := &GovernancePlugin{}
+	p.SetSemanticLayer2(deadlineLayer2Router{})
+	cfg := &SemanticRoutingConfig{Router: &VLLMSRRouterConfig{
+		Mode:      routerModePlugin,
+		TimeoutMs: 1,
+	}}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	defer ctx.Cancel()
+
+	_, err := p.previewPluginRoute(ctx, map[string]any{}, &RequestProfile{}, nil, cfg)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	_, _, _, timedOut, _ := p.SemanticRouteStats()
+	assert.Equal(t, uint64(1), timedOut)
+}
+
+func TestApplySemanticRoutingCallsLayer2BeforeCatalogFiltering(t *testing.T) {
+	const unknownModel = "model-not-in-catalog"
+	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
+		[]configstoreTables.TableVirtualKeyProviderConfig{
+			buildProviderConfig("openai", []string{unknownModel}),
+		})
+	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
+	defer ctx.Cancel()
+	stub := &stubLayer2Router{
+		result: &semanticrouter.PreviewResult{
+			SelectedModel:   "openai/" + unknownModel,
+			Candidates:      []string{"openai/" + unknownModel},
+			Decision:        "unknown-model-test",
+			Algorithm:       "static",
+			SelectionStatus: "selected",
+			SelectionMethod: "static",
+		},
+	}
+	p.SetSemanticLayer2(stub)
+	p.semanticRouting.Router = &VLLMSRRouterConfig{Mode: routerModePlugin}
+
+	body := map[string]any{
+		"model":    "openai/" + unknownModel,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
+
+	assert.False(t, routed, "post-router capability validation must still reject an unknown model")
+	assert.Equal(t, "openai/"+unknownModel, out["model"])
+	assert.Equal(t, int32(1), stub.hits.Load(), "catalog filtering must not prevent the Layer 2 call")
+	logs := strings.Join(routingLogMessages(ctx), "\n")
+	assert.Contains(t, logs, "2/route: calling semantic-router plugin")
+	assert.Contains(t, logs, "3/filter: 0/1 router recommendations capable")
+	assert.Contains(t, logs, "no catalog entry")
+}
+
+func TestApplySemanticRoutingPluginModeWithoutInjectionDeclines(t *testing.T) {
+	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
+		[]configstoreTables.TableVirtualKeyProviderConfig{
+			buildProviderConfig("openai", []string{testTextModel}),
+		})
+	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
+	defer ctx.Cancel()
+	p.semanticRouting.Router = &VLLMSRRouterConfig{Mode: routerModePlugin}
+
+	body := map[string]any{
+		"model":    "openai/" + testTextModel,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
+	assert.False(t, routed)
+	assert.Equal(t, "openai/"+testTextModel, out["model"])
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "layer2 router unset")
 }

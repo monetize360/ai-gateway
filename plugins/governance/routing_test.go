@@ -265,8 +265,141 @@ func TestEvaluateRoutingRules_GlobalRuleMatches(t *testing.T) {
 	assert.Equal(t, "Global Rule", decision.MatchedRuleName)
 }
 
-// A semantic-action rule matches CEL without pinning provider/model; selection happens later.
-func TestEvaluateRoutingRules_SemanticAction(t *testing.T) {
+// Org-scoped semantic_routing CEL matches for VKs under that org without pinning.
+func TestEvaluateRoutingRules_OrgScopedSemanticRouting(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	indiaOrgID := "org-india"
+	japanOrgID := "org-japan"
+
+	orgSemantic := &configstoreTables.TableRoutingRule{
+		ID:            "org-sem-1",
+		Name:          "Semantic - India Entity",
+		CelExpression: configstoreTables.CelExpressionSemanticRouting,
+		ScopeOrgID:    &indiaOrgID,
+		Enabled:       bifrost.Ptr(true),
+		Priority:      10,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgSemantic))
+
+	indiaVK := &configstoreTables.TableVirtualKey{
+		ID:         "vk-india",
+		Name:       "india-vk",
+		ScopeOrgID: &indiaOrgID,
+	}
+	indiaDecision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  indiaVK,
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		RequestType: "chat_completion",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, indiaDecision)
+	assert.True(t, indiaDecision.IsSemanticRouting())
+	assert.Equal(t, "org-sem-1", indiaDecision.MatchedRuleID)
+	assert.Equal(t, "openai", indiaDecision.Provider, "semantic must not rewrite pin targets")
+	assert.Equal(t, "gpt-4o", indiaDecision.Model)
+
+	japanVK := &configstoreTables.TableVirtualKey{
+		ID:         "vk-japan",
+		Name:       "japan-vk",
+		ScopeOrgID: &japanOrgID,
+	}
+	japanDecision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  japanVK,
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		RequestType: "chat_completion",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, japanDecision, "Japan Entity VK must not match India Entity org semantic rule")
+}
+
+// Org-scoped cel_expression == "semantic_routing" enables semantic.
+// VK pin guardrails still win when they match first.
+func TestEvaluateRoutingRules_OrgSemanticRoutingCEL(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	indiaOrgID := "org-india"
+	vkID := "vk-india"
+
+	orgSemanticCEL := &configstoreTables.TableRoutingRule{
+		ID:            "org-sem-cel-1",
+		Name:          "Semantic Routing CEL - India",
+		CelExpression: configstoreTables.CelExpressionSemanticRouting,
+		ScopeOrgID:    &indiaOrgID,
+		Enabled:       bifrost.Ptr(true),
+		Priority:      10,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgSemanticCEL))
+
+	indiaVK := &configstoreTables.TableVirtualKey{
+		ID:         vkID,
+		Name:       "india-vk",
+		ScopeOrgID: &indiaOrgID,
+	}
+	decision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  indiaVK,
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		RequestType: "chat_completion",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+		BudgetAndRateLimitStatus: &BudgetAndRateLimitStatus{
+			BudgetPercentUsed: 10,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	assert.True(t, decision.IsSemanticRouting())
+	assert.Equal(t, "org-sem-cel-1", decision.MatchedRuleID)
+	assert.Equal(t, "openai", decision.Provider)
+	assert.Equal(t, "gpt-4o", decision.Model)
+
+	vkBudgetPin := &configstoreTables.TableRoutingRule{
+		ID:            "vk-budget-pin",
+		Name:          "Budget Pin",
+		CelExpression: "true", // stand-in for budget_used >= 50 (status is refreshed from store at eval)
+		Provider:      bifrost.Ptr("groq"),
+		Model:         bifrost.Ptr("llama-3.1"),
+		VirtualKeyID:  &vkID,
+		Enabled:       bifrost.Ptr(true),
+		Priority:      0,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), vkBudgetPin))
+
+	pinDecision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  indiaVK,
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		RequestType: "chat_completion",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, pinDecision)
+	assert.False(t, pinDecision.IsSemanticRouting(), "VK pin must beat org semantic_routing CEL")
+	assert.Equal(t, "vk-budget-pin", pinDecision.MatchedRuleID)
+	assert.Equal(t, "groq", pinDecision.Provider)
+	assert.Equal(t, "llama-3.1", pinDecision.Model)
+}
+
+// A semantic_routing rule matches without pinning provider/model; selection happens later.
+func TestEvaluateRoutingRules_SemanticRoutingCEL(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
 	require.NoError(t, err)
 	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
@@ -277,8 +410,7 @@ func TestEvaluateRoutingRules_SemanticAction(t *testing.T) {
 	rule := &configstoreTables.TableRoutingRule{
 		ID:              "sem-1",
 		Name:            "Semantic Select",
-		CelExpression:   "true",
-		Action:          configstoreTables.RoutingRuleActionSemantic,
+		CelExpression:   configstoreTables.CelExpressionSemanticRouting,
 		Provider:        bifrost.Ptr("azure"),
 		Model:           bifrost.Ptr("gpt-4-turbo"),
 		ParsedFallbacks: []string{"openai/gpt-4o"},
@@ -295,8 +427,8 @@ func TestEvaluateRoutingRules_SemanticAction(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, decision)
-	assert.True(t, decision.IsSemanticAction())
-	assert.Equal(t, "openai", decision.Provider, "semantic action must not apply the rule's pin")
+	assert.True(t, decision.IsSemanticRouting())
+	assert.Equal(t, "openai", decision.Provider, "semantic_routing must not apply the rule's pin")
 	assert.Equal(t, "gpt-4o", decision.Model)
 	assert.Equal(t, []string{"openai/gpt-4o"}, decision.Fallbacks)
 	assert.Empty(t, decision.KeyID)
@@ -315,7 +447,6 @@ func TestEvaluateRoutingRules_PinShortCircuitsSemantic(t *testing.T) {
 		ID:            "pin-1",
 		Name:          "Pin Azure",
 		CelExpression: "true",
-		Action:        configstoreTables.RoutingRuleActionPin,
 		Provider:      bifrost.Ptr("azure"),
 		Model:         bifrost.Ptr("gpt-4-turbo"),
 		Enabled:       bifrost.Ptr(true),
@@ -324,8 +455,7 @@ func TestEvaluateRoutingRules_PinShortCircuitsSemantic(t *testing.T) {
 	semantic := &configstoreTables.TableRoutingRule{
 		ID:            "sem-2",
 		Name:          "Semantic",
-		CelExpression: "true",
-		Action:        configstoreTables.RoutingRuleActionSemantic,
+		CelExpression: configstoreTables.CelExpressionSemanticRouting,
 		Enabled:       bifrost.Ptr(true),
 		Priority:      10,
 	}
@@ -340,12 +470,12 @@ func TestEvaluateRoutingRules_PinShortCircuitsSemantic(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, decision)
-	assert.False(t, decision.IsSemanticAction())
+	assert.False(t, decision.IsSemanticRouting())
 	assert.Equal(t, "azure", decision.Provider)
 	assert.Equal(t, "Pin Azure", decision.MatchedRuleName)
 }
 
-// Unmatched CEL yields no decision, so the semantic action is not selected.
+// Unmatched CEL yields no decision.
 func TestEvaluateRoutingRules_NoMatchIsNotSemantic(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
 	require.NoError(t, err)
@@ -358,7 +488,6 @@ func TestEvaluateRoutingRules_NoMatchIsNotSemantic(t *testing.T) {
 		ID:            "sem-nomatch",
 		Name:          "Semantic",
 		CelExpression: "model == 'never'",
-		Action:        configstoreTables.RoutingRuleActionSemantic,
 		Enabled:       bifrost.Ptr(true),
 	}
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), rule))
@@ -371,7 +500,7 @@ func TestEvaluateRoutingRules_NoMatchIsNotSemantic(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Nil(t, decision)
-	assert.False(t, decision.IsSemanticAction())
+	assert.False(t, decision.IsSemanticRouting())
 }
 
 // TestEvaluateRoutingRules_PinnedKeyPropagation verifies the rule key_id propagates into the

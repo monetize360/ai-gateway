@@ -22,10 +22,6 @@ type TableRoutingRule struct {
 	Enabled       *bool  `gorm:"not null;default:true" json:"enabled,omitempty"` // nil = DB default (true); use EnabledValue() to read
 	CelExpression string `gorm:"type:text;not null" json:"cel_expression"`
 
-	// Action is what the rule does when CEL matches: pin a provider/model (default)
-	// or run semantic selection over the virtual key's model pool.
-	Action string `gorm:"type:varchar(32);not null;default:pin" json:"action"`
-
 	// Routing output — nil provider/model means use the incoming request value.
 	// provider_id/model_id are canonical FKs (MPilot); provider/model are denormalized names for runtime.
 	ProviderID      *string `gorm:"type:uuid;index" json:"provider_id,omitempty"`
@@ -61,51 +57,23 @@ type TableRoutingRule struct {
 	Deleted   bool      `gorm:"not null;default:false;index" json:"-"`
 }
 
-// Routing rule actions. Empty/unknown Action is treated as pin so existing rules
-// keep their current behaviour.
-const (
-	RoutingRuleActionPin      = "pin"
-	RoutingRuleActionSemantic = "semantic"
-)
+// CelExpressionSemanticRouting is a reserved CEL literal. It always matches
+// and hands the request to semantic routing instead of pinning a target.
+const CelExpressionSemanticRouting = "semantic_routing"
 
 // TableName for TableRoutingRule
 func (TableRoutingRule) TableName() string { return "routing_rules" }
 
-// ActionValue returns the effective action, treating empty as pin.
-func (r *TableRoutingRule) ActionValue() string {
-	if r == nil {
-		return RoutingRuleActionPin
-	}
-	switch strings.ToLower(strings.TrimSpace(r.Action)) {
-	case RoutingRuleActionSemantic:
-		return RoutingRuleActionSemantic
-	default:
-		return RoutingRuleActionPin
-	}
+// IsSemanticRoutingCELExpression reports whether expr is the reserved
+// semantic_routing literal (not evaluated as normal CEL).
+func IsSemanticRoutingCELExpression(expr string) bool {
+	return strings.EqualFold(strings.TrimSpace(expr), CelExpressionSemanticRouting)
 }
 
-// IsSemanticAction reports whether the rule selects a model via semantic routing
-// instead of pinning provider/model.
-func (r *TableRoutingRule) IsSemanticAction() bool {
-	return r.ActionValue() == RoutingRuleActionSemantic
-}
-
-// NormalizeRoutingAction accepts pin, semantic, or empty (pin). Anything else is invalid.
-func NormalizeRoutingAction(action string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "", RoutingRuleActionPin:
-		return RoutingRuleActionPin, nil
-	case RoutingRuleActionSemantic:
-		return RoutingRuleActionSemantic, nil
-	default:
-		return "", fmt.Errorf("action must be %q or %q", RoutingRuleActionPin, RoutingRuleActionSemantic)
-	}
-}
-
-// ValidateSemanticAction rejects combinations the engine cannot honor.
-func ValidateSemanticAction(action string, chainRule bool) error {
-	if action == RoutingRuleActionSemantic && chainRule {
-		return fmt.Errorf("chain_rule is not supported when action is semantic")
+// ValidateSemanticRouting rejects combinations the engine cannot honor.
+func ValidateSemanticRouting(celExpression string, chainRule bool) error {
+	if IsSemanticRoutingCELExpression(celExpression) && chainRule {
+		return fmt.Errorf("chain_rule is not supported when cel_expression is %q", CelExpressionSemanticRouting)
 	}
 	return nil
 }
@@ -181,13 +149,13 @@ func (r *TableRoutingRule) RoutingScopeOrgID() string {
 
 // RoutingScopeName returns the scope level used by the routing engine.
 func (r *TableRoutingRule) RoutingScopeName() string {
-	switch r.RoutingRulesCacheKey() {
-	case "global:":
+	key := r.RoutingRulesCacheKey()
+	switch {
+	case key == "global:":
 		return "global"
+	case strings.HasPrefix(key, "virtual_key:"):
+		return "virtual_key"
 	default:
-		if strings.HasPrefix(r.RoutingRulesCacheKey(), "virtual_key:") {
-			return "virtual_key"
-		}
 		return "org"
 	}
 }

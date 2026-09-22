@@ -24,6 +24,7 @@ import (
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/tenantstore"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/valyala/fasthttp"
 )
 
@@ -54,7 +55,7 @@ type Config struct {
 	GatewayDeploymentType string `json:"gateway_deployment_type,omitempty"`
 	// SemanticRouting configures capability-aware semantic model selection.
 	// When enabled with default_for_all, selection runs for every VK request
-	// that did not match a pin rule; otherwise it runs only for action=semantic rules.
+	// that did not match a pin rule; otherwise it runs only for semantic_routing CEL rules.
 	SemanticRouting *SemanticRoutingConfig `json:"semantic_routing,omitempty"`
 }
 
@@ -115,6 +116,10 @@ type GovernancePlugin struct {
 	// Shared vLLM-SR transport (not per-request).
 	vllmsrClient  *fasthttp.Client
 	vllmsrBreaker *vllmsrCircuitBreaker
+
+	// semanticLayer2 is the in-process Preview router (plugins/semanticrouter).
+	// Injected by the HTTP transport when router.mode=plugin.
+	semanticLayer2 semanticrouter.Router
 
 	// Layer 2 outcome counters (semantic_route_total{result=...} style).
 	semanticRouteSelected  atomic.Uint64
@@ -356,6 +361,30 @@ func InitFromStore(
 	return plugin, nil
 }
 
+// SetSemanticLayer2 injects the in-process semantic-router Preview implementation.
+// Called by the HTTP transport after both plugins are initialized.
+func (p *GovernancePlugin) SetSemanticLayer2(r semanticrouter.Router) {
+	if p == nil {
+		return
+	}
+	p.semanticLayer2 = r
+}
+
+// layer2Enabled reports whether Layer 2 can run (HTTP sidecar or in-process plugin).
+func (p *GovernancePlugin) layer2Enabled(cfg *SemanticRoutingConfig) bool {
+	if cfg == nil || cfg.Router == nil || !cfg.Router.enabled() {
+		return false
+	}
+	switch cfg.Router.resolvedMode() {
+	case routerModePlugin:
+		return p.semanticLayer2 != nil
+	case routerModeHTTP:
+		return cfg.Router.httpEnabled()
+	default:
+		return cfg.Router.httpEnabled() || p.semanticLayer2 != nil
+	}
+}
+
 // GetName returns the name of the plugin
 func (p *GovernancePlugin) GetName() string {
 	return PluginName
@@ -549,14 +578,14 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 			}, nil
 		}
 		// Mark for marshal if a routing rule matched (pin / cost ceiling already applied)
-		if routingDecision != nil && !routingDecision.IsSemanticAction() {
+		if routingDecision != nil && !routingDecision.IsSemanticRouting() {
 			needsMarshal = true
 		}
 	}
 
-	//2. Semantic routing — when a matching rule asked for it, when default_for_all
-	// is on and no pin rule matched, or when the request omitted model. Pin rules
-	// leave the payload for load balancing.
+	//2. Semantic routing — only when a matching rule asked for it (cel_expression
+	// semantic_routing), when default_for_all is on, or when the request omitted
+	// model. No matching CEL rule keeps the requested model for load balancing.
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
@@ -1144,20 +1173,17 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 	// If a routing rule matched, apply the decision
 	if decision != nil {
 		p.logger.Debug("[Governance] Routing rule matched: %s", decision.MatchedRuleName)
+		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
 
-		if decision.IsSemanticAction() {
+		if decision.IsSemanticRouting() {
 			// Semantic selection is applied by the caller after this returns.
 			// Do not pin provider/model, write rule fallbacks, or pin a key.
-			p.logger.Info("[Governance] 0/handoff: routing rule %q matched action=semantic; handing off to semantic routing", decision.MatchedRuleName)
-			schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
+			p.logger.Info("[Governance] 0/handoff: routing rule %q matched cel=semantic_routing; handing off to semantic routing", decision.MatchedRuleName)
 			return body, decision, nil
 		}
 
 		// Provider may be empty here: downstream routing stages can still add the prefix.
 		writeModelBack(ctx, body, isGeminiPath, isBedrockPath, schemas.ModelProvider(decision.Provider), decision.Model, genaiRequestSuffix)
-
-		// Append routing-rule to routing engines used
-		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
 
 		// Add fallbacks if present; fill in the incoming model for fallbacks that omit it
 		if len(decision.Fallbacks) > 0 {

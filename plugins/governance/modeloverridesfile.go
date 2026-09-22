@@ -9,8 +9,7 @@ import (
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 )
 
-// pocModelRoutingFile is the on-disk shape used by POC catalogs such as
-// plugins/governance/poc/gemini-model-routing.json.
+// pocModelRoutingFile is the on-disk shape for optional model_overrides_file catalogs.
 type pocModelRoutingFile struct {
 	Description string                          `json:"description,omitempty"`
 	Models      map[string]pocModelRoutingEntry `json:"models"`

@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/valyala/fasthttp"
 )
 
@@ -24,9 +26,18 @@ const (
 	vllmsrDialTimeout      = 2 * time.Second
 )
 
-// VLLMSRRouterConfig is the vLLM Semantic Router management-API sidecar.
-// Inference still goes through Bifrost; this client only previews a route.
+const (
+	routerModeHTTP   = "http"
+	routerModePlugin = "plugin"
+)
+
+// VLLMSRRouterConfig is the Layer 2 decision surface.
+// Mode "http" calls the vLLM-SR management-API sidecar; mode "plugin" calls
+// the in-process semantic-router Bifrost plugin. Inference still goes through Bifrost.
 type VLLMSRRouterConfig struct {
+	// Mode is "plugin" (in-process) or "http" (sidecar). Empty resolves from
+	// other fields: base_url set → http; otherwise plugin when a Layer2 is injected.
+	Mode        string `json:"mode,omitempty"`
 	BaseURL     string `json:"base_url,omitempty"`
 	PreviewPath string `json:"preview_path,omitempty"`
 	Entrypoint  string `json:"entrypoint,omitempty"`
@@ -34,8 +45,39 @@ type VLLMSRRouterConfig struct {
 	TimeoutMs   int    `json:"timeout_ms,omitempty"`
 }
 
+func (c *VLLMSRRouterConfig) resolvedMode() string {
+	if c == nil {
+		return ""
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.Mode))
+	switch mode {
+	case routerModeHTTP, routerModePlugin:
+		return mode
+	}
+	if strings.TrimSpace(c.BaseURL) != "" {
+		return routerModeHTTP
+	}
+	return routerModePlugin
+}
+
+func (c *VLLMSRRouterConfig) httpEnabled() bool {
+	return c != nil && c.resolvedMode() == routerModeHTTP && strings.TrimSpace(c.BaseURL) != ""
+}
+
 func (c *VLLMSRRouterConfig) enabled() bool {
-	return c != nil && strings.TrimSpace(c.BaseURL) != ""
+	// Backward-compatible: any non-empty base_url still means "router configured".
+	// Plugin mode is enabled when mode resolves to plugin (Layer2 presence checked separately).
+	if c == nil {
+		return false
+	}
+	switch c.resolvedMode() {
+	case routerModeHTTP:
+		return strings.TrimSpace(c.BaseURL) != ""
+	case routerModePlugin:
+		return true
+	default:
+		return strings.TrimSpace(c.BaseURL) != ""
+	}
 }
 
 func (c *VLLMSRRouterConfig) timeout() time.Duration {
@@ -65,10 +107,27 @@ func (c *VLLMSRRouterConfig) entrypoint() string {
 }
 
 func (c *SemanticRoutingConfig) routerEnabled() bool {
-	return c != nil && c.Router.enabled()
+	// Config-level: router block is present and mode/base_url resolve to a usable mode.
+	// Runtime Layer 2 availability also needs the plugin injection (see GovernancePlugin.layer2Enabled).
+	return c != nil && c.Router != nil && c.Router.enabled()
 }
 
-// vllmsrRoute is the decision sidecar result used to order L1-eligible models.
+func (c *SemanticRoutingConfig) routerMode() string {
+	if c == nil || c.Router == nil {
+		return ""
+	}
+	return c.Router.resolvedMode()
+}
+
+func (c *SemanticRoutingConfig) usesHTTPRouter() bool {
+	return c != nil && c.Router != nil && c.Router.resolvedMode() == routerModeHTTP && c.Router.httpEnabled()
+}
+
+func (c *SemanticRoutingConfig) usesPluginRouter() bool {
+	return c != nil && c.Router != nil && c.Router.resolvedMode() == routerModePlugin
+}
+
+// vllmsrRoute is the Layer 2 result used to order models from the virtual-key pool.
 type vllmsrRoute struct {
 	SelectedModel   string
 	Decision        string
@@ -193,9 +252,86 @@ func (p *GovernancePlugin) SemanticRouteStats() (selected, skip, failOpen, timeo
 	return selected, skip, failOpen, timeout, avgPreview
 }
 
+// previewLayer2Route runs Layer 2 via in-process plugin or HTTP sidecar.
+func (p *GovernancePlugin) previewLayer2Route(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig) (*vllmsrRoute, error) {
+	if cfg == nil || cfg.Router == nil {
+		return nil, fmt.Errorf("layer2 router unset")
+	}
+	switch cfg.Router.resolvedMode() {
+	case routerModePlugin:
+		return p.previewPluginRoute(ctx, body, profile, pool, cfg)
+	default:
+		return p.previewVLLMSRRoute(ctx, body, profile, pool, cfg)
+	}
+}
+
+// previewPluginRoute calls the in-process semantic-router plugin.
+func (p *GovernancePlugin) previewPluginRoute(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig) (*vllmsrRoute, error) {
+	_ = profile
+	_ = pool
+	if p == nil || p.semanticLayer2 == nil {
+		return nil, fmt.Errorf("semantic-router plugin not injected")
+	}
+	in := semanticrouter.PreviewInput{
+		Model:               cfg.Router.entrypoint(),
+		Messages:            extractChatMessages(body),
+		Text:                stringValue(body["text"]),
+		Tools:               body["tools"],
+		Functions:           body["functions"],
+		ToolChoice:          body["tool_choice"],
+		FunctionCall:        body["function_call"],
+		ResponseFormat:      body["response_format"],
+		MaxTokens:           body["max_tokens"],
+		MaxCompletionTokens: body["max_completion_tokens"],
+		Metadata:            stringMap(body["metadata"]),
+		PreviewContext:      anyMap(body["preview_context"]),
+	}
+	p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: calling semantic-router plugin mode=plugin")
+	start := time.Now()
+	previewCtx, cancel := context.WithTimeout(ctx, cfg.Router.timeout())
+	defer cancel()
+	out, err := p.semanticLayer2.Preview(previewCtx, in)
+	latency := time.Since(start)
+	if err != nil {
+		if isTimeoutErr(err) {
+			p.recordSemanticRoute(semanticRouteTimeout, latency)
+		} else {
+			p.recordSemanticRoute(semanticRouteFailOpen, latency)
+		}
+		p.logSemantic(ctx, schemas.LogLevelWarn,
+			"2/route: plugin preview error took=%s err=%v", formatTook(latency), err)
+		return nil, fmt.Errorf("semantic-router plugin preview: %w", err)
+	}
+	if out == nil {
+		p.recordSemanticRoute(semanticRouteFailOpen, latency)
+		return nil, fmt.Errorf("semantic-router plugin returned nil preview")
+	}
+	route := &vllmsrRoute{
+		SelectedModel:   out.SelectedModel,
+		Decision:        out.Decision,
+		Algorithm:       out.Algorithm,
+		SelectionStatus: out.SelectionStatus,
+		SelectionMethod: out.SelectionMethod,
+		Candidates:      append([]string(nil), out.Candidates...),
+	}
+	if route.skipRewrite() {
+		p.recordSemanticRoute(semanticRouteSkip, latency)
+	} else {
+		if strings.TrimSpace(route.SelectedModel) == "" {
+			p.recordSemanticRoute(semanticRouteFailOpen, latency)
+			return nil, fmt.Errorf("semantic-router plugin returned empty selected_model")
+		}
+		p.recordSemanticRoute(semanticRouteSelected, latency)
+	}
+	p.logSemantic(ctx, schemas.LogLevelInfo,
+		"2/route: plugin response took=%s selected=%s recommended=%v decision=%q algorithm=%q status=%q method=%q",
+		formatTook(latency), route.SelectedModel, route.Candidates, route.Decision, route.Algorithm, route.SelectionStatus, route.SelectionMethod)
+	return route, nil
+}
+
 // previewVLLMSRRoute calls the vLLM-SR management API for the Layer 2 decision.
-func (p *GovernancePlugin) previewVLLMSRRoute(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, eligible []routeCandidate, cfg *SemanticRoutingConfig) (*vllmsrRoute, error) {
-	if cfg == nil || !cfg.Router.enabled() {
+func (p *GovernancePlugin) previewVLLMSRRoute(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig) (*vllmsrRoute, error) {
+	if cfg == nil || !cfg.Router.httpEnabled() {
 		return nil, fmt.Errorf("vllm-sr router base_url unset")
 	}
 	if p != nil && p.vllmsrBreaker != nil && !p.vllmsrBreaker.allow() {
@@ -203,7 +339,7 @@ func (p *GovernancePlugin) previewVLLMSRRoute(ctx *schemas.BifrostContext, body 
 		return nil, fmt.Errorf("vllm-sr circuit open")
 	}
 
-	payload, err := sonic.Marshal(buildVLLMSRPreviewRequest(body, profile, eligible, cfg.Router))
+	payload, err := sonic.Marshal(buildVLLMSRPreviewRequest(body, profile, pool, cfg.Router))
 	if err != nil {
 		return nil, fmt.Errorf("marshal vllm-sr preview: %w", err)
 	}
@@ -286,13 +422,13 @@ func isTimeoutErr(err error) bool {
 	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline")
 }
 
-func buildVLLMSRPreviewRequest(body map[string]any, profile *RequestProfile, eligible []routeCandidate, cfg *VLLMSRRouterConfig) map[string]any {
+func buildVLLMSRPreviewRequest(body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *VLLMSRRouterConfig) map[string]any {
 	// vLLM-SR's preview endpoint is OpenAI-chat shaped and rejects unknown
 	// fields. In particular, eligible_models, candidates, request_type, and
-	// request_profile return 400 INVALID_INPUT. Layer 1 intersection happens
-	// locally after the preview response.
+	// request_profile return 400 INVALID_INPUT. VK-pool intersection and hard
+	// capability validation happen locally after the preview response.
 	_ = profile
-	_ = eligible
+	_ = pool
 	req := map[string]any{
 		"model":    cfg.entrypoint(),
 		"messages": extractChatMessages(body),
@@ -478,6 +614,33 @@ func firstString(raw map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func stringMap(value any) map[string]string {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		if typed, typedOK := value.(map[string]string); typedOK {
+			return typed
+		}
+		return nil
+	}
+	result := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if text, ok := value.(string); ok {
+			result[key] = text
+		}
+	}
+	return result
+}
+
+func anyMap(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
 }
 
 func collectModelIDs(values ...any) []string {

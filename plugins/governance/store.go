@@ -3055,9 +3055,10 @@ func (gs *LocalGovernanceStore) GetRoutingProgram(ctx context.Context, rule *con
 		}
 	}
 
-	// Get CEL expression, default to "true" if empty
+	// Empty CEL and the reserved semantic_routing literal both compile as "true"
+	// (always match). Semantic vs pin is decided later from the original expression.
 	expr := rule.CelExpression
-	if expr == "" {
+	if expr == "" || configstoreTables.IsSemanticRoutingCELExpression(expr) {
 		expr = "true"
 	}
 

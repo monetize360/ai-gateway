@@ -14,6 +14,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -97,6 +98,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		// Optional shared kvstore (previously used for NVIDIA classifier cache).
 		governancePlugin.SetKVStore(bifrostConfig.GetKVStore())
 		return governancePlugin, nil
+
+	case semanticrouter.PluginName:
+		srConfig, err := MarshalPluginConfig[semanticrouter.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal semantic-router plugin config: %w", err)
+		}
+		return semanticrouter.Init(srConfig, logger)
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -214,6 +222,16 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(logging.PluginName, builtinPlacement, schemas.Ptr(3))
 
+	// 3b. Semantic router (in-process Layer 2) — must load before governance so
+	// we can inject Preview into governance after both are registered.
+	srPluginCfg := s.getPluginConfig(semanticrouter.PluginName)
+	if srPluginCfg != nil && srPluginCfg.Enabled {
+		s.registerPluginWithStatus(ctx, semanticrouter.PluginName, nil, srPluginCfg.Config, false)
+		s.Config.SetPluginOrderInfo(semanticrouter.PluginName, builtinPlacement, schemas.Ptr(35))
+	} else {
+		s.markPluginDisabled(semanticrouter.PluginName)
+	}
+
 	// 4. Governance (if enabled and not enterprise)
 	if ctx.Value(schemas.BifrostContextKeyIsEnterprise) == nil {
 		config := &governance.Config{
@@ -236,6 +254,13 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 			}
 		}
 		s.registerPluginWithStatus(ctx, governance.PluginName, nil, config, false)
+		// Wire in-process Layer 2 when the semantic-router plugin is present.
+		if govPlugin, err := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); err == nil && govPlugin != nil {
+			if srPlugin, err := lib.FindPluginAs[*semanticrouter.Plugin](s.Config, semanticrouter.PluginName); err == nil && srPlugin != nil {
+				govPlugin.SetSemanticLayer2(srPlugin)
+				logger.Info("governance Layer 2 wired to in-process semantic-router plugin")
+			}
+		}
 	} else {
 		s.markPluginDisabled(governance.PluginName)
 	}

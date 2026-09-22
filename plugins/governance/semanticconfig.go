@@ -56,9 +56,34 @@ func (c *SemanticRoutingConfig) validateAndNormalizeSemanticRouting(logger schem
 }
 
 func (c *SemanticRoutingConfig) validateRouter(logger schemas.Logger) error {
-	if c == nil || c.Router == nil || !c.Router.enabled() {
+	if c == nil || c.Router == nil {
 		return nil
 	}
+	mode := c.Router.resolvedMode()
+	switch mode {
+	case routerModePlugin:
+		// Plugin injection is validated at runtime by the transport. The same
+		// request timeout bounds embedded classifier/selector inference.
+		if c.Router.TimeoutMs > routerTimeoutWarnMs && logger != nil {
+			logger.Warn("governance semantic_routing.router.timeout_ms=%d exceeds %dms for mode=plugin; benchmark native classifier latency before production use",
+				c.Router.TimeoutMs, routerTimeoutWarnMs)
+		}
+		return nil
+	case routerModeHTTP:
+		// fall through to URL validation
+	default:
+		if strings.TrimSpace(c.Router.BaseURL) == "" && strings.TrimSpace(c.Router.Mode) == "" {
+			return nil
+		}
+	}
+
+	if !c.Router.httpEnabled() && mode == routerModeHTTP {
+		return fmt.Errorf("semantic_routing.router.mode=http requires base_url")
+	}
+	if !c.Router.httpEnabled() {
+		return nil
+	}
+
 	raw := strings.TrimSpace(c.Router.BaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -124,15 +149,7 @@ func resolvePortableFilePath(path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	candidates := []string{path}
-	if !filepath.IsAbs(path) {
-		if abs, err := filepath.Abs(path); err == nil {
-			candidates = append(candidates, abs)
-		}
-		if wd, err := os.Getwd(); err == nil {
-			candidates = append(candidates, filepath.Join(wd, path))
-		}
-	}
+	candidates := portablePathCandidates(path)
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
 		candidate = filepath.Clean(candidate)
@@ -150,4 +167,30 @@ func resolvePortableFilePath(path string) (string, error) {
 		return candidate, nil
 	}
 	return "", fmt.Errorf("file not found at %q (use a path relative to the process working directory / -app-dir)", path)
+}
+
+// portablePathCandidates returns the path plus relatives from cwd and ancestor dirs
+// (air often runs with cwd = transports/bifrost-http while config paths are repo-root relative).
+func portablePathCandidates(path string) []string {
+	candidates := []string{path}
+	if filepath.IsAbs(path) {
+		return candidates
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		candidates = append(candidates, abs)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return candidates
+	}
+	dir := wd
+	for {
+		candidates = append(candidates, filepath.Join(dir, path))
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return candidates
 }
