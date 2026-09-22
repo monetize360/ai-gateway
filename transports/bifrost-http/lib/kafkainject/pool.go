@@ -47,6 +47,15 @@ func standardPoolKey(tenantID, bootstrapServers, topic string) string {
 	return "standard:" + tenantID + ":" + bootstrapServers + ":" + topic
 }
 
+// StandardBootstrapServers returns KAFKA_BOOTSTRAP_SERVERS, or an error if it is unset.
+func StandardBootstrapServers() (string, error) {
+	bootstrapServers := strings.TrimSpace(os.Getenv(KafkaBootstrapServersEnv))
+	if bootstrapServers == "" {
+		return "", fmt.Errorf("%s is not configured", KafkaBootstrapServersEnv)
+	}
+	return bootstrapServers, nil
+}
+
 // GetOrCreate returns a cached producer or loads connection/datasource from the tenant DB.
 func (p *Pool) GetOrCreate(ctx context.Context, tenantID, connectionID, dataSourceID string) (*ProducerEntry, error) {
 	key := poolKey(tenantID, connectionID, dataSourceID)
@@ -84,9 +93,9 @@ func (p *Pool) GetOrCreateStandard(tenantID string) (*ProducerEntry, error) {
 		return nil, fmt.Errorf("tenantID is required")
 	}
 
-	bootstrapServers := strings.TrimSpace(os.Getenv(KafkaBootstrapServersEnv))
-	if bootstrapServers == "" {
-		return nil, fmt.Errorf("%s is not configured", KafkaBootstrapServersEnv)
+	bootstrapServers, err := StandardBootstrapServers()
+	if err != nil {
+		return nil, err
 	}
 	topicPrefix := strings.TrimSpace(os.Getenv(KafkaUsageTopicPrefixEnv))
 	if topicPrefix == "" {

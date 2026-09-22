@@ -1388,7 +1388,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			},
 		}
 
-	case DecisionMissingServiceID, DecisionAccountAmbiguous, DecisionWalletInsufficient:
+	case DecisionMissingServiceID, DecisionAccountAmbiguous, DecisionWalletInsufficient, DecisionMissingAccountExternalID:
 		// Billing metadata is incomplete, so the request cannot be rated — reject it as a
 		// bad request rather than letting unrated spend through.
 		return result, &schemas.BifrostError{
@@ -2021,8 +2021,11 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		message["orgUnitId"] = orgUnitID
 	}
 
+	// postHookWorker runs after the HTTP handler returns, so the request context is already
+	// cancelled by then — especially on streaming. Keep the context values but drop the
+	// cancellation so the produce is not aborted before it reaches the broker.
 	key := externalTransactionID
-	if err := p.usagePublisher.PublishUsage(ctx, tenantID, key, message); err != nil {
+	if err := p.usagePublisher.PublishUsage(context.WithoutCancel(ctx), tenantID, key, message); err != nil {
 		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
 	}
 }

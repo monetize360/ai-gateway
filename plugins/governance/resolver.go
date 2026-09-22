@@ -34,6 +34,9 @@ const (
 	// DecisionWalletInsufficient is returned when a prepaid leaf account has no eligible
 	// funded wallet, so the request cannot be billed from prepaid funds.
 	DecisionWalletInsufficient Decision = "wallet_insufficient"
+	// DecisionMissingAccountExternalID is returned when the org maps to exactly one billing
+	// account but that account has no external_id, so usage cannot be published for rating.
+	DecisionMissingAccountExternalID Decision = "missing_account_external_id"
 )
 
 // EvaluationRequest contains the context for evaluating a request
@@ -152,7 +155,8 @@ func (r *BudgetResolver) EvaluateOrgHierarchyRequest(ctx *schemas.BifrostContext
 //  3. the billing users on the key and the request,
 //  4. the org-unit chain of those users (independent of user-scoped BudgetUsage),
 //  5. the billing account of the key's organization and each of its ancestors,
-//  6. a funded prepaid wallet on the leaf account (when that account is prepaid).
+//  6. the leaf account must have external_id (rating's billingAccountRef),
+//  7. a funded prepaid wallet on the leaf account (when that account is prepaid).
 func (r *BudgetResolver) EvaluateBudgetUsageRequest(ctx *schemas.BifrostContext, request *EvaluationRequest, vk *configstoreTables.TableVirtualKey) *EvaluationResult {
 	if request == nil {
 		return &EvaluationResult{
@@ -237,7 +241,28 @@ func (r *BudgetResolver) EvaluateBudgetUsageRequest(ctx *schemas.BifrostContext,
 		}
 	}
 
-	// 6. Prepaid wallet on the leaf billing account.
+	// 6. Leaf account external_id is required to publish usage for rating.
+	if vk != nil {
+		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
+			decision, err := r.store.CheckLeafAccountExternalID(orgID)
+			if decision == DecisionAccountAmbiguous {
+				return &EvaluationResult{
+					Decision:   decision,
+					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+			if decision == DecisionMissingAccountExternalID {
+				return &EvaluationResult{
+					Decision:   decision,
+					Reason:     fmt.Sprintf("Billing account has no external_id: %s", reasonFromErr(err, decision)),
+					VirtualKey: vk,
+				}
+			}
+		}
+	}
+
+	// 7. Prepaid wallet on the leaf billing account.
 	if vk != nil {
 		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
 			serviceID := strings.TrimSpace(r.store.ResolveConfigModelServiceID(request.Provider, request.Model))
