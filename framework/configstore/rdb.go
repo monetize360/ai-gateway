@@ -3689,7 +3689,7 @@ func (s *RDBConfigStore) GetBudgets(ctx context.Context) ([]tables.TableBudget, 
 }
 
 // GetBudgetUsages retrieves all BudgetUsage rows from budgetusage__m.
-// Returns an empty slice when the table is absent (e.g. unified_llm tenants without billing).
+// Returns an empty slice when the table is absent (tenants without billing).
 func (s *RDBConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error) {
 	db := s.DB().WithContext(ctx)
 	if !db.Migrator().HasTable(&tables.TableBudgetUsage{}) {
@@ -3700,6 +3700,63 @@ func (s *RDBConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBud
 		return nil, err
 	}
 	return usages, nil
+}
+
+// GetAccounts retrieves all billing accounts from account__m.
+// Returns an empty slice when the table is absent (tenants without billing).
+func (s *RDBConfigStore) GetAccounts(ctx context.Context) ([]tables.TableAccount, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAccount{}) {
+		return nil, nil
+	}
+	var accounts []tables.TableAccount
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&accounts).Error; err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+// GetWallets retrieves all billing wallets from wallet__m.
+// Returns an empty slice when the table is absent (tenants without billing wallets).
+func (s *RDBConfigStore) GetWallets(ctx context.Context) ([]tables.TableWallet, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableWallet{}) {
+		return nil, nil
+	}
+	var wallets []tables.TableWallet
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&wallets).Error; err != nil {
+		return nil, err
+	}
+	return wallets, nil
+}
+
+// GetOrgUnits retrieves OrgUnit rows from orgunit__m.
+func (s *RDBConfigStore) GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableOrgUnit{}) {
+		return nil, nil
+	}
+	var orgUnits []tables.TableOrgUnit
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&orgUnits).Error; err != nil {
+		return nil, err
+	}
+	return orgUnits, nil
+}
+
+// GetUserOrgUnits retrieves users.id and users.org_unit_id for PreLLM org-unit resolution.
+func (s *RDBConfigStore) GetUserOrgUnits(ctx context.Context) ([]tables.TableUserOrgUnit, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableUserOrgUnit{}) {
+		return nil, nil
+	}
+	if !db.Migrator().HasColumn(&tables.TableUserOrgUnit{}, "org_unit_id") {
+		return nil, nil
+	}
+	var users []tables.TableUserOrgUnit
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 // GetBudget retrieves a specific budget from the database.

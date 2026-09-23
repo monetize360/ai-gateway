@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/tenantstore"
@@ -49,6 +50,7 @@ type TenantStoreHolder struct {
 	Registry        tenantstore.Resolver
 	Manager         *tenantstore.TenantDBManager
 	LogStoreManager tenantstore.LogStoreResolver
+	AsyncJobManager *tenantstore.TenantAsyncJobManager
 	GlobalDB        *tenantstore.GlobalDB
 	JWTKey          []byte
 	AdminJWTKey     []byte
@@ -65,6 +67,9 @@ func (h *TenantStoreHolder) Close(ctx context.Context) {
 	}
 	if h.LogStoreManager != nil {
 		h.LogStoreManager.Close(ctx)
+	}
+	if h.AsyncJobManager != nil {
+		h.AsyncJobManager.Close(ctx)
 	}
 	if h.GlobalDB != nil {
 		_ = h.GlobalDB.Close()
@@ -347,6 +352,28 @@ func InitTenantLogStores(ctx context.Context, holder *TenantStoreHolder, logsCon
 	}
 	manager := tenantstore.NewTenantLogStoreManager(holder.GlobalDB, pool, logger)
 	holder.LogStoreManager = manager
+	return nil
+}
+
+// InitTenantAsyncJobStores creates an independent per-tenant async job store manager.
+func InitTenantAsyncJobStores(ctx context.Context, holder *TenantStoreHolder) error {
+	if holder == nil || holder.GlobalDB == nil {
+		return nil
+	}
+	_ = ctx
+	pool := asyncjob.PoolSettings{
+		MaxIdleConns:    5,
+		MaxOpenConns:    20,
+		ConnMaxIdleTime: holder.PoolSettings.ConnMaxIdleTime,
+		ConnMaxLifetime: holder.PoolSettings.ConnMaxLifetime,
+	}
+	if holder.PoolSettings.MaxIdleConns > 0 {
+		pool.MaxIdleConns = holder.PoolSettings.MaxIdleConns
+	}
+	if holder.PoolSettings.MaxOpenConns > 0 {
+		pool.MaxOpenConns = holder.PoolSettings.MaxOpenConns
+	}
+	holder.AsyncJobManager = tenantstore.NewTenantAsyncJobManager(holder.GlobalDB, pool, logger)
 	return nil
 }
 

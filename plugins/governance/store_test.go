@@ -1245,7 +1245,221 @@ func TestGovernanceStore_CalculateBudgetCost(t *testing.T) {
 	})
 }
 
+func TestGovernanceStore_CheckOrgUnitHierarchyBudgetUsage(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	userID := "user-1"
+	leafID := "ou-leaf"
+	parentID := "ou-parent"
+	seedOrgUnitChain(store, userID, leafID, parentID)
+
+	underLimit := buildOrgUnitBudgetUsage("bu-leaf", leafID, 100, 10)
+	exceededParent := buildOrgUnitBudgetUsage("bu-parent", parentID, 50, 50)
+	unrelatedUser := buildUserBudgetUsage("bu-user", userID, 1, 1)
+	store.budgetUsages.Store(underLimit.ID, underLimit)
+	store.budgetUsages.Store(exceededParent.ID, exceededParent)
+	store.budgetUsages.Store(unrelatedUser.ID, unrelatedUser)
+
+	decision, err := store.CheckOrgUnitHierarchyBudgetUsage(context.Background(), []string{userID}, nil, nil)
+	require.Error(t, err)
+	assert.Equal(t, DecisionBudgetExceeded, decision)
+	assert.Contains(t, err.Error(), "OrgUnit:"+parentID)
+
+	userDecision, userErr := store.CheckUserBudgetUsage(context.Background(), userID, nil, nil)
+	require.Error(t, userErr)
+	assert.Equal(t, DecisionBudgetExceeded, userDecision)
+}
+
+func TestGovernanceStore_CheckOrgUnitHierarchyBudgetUsage_IndependentOfUserRows(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	userID := "user-2"
+	leafID := "ou-ok"
+	seedOrgUnitChain(store, userID, leafID, "")
+
+	store.budgetUsages.Store("bu-leaf-ok", buildOrgUnitBudgetUsage("bu-leaf-ok", leafID, 100, 10))
+	store.budgetUsages.Store("bu-user-exceeded", buildUserBudgetUsage("bu-user-exceeded", userID, 1, 5))
+
+	decision, err := store.CheckOrgUnitHierarchyBudgetUsage(context.Background(), []string{userID}, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, decision)
+}
+
+func TestGovernanceStore_ResolveLeafOrgUnitID(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	firstUser := "user-a"
+	secondUser := "user-b"
+	leafA := "ou-a"
+	leafB := "ou-b"
+	seedOrgUnitChain(store, firstUser, leafA, "")
+	seedOrgUnitChain(store, secondUser, leafB, "")
+
+	assert.Equal(t, leafA, store.ResolveLeafOrgUnitID(firstUser, secondUser))
+	assert.Equal(t, leafB, store.ResolveLeafOrgUnitID("", "missing", secondUser))
+	assert.Equal(t, "", store.ResolveLeafOrgUnitID("", "missing"))
+}
+
+func TestGovernanceStore_budgetUsagesForRequest_IncludesOrgUnitChain(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	userID := "user-vk"
+	leafID := "ou-leaf"
+	parentID := "ou-parent"
+	seedOrgUnitChain(store, userID, leafID, parentID)
+
+	leafUsage := buildOrgUnitBudgetUsage("bu-leaf", leafID, 100, 1)
+	parentUsage := buildOrgUnitBudgetUsage("bu-parent", parentID, 200, 2)
+	userUsage := buildUserBudgetUsage("bu-user", userID, 30, 3)
+	store.budgetUsages.Store(leafUsage.ID, leafUsage)
+	store.budgetUsages.Store(parentUsage.ID, parentUsage)
+	store.budgetUsages.Store(userUsage.ID, userUsage)
+
+	vk := buildVirtualKey("vk-ou", "sk-bf-ou", "OU VK", true)
+	vk.UserID = &userID
+
+	usages := store.budgetUsagesForRequest("", "", vk)
+	ids := make([]string, 0, len(usages))
+	for _, usage := range usages {
+		ids = append(ids, usage.ID)
+	}
+	assert.ElementsMatch(t, []string{leafUsage.ID, parentUsage.ID, userUsage.ID}, ids)
+}
+
+func seedOrgUnitChain(store *LocalGovernanceStore, userID, leafID, parentID string) {
+	var parentPtr *string
+	if parentID != "" {
+		parentCopy := parentID
+		parentPtr = &parentCopy
+		store.orgUnits.Store(parentID, &configstoreTables.TableOrgUnit{ID: parentID})
+	}
+	store.orgUnits.Store(leafID, &configstoreTables.TableOrgUnit{ID: leafID, ParentID: parentPtr})
+	leafCopy := leafID
+	store.userOrgUnits.Store(userID, &configstoreTables.TableUserOrgUnit{ID: userID, OrgUnitID: &leafCopy})
+}
+
+func buildOrgUnitBudgetUsage(id, orgUnitID string, maxLimit, currentUsage float64) *configstoreTables.TableBudgetUsage {
+	orgUnitCopy := orgUnitID
+	return &configstoreTables.TableBudgetUsage{
+		ID:           id,
+		MaxLimit:     maxLimit,
+		CurrentUsage: currentUsage,
+		OrgUnitID:    &orgUnitCopy,
+	}
+}
+
+func buildUserBudgetUsage(id, userID string, maxLimit, currentUsage float64) *configstoreTables.TableBudgetUsage {
+	userCopy := userID
+	return &configstoreTables.TableBudgetUsage{
+		ID:           id,
+		MaxLimit:     maxLimit,
+		CurrentUsage: currentUsage,
+		UserID:       &userCopy,
+	}
+}
+
 // Utility functions for tests
 func ptrInt64(i int64) *int64 {
 	return &i
+}
+
+// Ensures billing entities added for PreLLM / usage publish refresh into the in-memory
+// maps used by Resolve*/Check* (not only ModelConfig budget/rate-limit views).
+func TestGovernanceStore_ApplyRefreshDelta_BillingTables(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	orgID := "org-1"
+	accountID := "acct-1"
+	walletID := "wallet-1"
+	leafOrgUnitID := "ou-leaf"
+	parentOrgUnitID := "ou-parent"
+	userID := "user-1"
+	providerID := "prov-1"
+	providerName := "fakellm"
+	serviceID := "svc-1"
+	modelName := "gemma-3-1b-it"
+	externalID := "ext-acct-1"
+	active := true
+	approved := approvedWalletStatusID
+	available := 42.5
+
+	store.providers.Store(providerName, &configstoreTables.TableProvider{ID: providerID, Name: providerName})
+
+	delta := &configstore.GovernanceRefreshDelta{
+		Accounts: []configstoreTables.TableAccount{{
+			ID:                     accountID,
+			ExternalID:             &externalID,
+			CustomerOrganizationID: &orgID,
+			IsPrepaid:              true,
+		}},
+		Wallets: []configstoreTables.TableWallet{{
+			ID:               walletID,
+			AccountID:        &accountID,
+			ServiceID:        &serviceID,
+			AvailableBalance: &available,
+			IsActive:         &active,
+			ApprovalStatus:   &approved,
+		}},
+		OrgUnits: []configstoreTables.TableOrgUnit{
+			{ID: parentOrgUnitID},
+			{ID: leafOrgUnitID, ParentID: &parentOrgUnitID},
+		},
+		UserOrgUnits: []configstoreTables.TableUserOrgUnit{{
+			ID:        userID,
+			OrgUnitID: &leafOrgUnitID,
+		}},
+		BudgetUsages: []configstoreTables.TableBudgetUsage{{
+			ID:           "bu-ou",
+			MaxLimit:     100,
+			CurrentUsage: 10,
+			OrgUnitID:    &leafOrgUnitID,
+		}},
+		ConfigModels: []configstoreTables.TableModel{{
+			ID:           "model-1",
+			ProviderID:   providerID,
+			Name:         modelName,
+			ServiceID:    &serviceID,
+			ProviderName: providerName,
+		}},
+	}
+
+	store.applyGovernanceRefreshDelta(context.Background(), delta)
+
+	assert.Equal(t, externalID, store.ResolveLeafAccountExternalID(orgID))
+	decision, err := store.CheckLeafAccountExternalID(orgID)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, decision)
+
+	assert.Equal(t, leafOrgUnitID, store.ResolveLeafOrgUnitID(userID))
+	chain := store.orgUnitHierarchyIDs(leafOrgUnitID)
+	assert.Equal(t, []string{leafOrgUnitID, parentOrgUnitID}, chain)
+
+	assert.Equal(t, serviceID, store.ResolveConfigModelServiceID(schemas.ModelProvider(providerName), modelName))
+
+	walletDecision, err := store.CheckPrepaidWallet(context.Background(), orgID, serviceID)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, walletDecision)
+
+	// Clearing service_id via refresh must fail PreLLM mapping until remapped.
+	cleared := configstoreTables.TableModel{
+		ID:           "model-1",
+		ProviderID:   providerID,
+		Name:         modelName,
+		ServiceID:    nil,
+		ProviderName: providerName,
+	}
+	store.applyGovernanceRefreshDelta(context.Background(), &configstore.GovernanceRefreshDelta{
+		ConfigModels: []configstoreTables.TableModel{cleared},
+	})
+	assert.Equal(t, "", store.ResolveConfigModelServiceID(schemas.ModelProvider(providerName), modelName))
 }

@@ -290,6 +290,8 @@ type TableVirtualKey struct {
 
 	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
+	// UserID is the billing user owning this key; drives budgetusage__m.user_id checks in PreLLM.
+	UserID *string `gorm:"column:user_id;type:uuid;index" json:"user_id,omitempty"`
 	// ScopeOrgID is the org used for budget, rate limit, and routing scope at runtime.
 	// When set, it takes precedence over OrgID.
 	ScopeOrgID *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`

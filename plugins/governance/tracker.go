@@ -30,16 +30,14 @@ type UsageUpdate struct {
 	HasUsageData bool `json:"has_usage_data"` // Whether this chunk contains usage data
 }
 
-// UsageTracker manages VK-level usage tracking and budget management
+// UsageTracker maintains rate-limit counters and resets expired BudgetUsage periods.
+// Spend itself is priced by MPilot Rating from the published InferenceUsage events, so the
+// tracker never writes usage into governance_budgets or budgetusage__m.
 type UsageTracker struct {
 	store       GovernanceStore
 	resolver    *BudgetResolver
 	configStore configstore.ConfigStore
 	logger      schemas.Logger
-
-	// ownsLocalBudgetUsage: true for unified_llm (bump cache + DumpBudgets).
-	// false for ai_infra (rate limits only; MPilot owns governance_budgets writes).
-	ownsLocalBudgetUsage bool
 
 	// Background workers
 	trackerCtx    context.Context
@@ -53,16 +51,14 @@ const (
 	workerInterval = 10 * time.Second
 )
 
-// NewUsageTracker creates a new usage tracker for the hierarchical budget system.
-// Defaults to ownsLocalBudgetUsage=true (unified_llm). Call SetOwnsLocalBudgetUsage for ai_infra.
+// NewUsageTracker creates a new usage tracker and starts its background reset worker.
 func NewUsageTracker(ctx context.Context, store GovernanceStore, resolver *BudgetResolver, configStore configstore.ConfigStore, logger schemas.Logger) *UsageTracker {
 	tracker := &UsageTracker{
-		store:                store,
-		resolver:             resolver,
-		configStore:          configStore,
-		logger:               logger,
-		ownsLocalBudgetUsage: true,
-		done:                 make(chan struct{}),
+		store:       store,
+		resolver:    resolver,
+		configStore: configStore,
+		logger:      logger,
+		done:        make(chan struct{}),
 	}
 
 	// Start background workers for business logic
@@ -70,14 +66,6 @@ func NewUsageTracker(ctx context.Context, store GovernanceStore, resolver *Budge
 	tracker.startWorkers(tracker.trackerCtx)
 
 	return tracker
-}
-
-// SetOwnsLocalBudgetUsage configures whether this tracker bumps and dumps budget usage locally.
-func (t *UsageTracker) SetOwnsLocalBudgetUsage(owns bool) {
-	if t == nil {
-		return
-	}
-	t.ownsLocalBudgetUsage = owns
 }
 
 // UpdateUsage queues a usage update for async processing (main business entry point)
@@ -91,7 +79,6 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 	// Streaming optimization: only process certain updates based on streaming status
 	shouldUpdateTokens := !update.IsStreaming || (update.IsStreaming && update.HasUsageData)
 	shouldUpdateRequests := !update.IsStreaming || (update.IsStreaming && update.IsFinalChunk)
-	shouldUpdateBudget := !update.IsStreaming || (update.IsStreaming && update.HasUsageData)
 
 	// 1. Update rate limit usage for both provider-level and model-level
 	// This applies even when virtual keys are disabled or not present
@@ -102,27 +89,14 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 		}
 	}
 
-	// 2. Update budget usage for both provider-level and model-level (unified_llm only)
-	if t.ownsLocalBudgetUsage && update.Provider != "" && update.Model != "" && shouldUpdateBudget && update.Cost > 0 {
-		if err := t.store.UpdateProviderAndModelBudgetUsageInMemory(ctx, update.Model, update.Provider, update.Cost); err != nil {
-			t.logger.Error("failed to update budget usage for model %s, provider %s: %v", update.Model, update.Provider, err)
-		}
-	}
-
-	// 3. Update user-level governance (enterprise-only, before VK-level)
+	// 2. Update user-level rate limits (enterprise-only, before VK-level)
 	if update.UserID != "" {
-		// Update user rate limit usage
 		if err := t.store.UpdateUserRateLimitUsageInMemory(ctx, update.UserID, update.TokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
 			t.logger.Error("failed to update user rate limit usage for user %s: %v", update.UserID, err)
 		}
-		if t.ownsLocalBudgetUsage && shouldUpdateBudget && update.Cost > 0 {
-			if err := t.store.UpdateUserBudgetUsageInMemory(ctx, update.UserID, update.Cost); err != nil {
-				t.logger.Error("failed to update user budget usage for user %s: %v", update.UserID, err)
-			}
-		}
 	}
 
-	// 4. Now handle virtual key-level updates (if virtual key exists)
+	// 3. Now handle virtual key-level updates (if virtual key exists)
 	if update.VirtualKey == "" {
 		// No virtual key, provider-level and model-level updates already done above
 		return
@@ -139,14 +113,6 @@ func (t *UsageTracker) UpdateUsage(ctx context.Context, update *UsageUpdate) {
 	if len(vk.RateLimits) > 0 || len(vk.AllowedModelConfigs) > 0 || vk.GovernanceScopeOrgID() != nil {
 		if err := t.store.UpdateVirtualKeyRateLimitUsageInMemory(ctx, vk, update.Provider, update.TokensUsed, shouldUpdateTokens, shouldUpdateRequests); err != nil {
 			t.logger.Error("failed to update rate limit usage for VK %s: %v", vk.ID, err)
-		}
-	}
-
-	// Update budget usage in hierarchy (VK → Team → Customer) — unified_llm only
-	if t.ownsLocalBudgetUsage && shouldUpdateBudget && update.Cost > 0 {
-		t.logger.Debug("updating budget usage for VK %s", vk.ID)
-		if err := t.store.UpdateVirtualKeyBudgetUsageInMemory(ctx, vk, update.Provider, update.Cost); err != nil {
-			t.logger.Error("failed to update budget hierarchy atomically for VK %s: %v", vk.ID, err)
 		}
 	}
 }
@@ -174,7 +140,8 @@ func (t *UsageTracker) resetWorker(ctx context.Context) {
 	}
 }
 
-// resetExpiredCounters manages periodic resets of usage counters AND budgets using flexible durations
+// resetExpiredCounters manages periodic resets of rate-limit counters and BudgetUsage periods
+// using flexible durations. governance_budgets are never touched: they no longer carry spend.
 func (t *UsageTracker) resetExpiredCounters(ctx context.Context) {
 	// ==== PART 1: Reset Rate Limits ====
 	resetRateLimits := t.store.ResetExpiredRateLimitsInMemory(ctx)
@@ -182,20 +149,15 @@ func (t *UsageTracker) resetExpiredCounters(ctx context.Context) {
 		t.logger.Error("failed to reset expired rate limits: %v", err)
 	}
 
-	// ==== PART 2: Reset Budgets ====
-	resetBudgets := t.store.ResetExpiredBudgetsInMemory(ctx)
-	if err := t.store.ResetExpiredBudgets(ctx, resetBudgets); err != nil {
-		t.logger.Error("failed to reset expired budgets: %v", err)
+	// ==== PART 2: Reset BudgetUsage periods (zero usage + ledger entry) ====
+	resetBudgetUsages := t.store.ResetExpiredBudgetUsagesInMemory(ctx)
+	if err := t.store.ResetExpiredBudgetUsages(ctx, resetBudgetUsages); err != nil {
+		t.logger.Error("failed to reset expired budget usages: %v", err)
 	}
 
-	// ==== PART 3: Dump all rate limits and budgets to database ====
+	// ==== PART 3: Dump rate limit counters to database ====
 	if err := t.store.DumpRateLimits(ctx, nil, nil); err != nil {
 		t.logger.Error("failed to dump rate limits to database: %v", err)
-	}
-	if t.ownsLocalBudgetUsage {
-		if err := t.store.DumpBudgets(ctx, nil); err != nil {
-			t.logger.Error("failed to dump budgets to database: %v", err)
-		}
 	}
 }
 
@@ -280,9 +242,9 @@ func (t *UsageTracker) PerformStartupResets(ctx context.Context) error {
 	}
 
 	// DB reset is also handled by this function
-	resetBudgets := t.store.ResetExpiredBudgetsInMemory(ctx)
-	if err := t.store.ResetExpiredBudgets(ctx, resetBudgets); err != nil {
-		errs = append(errs, fmt.Sprintf("failed to reset expired budgets: %s", err.Error()))
+	resetBudgetUsages := t.store.ResetExpiredBudgetUsagesInMemory(ctx)
+	if err := t.store.ResetExpiredBudgetUsages(ctx, resetBudgetUsages); err != nil {
+		errs = append(errs, fmt.Sprintf("failed to reset expired budget usages: %s", err.Error()))
 	}
 
 	// ==== PERSIST RESETS TO DATABASE ====
@@ -324,13 +286,8 @@ func (t *UsageTracker) PerformStartupResets(ctx context.Context) error {
 
 // Cleanup stops all background workers and flushes pending operations
 func (t *UsageTracker) Cleanup() error {
-	// Final flush of in-memory deltas to DB before shutdown. Without this,
+	// Final flush of in-memory rate-limit deltas to DB before shutdown. Without this,
 	// any deltas accumulated since the last `workerInterval` tick are lost.
-	if t.ownsLocalBudgetUsage {
-		if err := t.store.DumpBudgets(context.Background(), nil); err != nil {
-			t.logger.Error("final budget dump on shutdown failed: %v", err)
-		}
-	}
 	if err := t.store.DumpRateLimits(context.Background(), nil, nil); err != nil {
 		t.logger.Error("final rate-limit dump on shutdown failed: %v", err)
 	}

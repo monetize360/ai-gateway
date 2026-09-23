@@ -21,8 +21,15 @@ type GovernanceRefreshDelta struct {
 	VirtualKeys                    []tables.TableVirtualKey
 	Budgets                        []tables.TableBudget
 	BudgetUsages                   []tables.TableBudgetUsage
+	Accounts                       []tables.TableAccount
+	Wallets                        []tables.TableWallet
+	OrgUnits                       []tables.TableOrgUnit
+	UserOrgUnits                   []tables.TableUserOrgUnit
 	RateLimits                     []tables.TableRateLimit
 	ModelConfigs                   []tables.TableModelConfig
+	// ConfigModels carries config_models catalog rows (including service_id) so billing
+	// service mapping refreshes without a gateway restart.
+	ConfigModels                   []tables.TableModel
 	Providers                      []tables.TableProvider
 	RoutingRules                   []tables.TableRoutingRule
 	ReloadOrgAllowedModelConfigs   bool
@@ -40,8 +47,13 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
 		len(d.BudgetUsages) == 0 &&
+		len(d.Accounts) == 0 &&
+		len(d.Wallets) == 0 &&
+		len(d.OrgUnits) == 0 &&
+		len(d.UserOrgUnits) == 0 &&
 		len(d.RateLimits) == 0 &&
 		len(d.ModelConfigs) == 0 &&
+		len(d.ConfigModels) == 0 &&
 		len(d.Providers) == 0 &&
 		len(d.RoutingRules) == 0
 }
@@ -92,6 +104,42 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 		}
 	}
 
+	if db.Migrator().HasTable(&tables.TableAccount{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.Accounts).Error; err != nil {
+			return nil, fmt.Errorf("accounts changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.Accounts); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableWallet{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.Wallets).Error; err != nil {
+			return nil, fmt.Errorf("wallets changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.Wallets); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableOrgUnit{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.OrgUnits).Error; err != nil {
+			return nil, fmt.Errorf("org units changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.OrgUnits); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableUserOrgUnit{}) && db.Migrator().HasColumn(&tables.TableUserOrgUnit{}, "org_unit_id") {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.UserOrgUnits).Error; err != nil {
+			return nil, fmt.Errorf("user org units changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.UserOrgUnits); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.RateLimits).Error; err != nil {
 		return nil, fmt.Errorf("rate limits changed since: %w", err)
 	}
@@ -111,6 +159,12 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	if err != nil {
 		return nil, err
 	}
+	for i := range changedModels {
+		if providerName, ok := names[changedModels[i].ProviderID]; ok {
+			changedModels[i].ProviderName = providerName
+		}
+	}
+	delta.ConfigModels = append(delta.ConfigModels, changedModels...)
 	delta.ModelConfigs = tableModelsToModelConfigs(changedModels, names)
 	var deletedModels []tables.TableModel
 	if err := appendDeletedRowsSince(db, since, &deletedModels); err != nil {
@@ -118,6 +172,10 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 	for i := range deletedModels {
 		deletedModels[i].Deleted = true
+		if providerName, ok := names[deletedModels[i].ProviderID]; ok {
+			deletedModels[i].ProviderName = providerName
+		}
+		delta.ConfigModels = append(delta.ConfigModels, deletedModels[i])
 		if mc := tables.ModelConfigFromTableModel(&deletedModels[i], nil); mc != nil {
 			delta.ModelConfigs = append(delta.ModelConfigs, *mc)
 		}

@@ -534,3 +534,55 @@ func TestBudgetResolver_ContextPopulation(t *testing.T) {
 	assert.Equal(t, "vk1", vkID)
 	assert.Equal(t, "org1", resolvedOrgID)
 }
+
+func TestBudgetResolver_EvaluateBudgetUsageRequest_OrgUnitHierarchyExceeded(t *testing.T) {
+	logger := NewMockLogger()
+	userID := "user-ou"
+	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
+	vk.UserID = &userID
+	vk.AllowedModelConfigs = []configstoreTables.TableVirtualKeyProviderConfig{
+		buildProviderConfig("openai", []string{"*"}),
+	}
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
+	}, nil)
+	require.NoError(t, err)
+
+	leafID := "ou-leaf"
+	parentID := "ou-parent"
+	seedOrgUnitChain(store, userID, leafID, parentID)
+	store.budgetUsages.Store("bu-parent", buildOrgUnitBudgetUsage("bu-parent", parentID, 10, 10))
+	store.budgetUsages.Store("bu-user", buildUserBudgetUsage("bu-user", userID, 1000, 1))
+
+	resolver := NewBudgetResolver(store, nil, logger, nil)
+	result := resolver.EvaluateBudgetUsageRequest(&schemas.BifrostContext{}, &EvaluationRequest{
+		BillingUserID: userID,
+	}, vk)
+
+	assertDecision(t, DecisionBudgetExceeded, result)
+	assert.Contains(t, result.Reason, "Org-unit budget exceeded")
+}
+
+func TestBudgetResolver_EvaluateBudgetUsageRequest_OrgUnitAllowsWhenOnlyUserBudgetExceeded(t *testing.T) {
+	logger := NewMockLogger()
+	userID := "user-ou-ok"
+	vk := buildVirtualKey("vk1", "sk-bf-test", "Test VK", true)
+	vk.UserID = &userID
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		VirtualKeys: []configstoreTables.TableVirtualKey{*vk},
+	}, nil)
+	require.NoError(t, err)
+
+	leafID := "ou-ok"
+	seedOrgUnitChain(store, userID, leafID, "")
+	store.budgetUsages.Store("bu-leaf", buildOrgUnitBudgetUsage("bu-leaf", leafID, 100, 1))
+	store.budgetUsages.Store("bu-user", buildUserBudgetUsage("bu-user", userID, 1, 5))
+
+	resolver := NewBudgetResolver(store, nil, logger, nil)
+	result := resolver.EvaluateBudgetUsageRequest(&schemas.BifrostContext{}, &EvaluationRequest{}, vk)
+
+	assertDecision(t, DecisionBudgetExceeded, result)
+	assert.Contains(t, result.Reason, "User-level budget exceeded")
+}

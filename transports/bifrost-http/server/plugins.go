@@ -95,8 +95,6 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		if err != nil {
 			return nil, err
 		}
-		// Optional shared kvstore (previously used for NVIDIA classifier cache).
-		governancePlugin.SetKVStore(bifrostConfig.GetKVStore())
 		return governancePlugin, nil
 
 	case semanticrouter.PluginName:
@@ -239,7 +237,6 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 			RequiredHeaders:       &s.Config.ClientConfig.RequiredHeaders,
 			DisableAutoToolInject: &s.Config.ClientConfig.MCPDisableAutoToolInject,
 			RoutingChainMaxDepth:  &s.Config.ClientConfig.RoutingChainMaxDepth,
-			GatewayDeploymentType: s.Config.ClientConfig.GatewayDeploymentType,
 		}
 		// Merge semantic_routing (and any other governance plugin fields) from
 		// PluginConfigs / config_plugins so DB or config.json can enable the kill switch

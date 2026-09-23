@@ -18,10 +18,10 @@ import (
 	"github.com/google/uuid"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
-	"github.com/maximhq/bifrost/framework/logstore"
 	dynamicPlugins "github.com/maximhq/bifrost/framework/plugins"
 	"github.com/maximhq/bifrost/framework/temptoken"
 	"github.com/maximhq/bifrost/framework/tracing"
@@ -138,7 +138,7 @@ type BifrostHTTPServer struct {
 
 	LogLevel        string
 	LogOutputStyle  string
-	AsyncJobCleaner *logstore.AsyncJobCleaner
+	AsyncJobCleaner *asyncjob.Cleaner
 
 	Client *bifrost.Bifrost
 	Config *lib.Config
@@ -1150,9 +1150,6 @@ func (s *BifrostHTTPServer) ReloadPlugin(ctx context.Context, name string, path 
 	if semanticCachePlugin, ok := plugin.(*semanticcache.Plugin); ok {
 		semanticCachePlugin.SetEmbeddingRequestExecutor(s.Client.EmbeddingRequest)
 	}
-	if governancePlugin, ok := plugin.(*governance.GovernancePlugin); ok {
-		governancePlugin.SetKVStore(s.Config.GetKVStore())
-	}
 	return s.SyncLoadedPlugin(ctx, name, plugin, placement, order)
 }
 
@@ -1440,6 +1437,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if err := lib.InitTenantLogStores(ctx, s.Config.TenantStore, s.Config.LogsStoreConfig); err != nil {
 			return fmt.Errorf("failed to initialise tenant log stores: %v", err)
 		}
+		if err := lib.InitTenantAsyncJobStores(ctx, s.Config.TenantStore); err != nil {
+			return fmt.Errorf("failed to initialise tenant async job stores: %v", err)
+		}
 	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
@@ -1450,9 +1450,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	s.Config.EventBroadcaster = s.WebSocketHandler.BroadcastEvent
 	// Initializing plugin loader
 	s.Config.PluginLoader = &dynamicPlugins.SharedObjectPluginLoader{}
-	// Initialize async job cleaner if log store is configured
-	if s.Config.LogsStore != nil {
-		s.AsyncJobCleaner = logstore.NewAsyncJobCleaner(s.Config.LogsStore, logger)
+	// Async jobs use their own tenant store and are independent from audit logging.
+	if s.Config.TenantStore != nil && s.Config.TenantStore.AsyncJobManager != nil {
+		s.AsyncJobCleaner = asyncjob.NewCleaner(nil, s.Config.TenantStore.AsyncJobManager, logger)
 		s.AsyncJobCleaner.StartCleanupRoutine()
 	}
 	// Load all plugins
@@ -1473,13 +1473,15 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		logger.Info("governance plugin configured for per-tenant store routing")
 	}
 
-	// Initialize async job executor (requires LogsStore + governance plugin)
-	if s.Config.LogsStore != nil {
-		governancePlugin, govErr := lib.FindPluginAs[governance.BaseGovernancePlugin](s.Config, s.getGovernancePluginName())
-		if govErr == nil {
-			s.Config.AsyncJobExecutor = logstore.NewAsyncJobExecutor(s.Config.LogsStore, pluginGovernanceStore{plugin: governancePlugin}, logger)
-			logger.Info("async job executor initialized")
+	// Initialize async job executor independently from logstore.
+	governancePlugin, govErr := lib.FindPluginAs[governance.BaseGovernancePlugin](s.Config, s.getGovernancePluginName())
+	if govErr == nil {
+		var resolver asyncjob.Resolver
+		if s.Config.TenantStore != nil {
+			resolver = s.Config.TenantStore.AsyncJobManager
 		}
+		s.Config.AsyncJobExecutor = asyncjob.NewExecutor(nil, resolver, pluginGovernanceStore{plugin: governancePlugin}, logger)
+		logger.Info("async job executor initialized")
 	}
 
 	tableMCPConfig := s.Config.MCPConfig
@@ -1631,11 +1633,6 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err == nil && semanticCachePlugin != nil {
 		semanticCachePlugin.SetEmbeddingRequestExecutor(s.Client.EmbeddingRequest)
 	}
-	// Wire governance plugin kvstore for classifier verdict caching.
-	governancePlugin, err := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName)
-	if err == nil && governancePlugin != nil {
-		governancePlugin.SetKVStore(s.Config.GetKVStore())
-	}
 	// TenantMiddleware runs outermost so tenant ID is available to auth and handlers.
 	// API routes use OptionalMiddleware to skip JWT on whitelisted paths.
 	if s.TenantMiddleware != nil {
@@ -1694,27 +1691,25 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 
 	// High-throughput usage ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
 	// Standard usage publishing uses KAFKA_BOOTSTRAP_SERVERS and the same
-	// KAFKA_USAGE_TOPIC_PREFIX configured in MPilot.
+	// KAFKA_USAGE_TOPIC_PREFIX configured in MPilot. Tenant mode refuses to start
+	// without bootstrap servers so chat cannot run with a silent no-op publisher.
 	if s.Config.TenantStore != nil {
-		isAIInfra := configstore.IsAIInfraGatewayDeployment(s.Config.ClientConfig.GatewayDeploymentType)
-		needIngestRoute := len(s.Config.TenantStore.AdminJWTKey) > 0
-		if isAIInfra || needIngestRoute {
-			kafkaPool := kafkainject.NewPool(s.Config.Registry())
-			kafkaSchemaCache := kafkainject.NewSchemaCache(s.Config.Registry())
-			s.KafkaIngestHandler = handlers.NewKafkaIngestHandlerWithPool(s.Config.Registry(), kafkaPool, kafkaSchemaCache)
-			if isAIInfra {
-				if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
-					govPlugin.SetUsageEventPublisher(s.KafkaIngestHandler.UsagePublisher())
-					logger.Info("governance InferenceUsage kafka publisher wired (ai_infra)")
-				}
-			}
-			if needIngestRoute {
-				ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
-				s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
-				logger.Info("registered usage ingest route POST /v1/ingest/usage (legacy POST /v1/ingest/kafka is deprecated)")
-			} else {
-				logger.Warn("kafka ingest HTTP route not registered: admin JWT key missing")
-			}
+		if _, err := kafkainject.StandardBootstrapServers(); err != nil {
+			return fmt.Errorf("failed to initialize kafka usage publish: %w", err)
+		}
+		kafkaPool := kafkainject.NewPool(s.Config.Registry())
+		kafkaSchemaCache := kafkainject.NewSchemaCache(s.Config.Registry())
+		s.KafkaIngestHandler = handlers.NewKafkaIngestHandlerWithPool(s.Config.Registry(), kafkaPool, kafkaSchemaCache)
+		if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
+			govPlugin.SetUsageEventPublisher(s.KafkaIngestHandler.UsagePublisher())
+			logger.Info("governance InferenceUsage kafka publisher wired")
+		}
+		if len(s.Config.TenantStore.AdminJWTKey) > 0 {
+			ingestAuth := handlers.NewIngestAuthMiddleware(s.Config.TenantStore.AdminJWTKey)
+			s.KafkaIngestHandler.RegisterRoutes(s.Router, ingestAuth.Middleware())
+			logger.Info("registered usage ingest route POST /v1/ingest/usage (legacy POST /v1/ingest/kafka is deprecated)")
+		} else {
+			logger.Warn("kafka ingest HTTP route not registered: admin JWT key missing")
 		}
 	} else {
 		logger.Warn("kafka ingest / usage publish not configured: tenant store missing")

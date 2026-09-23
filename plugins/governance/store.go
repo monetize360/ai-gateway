@@ -30,6 +30,10 @@ type LocalGovernanceStore struct {
 	organizations sync.Map // string -> *Organization (org ID -> Organization for hierarchy walks)
 	budgets       sync.Map // string -> *Budget (Budget ID -> Budget)
 	budgetUsages  sync.Map // string -> *TableBudgetUsage (BudgetUsage ID -> row from budgetusage__m)
+	accounts      sync.Map // string -> *TableAccount (Account ID -> row from account__m)
+	wallets       sync.Map // string -> *TableWallet (Wallet ID -> row from wallet__m)
+	orgUnits      sync.Map // string -> *TableOrgUnit (OrgUnit ID -> row from orgunit__m)
+	userOrgUnits  sync.Map // string -> *TableUserOrgUnit (User ID -> org_unit_id mapping)
 	rateLimits    sync.Map // string -> *RateLimit (RateLimit ID -> RateLimit)
 	modelConfigs  sync.Map // string -> *ModelConfig (key: "modelName" or "modelName:provider" -> ModelConfig)
 	configModels  sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
@@ -72,12 +76,14 @@ type LocalGovernanceStore struct {
 	orgProviderAccessMu      sync.RWMutex
 	orgProviderAccessByOrgID map[string][]configstoreTables.TableProviderAccess
 
-	// syncBudgetUsageFromDB: when true (ai_infra), incremental refresh applies DB CurrentUsage
-	// for governance_budgets via SyncBudgetFromDatabase, and BudgetUsage rows are always
-	// synced from DB (MPilot Rating owns budgetusage__m). When false (unified_llm),
-	// UpsertBudgetConfig preserves in-memory governance budget usage so local DumpBudgets
-	// bumps are not clobbered.
-	syncBudgetUsageFromDB bool
+	// Billing accounts indexed by their customer organization. A well-formed tenant has at
+	// most one account per organization; extra rows are kept so PreLLM can reject the
+	// ambiguity instead of silently picking one.
+	accountsMu              sync.RWMutex
+	accountsByCustomerOrgID map[string][]*configstoreTables.TableAccount
+
+	walletsMu          sync.RWMutex
+	walletsByAccountID map[string][]*configstoreTables.TableWallet
 }
 
 type GovernanceData struct {
@@ -124,6 +130,14 @@ type BudgetResetSnapshot struct {
 	PrevLastReset time.Time                      // last_reset before reset (= period start)
 }
 
+// BudgetUsageResetSnapshot is the BudgetUsage equivalent of BudgetResetSnapshot: it carries the
+// post-reset row plus the completed period's spend so budgetusage_ledger can record it.
+type BudgetUsageResetSnapshot struct {
+	Usage         *configstoreTables.TableBudgetUsage // post-reset state (CurrentUsage=0, LastReset=new)
+	PrevUsage     float64                             // current_usage before reset
+	PrevLastReset time.Time                           // period start of the window that just closed
+}
+
 // GovernanceStore defines the interface for governance data access and policy evaluation.
 //
 // Error semantics contract:
@@ -166,9 +180,11 @@ type GovernanceStore interface {
 	// In-memory reset checks (return items that need DB sync)
 	ResetExpiredRateLimitsInMemory(ctx context.Context) []*configstoreTables.TableRateLimit
 	ResetExpiredBudgetsInMemory(ctx context.Context) []BudgetResetSnapshot
+	ResetExpiredBudgetUsagesInMemory(ctx context.Context) []BudgetUsageResetSnapshot
 	// DB sync for expired items
 	ResetExpiredRateLimits(ctx context.Context, resetRateLimits []*configstoreTables.TableRateLimit) error
 	ResetExpiredBudgets(ctx context.Context, snapshots []BudgetResetSnapshot) error
+	ResetExpiredBudgetUsages(ctx context.Context, snapshots []BudgetUsageResetSnapshot) error
 	// Provider and model-level usage updates (combined)
 	UpdateProviderAndModelBudgetUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, cost float64) error
 	UpdateProviderAndModelRateLimitUsageInMemory(ctx context.Context, model string, provider schemas.ModelProvider, tokensUsed int64, shouldUpdateTokens bool, shouldUpdateRequests bool) error
@@ -186,15 +202,26 @@ type GovernanceStore interface {
 	// Org hierarchy governance checks (walks org → parent → … → root)
 	CheckOrgHierarchyBudget(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckOrgHierarchyRateLimit(ctx context.Context, orgID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
-	// Billing-scope BudgetUsage checks (budgetusage__m account_id / contract_id / user_id; ai_infra PreLLM)
+	// Billing-scope BudgetUsage checks (budgetusage__m service_id / provider_id / account_id /
+	// user_id). These own every spend limit enforced in PreLLM. Account scopes are resolved from
+	// the VK organization's account hierarchy (not from the request body).
+	CheckServiceBudgetUsage(ctx context.Context, serviceID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	CheckProviderBudgetUsage(ctx context.Context, providerID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckAccountBudgetUsage(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	CheckAccountHierarchyBudgetUsage(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
+	CheckPrepaidWallet(ctx context.Context, orgID string, serviceID string) (Decision, error)
+	// CheckLeafAccountExternalID rejects when the org has a unique billing account with no
+	// external_id. Organizations with no account skip (DecisionAllow); multiple accounts
+	// return DecisionAccountAmbiguous.
+	CheckLeafAccountExternalID(orgID string) (Decision, error)
+	CheckOrgUnitHierarchyBudgetUsage(ctx context.Context, userIDs []string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckContractBudgetUsage(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	// User governance in-memory operations (enterprise-only, but interface defined here for compatibility)
 	GetUserGovernance(ctx context.Context, userID string) (*UserGovernance, bool)
 	CreateUserGovernanceInMemory(ctx context.Context, userID string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit)
 	UpdateUserGovernanceInMemory(ctx context.Context, userID string, budget *configstoreTables.TableBudget, rateLimit *configstoreTables.TableRateLimit)
 	DeleteUserGovernanceInMemory(ctx context.Context, userID string)
-	// User-level governance checks (enterprise-only rate limits; BudgetUsage for ai_infra user scope)
+	// User-level governance checks (enterprise-only rate limits; BudgetUsage for the user scope)
 	CheckUserBudgetUsage(ctx context.Context, userID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckUserRateLimit(ctx context.Context, userID string, request *EvaluationRequest, tokensBaselines map[string]int64, requestsBaselines map[string]int64) (Decision, error)
 	UpdateUserBudgetUsageInMemory(ctx context.Context, userID string, cost float64) error
@@ -226,6 +253,14 @@ type GovernanceStore interface {
 	ResolveConfigProviderID(provider schemas.ModelProvider) string
 	// ResolveConfigModelID maps provider + model name to config_models.id.
 	ResolveConfigModelID(provider schemas.ModelProvider, model string) string
+	// ResolveConfigModelServiceID maps provider + model name to config_models.service_id.
+	ResolveConfigModelServiceID(provider schemas.ModelProvider, model string) string
+	// ResolveLeafAccountExternalID returns the leaf billing account's external_id for orgID.
+	// Empty when the org has no unique account, or the leaf account has no external_id.
+	ResolveLeafAccountExternalID(orgID string) string
+	// ResolveLeafOrgUnitID returns the first org_unit_id found for the given users
+	// (virtual-key user first, then request users). Empty when none of the users have an org unit.
+	ResolveLeafOrgUnitID(userIDs ...string) string
 }
 
 // NewLocalGovernanceStore creates a new in-memory governance store
@@ -263,22 +298,12 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	return store, nil
 }
 
-// SetSyncBudgetUsageFromDatabase configures whether incremental refresh treats DB CurrentUsage
-// as authoritative (ai_infra) or preserves in-memory usage (unified_llm).
-func (gs *LocalGovernanceStore) SetSyncBudgetUsageFromDatabase(enabled bool) {
-	if gs == nil {
-		return
-	}
-	gs.syncBudgetUsageFromDB = enabled
-}
-
 // RefreshFromDatabase reloads governance entities from the backing config store.
 // After the initial full load, only rows with updated_at within the refresh window
 // are fetched and merged into the in-memory maps.
-// When syncBudgetUsageFromDB is true (ai_infra), DB CurrentUsage is applied via
-// SyncBudgetFromDatabase. Otherwise UpsertBudgetConfig preserves in-memory usage
-// (unified_llm local bumps). Rate-limit counters are always preserved in memory;
-// callers should DumpRateLimits before refreshing when rate-limit tracking is active.
+// Budget and BudgetUsage rows are spend state owned by MPilot Rating, so DB values are
+// always applied on refresh. Rate-limit counters are tracked locally and preserved in
+// memory; callers should DumpRateLimits before refreshing when rate-limit tracking is active.
 func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 	if gs.configStore == nil {
 		return fmt.Errorf("config store is not configured")
@@ -366,10 +391,10 @@ func (gs *LocalGovernanceStore) UpsertBudgetConfig(ctx context.Context, budgetID
 	}
 }
 
-// SyncBudgetFromDatabase installs a budget from an incremental DB refresh,
-// taking CurrentUsage and LastReset from the DB as authoritative (ai_infra mode:
-// MPilot/Rating owns governance_budgets.current_usage). Also refreshes
-// LastDBUsagesBudgets so any residual DumpBudgets/gossip math stays consistent.
+// SyncBudgetFromDatabase installs a budget from an incremental DB refresh, taking
+// CurrentUsage and LastReset from the DB as authoritative: the gateway never bumps
+// governance_budgets. Also refreshes LastDBUsagesBudgets so any residual
+// DumpBudgets/gossip math stays consistent.
 func (gs *LocalGovernanceStore) SyncBudgetFromDatabase(ctx context.Context, budgetID string, fromDB *configstoreTables.TableBudget) {
 	if fromDB == nil {
 		return
@@ -967,6 +992,53 @@ func (gs *LocalGovernanceStore) ResolveConfigModelID(provider schemas.ModelProvi
 	return m.ID
 }
 
+// ResolveConfigModelServiceID maps provider + model name to config_models.service_id.
+func (gs *LocalGovernanceStore) ResolveConfigModelServiceID(provider schemas.ModelProvider, model string) string {
+	if provider == "" || model == "" {
+		return ""
+	}
+	key := fmt.Sprintf("%s:%s", string(provider), model)
+	value, ok := gs.configModels.Load(key)
+	if !ok || value == nil {
+		return ""
+	}
+	m, ok := value.(*configstoreTables.TableModel)
+	if !ok || m == nil || m.ServiceID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*m.ServiceID)
+}
+
+// upsertConfigModelInMemory applies a config_models catalog row to the service-id lookup map.
+// Keys are "providerName:modelName", matching ResolveConfigModelServiceID.
+func (gs *LocalGovernanceStore) upsertConfigModelInMemory(model *configstoreTables.TableModel) {
+	if model == nil {
+		return
+	}
+	providerName := strings.TrimSpace(model.ProviderName)
+	if providerName == "" && model.ProviderID != "" {
+		gs.providers.Range(func(_, value interface{}) bool {
+			provider, ok := value.(*configstoreTables.TableProvider)
+			if !ok || provider == nil || provider.ID != model.ProviderID {
+				return true
+			}
+			providerName = strings.TrimSpace(provider.Name)
+			return false
+		})
+	}
+	if providerName == "" || strings.TrimSpace(model.Name) == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:%s", providerName, model.Name)
+	if model.Deleted {
+		gs.configModels.Delete(key)
+		return
+	}
+	clone := *model
+	clone.ProviderName = providerName
+	gs.configModels.Store(key, &clone)
+}
+
 // Generic check budget method
 // The idea is to keep this as a common method for checking all budgets. The entire business logic resides in here
 func (gs *LocalGovernanceStore) CheckBudget(ctx context.Context, entityWiseBudgets EntityWiseBudgets, baselines map[string]float64) (Decision, error) {
@@ -1202,24 +1274,63 @@ func (gs *LocalGovernanceStore) collectBudgetUsagesByOwnerFK(entityKey string, m
 	return map[string][]*configstoreTables.TableBudgetUsage{entityKey: usages}
 }
 
+// budgetUsagePeriodStart returns the start of the current spend window for a BudgetUsage row.
+// Rows that have never been reset fall back to their creation time.
+func budgetUsagePeriodStart(usage *configstoreTables.TableBudgetUsage) time.Time {
+	if usage.LastReset != nil && !usage.LastReset.IsZero() {
+		return *usage.LastReset
+	}
+	return usage.CreatedAt
+}
+
+// isBudgetUsagePeriodExpired reports whether the row's spend window has already elapsed, which
+// makes its current_usage stale. The reset worker owns zeroing such rows; checks skip them so
+// a request is never rejected for spend that belongs to a completed period.
+func isBudgetUsagePeriodExpired(usage *configstoreTables.TableBudgetUsage, now time.Time) bool {
+	if usage == nil || usage.ResetDuration == "" {
+		return false
+	}
+	duration, err := configstoreTables.ParseDuration(usage.ResetDuration)
+	if err != nil {
+		return false
+	}
+	periodStart := budgetUsagePeriodStart(usage)
+	if periodStart.IsZero() {
+		return false
+	}
+	return now.Sub(periodStart) >= duration
+}
+
 // CheckBudgetUsage compares BudgetUsage current_usage against max_limit.
+// Soft-limited rows never block the request: usage keeps accruing and routing rules can
+// react through soft_limit_exceeded.
 func (gs *LocalGovernanceStore) CheckBudgetUsage(ctx context.Context, entityWiseUsages map[string][]*configstoreTables.TableBudgetUsage, baselines map[string]float64) (Decision, error) {
 	if baselines == nil {
 		baselines = map[string]float64{}
 	}
+	now := time.Now()
 	for entity, usages := range entityWiseUsages {
 		for _, usage := range usages {
 			if usage == nil {
+				continue
+			}
+			if isBudgetUsagePeriodExpired(usage, now) {
+				gs.logger.Debug("LocalStore CheckBudgetUsage: %s budget usage %s period expired, skipping check", entity, usage.ID)
 				continue
 			}
 			baseline := baselines[usage.ID]
 			total := usage.CurrentUsage + baseline
 			gs.logger.Debug("LocalStore CheckBudgetUsage: Checking %s budget usage %s: usage=%.4f, baseline=%.4f, total=%.4f, limit=%.4f",
 				entity, usage.ID, usage.CurrentUsage, baseline, total, usage.MaxLimit)
-			if total >= usage.MaxLimit {
-				return DecisionBudgetExceeded, fmt.Errorf("%s budget exceeded: %.4f >= %.4f dollars",
-					entity, total, usage.MaxLimit)
+			if total < usage.MaxLimit {
+				continue
 			}
+			if usage.SoftLimit {
+				gs.logger.Debug("LocalStore CheckBudgetUsage: %s budget usage %s is soft-limited, allowing request through", entity, usage.ID)
+				continue
+			}
+			return DecisionBudgetExceeded, fmt.Errorf("%s budget exceeded: %.4f >= %.4f dollars",
+				entity, total, usage.MaxLimit)
 		}
 	}
 	return DecisionAllow, nil
@@ -1238,6 +1349,370 @@ func (gs *LocalGovernanceStore) SyncBudgetUsageFromDatabase(ctx context.Context,
 // DeleteBudgetUsage removes a BudgetUsage row from the in-memory cache.
 func (gs *LocalGovernanceStore) DeleteBudgetUsage(ctx context.Context, usageID string) {
 	gs.budgetUsages.Delete(usageID)
+}
+
+// CheckServiceBudgetUsage checks BudgetUsage rows owned by service_id.
+// Empty serviceID skips the check (DecisionAllow).
+func (gs *LocalGovernanceStore) CheckServiceBudgetUsage(ctx context.Context, serviceID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	if serviceID == "" {
+		return DecisionAllow, nil
+	}
+	entityWise := gs.collectBudgetUsagesByOwnerFK("Service:"+serviceID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.ServiceID != nil && *u.ServiceID == serviceID
+	})
+	if len(entityWise) == 0 {
+		return DecisionAllow, nil
+	}
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
+}
+
+// CheckProviderBudgetUsage checks BudgetUsage rows owned by provider_id (config_providers.id).
+// Empty providerID skips the check (DecisionAllow).
+func (gs *LocalGovernanceStore) CheckProviderBudgetUsage(ctx context.Context, providerID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	if providerID == "" {
+		return DecisionAllow, nil
+	}
+	entityWise := gs.collectBudgetUsagesByOwnerFK("Provider:"+providerID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.ProviderID != nil && *u.ProviderID == providerID
+	})
+	if len(entityWise) == 0 {
+		return DecisionAllow, nil
+	}
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
+}
+
+// reindexAccountsByCustomerOrg rebuilds the customer-organization → accounts index from the
+// account cache. Called after a full load and after every incremental account delta.
+func (gs *LocalGovernanceStore) reindexAccountsByCustomerOrg() {
+	index := make(map[string][]*configstoreTables.TableAccount)
+	gs.accounts.Range(func(_, value interface{}) bool {
+		account, ok := value.(*configstoreTables.TableAccount)
+		if !ok || account == nil || account.CustomerOrganizationID == nil {
+			return true
+		}
+		orgID := strings.TrimSpace(*account.CustomerOrganizationID)
+		if orgID == "" {
+			return true
+		}
+		index[orgID] = append(index[orgID], account)
+		return true
+	})
+	gs.accountsMu.Lock()
+	gs.accountsByCustomerOrgID = index
+	gs.accountsMu.Unlock()
+}
+
+// accountsForCustomerOrg returns the accounts mapped to a customer organization.
+func (gs *LocalGovernanceStore) accountsForCustomerOrg(orgID string) []*configstoreTables.TableAccount {
+	gs.accountsMu.RLock()
+	defer gs.accountsMu.RUnlock()
+	return gs.accountsByCustomerOrgID[orgID]
+}
+
+// loadAccount returns the cached account for an ID, or nil when unknown.
+func (gs *LocalGovernanceStore) loadAccount(accountID string) *configstoreTables.TableAccount {
+	value, ok := gs.accounts.Load(accountID)
+	if !ok || value == nil {
+		return nil
+	}
+	account, ok := value.(*configstoreTables.TableAccount)
+	if !ok {
+		return nil
+	}
+	return account
+}
+
+// accountHierarchyIDs returns the account chain for an organization, walking child → parent.
+// The second return value is false when the organization maps to more than one account, which
+// makes the billing scope ambiguous and must be surfaced as an error rather than guessed.
+func (gs *LocalGovernanceStore) accountHierarchyIDs(orgID string) ([]string, bool) {
+	accounts := gs.accountsForCustomerOrg(orgID)
+	if len(accounts) == 0 {
+		return nil, true
+	}
+	if len(accounts) > 1 {
+		return nil, false
+	}
+	var chain []string
+	seen := map[string]bool{}
+	for account := accounts[0]; account != nil && !seen[account.ID]; {
+		seen[account.ID] = true
+		chain = append(chain, account.ID)
+		if account.ParentAccount == nil {
+			break
+		}
+		parentID := strings.TrimSpace(*account.ParentAccount)
+		if parentID == "" {
+			break
+		}
+		account = gs.loadAccount(parentID)
+	}
+	return chain, true
+}
+
+// ResolveLeafAccountExternalID returns the external_id of the leaf billing account for orgID.
+// The leaf is the first account in the child→parent hierarchy. Empty when the organization
+// maps to zero or multiple accounts, or when the leaf account has no external_id set.
+func (gs *LocalGovernanceStore) ResolveLeafAccountExternalID(orgID string) string {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return ""
+	}
+	accountIDs, unique := gs.accountHierarchyIDs(orgID)
+	if !unique || len(accountIDs) == 0 {
+		return ""
+	}
+	leaf := gs.loadAccount(accountIDs[0])
+	if leaf == nil || leaf.ExternalID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*leaf.ExternalID)
+}
+
+// CheckLeafAccountExternalID rejects PreLLM when the organization has exactly one billing
+// account and that account's external_id is missing. Rating uses that value as
+// billingAccountRef, so the request would otherwise complete the LLM call and then skip
+// Kafka publish.
+func (gs *LocalGovernanceStore) CheckLeafAccountExternalID(orgID string) (Decision, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return DecisionAllow, nil
+	}
+	accountIDs, unique := gs.accountHierarchyIDs(orgID)
+	if !unique {
+		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
+	}
+	if len(accountIDs) == 0 {
+		return DecisionAllow, nil
+	}
+	leaf := gs.loadAccount(accountIDs[0])
+	if leaf == nil {
+		return DecisionAllow, nil
+	}
+	if leaf.ExternalID == nil || strings.TrimSpace(*leaf.ExternalID) == "" {
+		return DecisionMissingAccountExternalID, fmt.Errorf(
+			"set external_id on account %s for organization %s", leaf.ID, orgID)
+	}
+	return DecisionAllow, nil
+}
+
+func (gs *LocalGovernanceStore) orgUnitIDForUser(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return ""
+	}
+	value, ok := gs.userOrgUnits.Load(userID)
+	if !ok {
+		return ""
+	}
+	mapping, ok := value.(*configstoreTables.TableUserOrgUnit)
+	if !ok || mapping == nil || mapping.OrgUnitID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*mapping.OrgUnitID)
+}
+
+func (gs *LocalGovernanceStore) loadOrgUnit(orgUnitID string) *configstoreTables.TableOrgUnit {
+	if orgUnitID == "" {
+		return nil
+	}
+	value, ok := gs.orgUnits.Load(orgUnitID)
+	if !ok {
+		return nil
+	}
+	orgUnit, ok := value.(*configstoreTables.TableOrgUnit)
+	if !ok {
+		return nil
+	}
+	return orgUnit
+}
+
+// orgUnitHierarchyIDs walks child → parent via OrgUnit.parent_id. Cycles stop the walk.
+func (gs *LocalGovernanceStore) orgUnitHierarchyIDs(orgUnitID string) []string {
+	orgUnitID = strings.TrimSpace(orgUnitID)
+	if orgUnitID == "" {
+		return nil
+	}
+	var chain []string
+	seen := map[string]bool{}
+	for id := orgUnitID; id != "" && !seen[id]; {
+		seen[id] = true
+		chain = append(chain, id)
+		orgUnit := gs.loadOrgUnit(id)
+		if orgUnit == nil || orgUnit.ParentID == nil {
+			break
+		}
+		id = strings.TrimSpace(*orgUnit.ParentID)
+	}
+	return chain
+}
+
+// CheckOrgUnitBudgetUsage checks BudgetUsage rows owned by org_unit_id.
+func (gs *LocalGovernanceStore) CheckOrgUnitBudgetUsage(ctx context.Context, orgUnitID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	if orgUnitID == "" {
+		return DecisionAllow, nil
+	}
+	entityWise := gs.collectBudgetUsagesByOwnerFK("OrgUnit:"+orgUnitID, func(u *configstoreTables.TableBudgetUsage) bool {
+		return u.OrgUnitID != nil && *u.OrgUnitID == orgUnitID
+	})
+	if len(entityWise) == 0 {
+		return DecisionAllow, nil
+	}
+	return gs.CheckBudgetUsage(ctx, entityWise, baselines)
+}
+
+// CheckOrgUnitHierarchyBudgetUsage checks org-unit BudgetUsage independently of user-scoped
+// rows. For each user, the leaf org unit (users.org_unit_id) and each ancestor is checked.
+func (gs *LocalGovernanceStore) CheckOrgUnitHierarchyBudgetUsage(ctx context.Context, userIDs []string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	seenOrgUnits := map[string]bool{}
+	for _, userID := range uniqueNonEmptyStrings(userIDs...) {
+		leafID := gs.orgUnitIDForUser(userID)
+		if leafID == "" {
+			continue
+		}
+		for _, orgUnitID := range gs.orgUnitHierarchyIDs(leafID) {
+			if seenOrgUnits[orgUnitID] {
+				continue
+			}
+			seenOrgUnits[orgUnitID] = true
+			decision, err := gs.CheckOrgUnitBudgetUsage(ctx, orgUnitID, request, baselines)
+			if err != nil || decision != DecisionAllow {
+				return decision, err
+			}
+		}
+	}
+	return DecisionAllow, nil
+}
+
+// ResolveLeafOrgUnitID returns the first org_unit_id among userIDs (order preserved).
+func (gs *LocalGovernanceStore) ResolveLeafOrgUnitID(userIDs ...string) string {
+	for _, userID := range uniqueNonEmptyStrings(userIDs...) {
+		if orgUnitID := gs.orgUnitIDForUser(userID); orgUnitID != "" {
+			return orgUnitID
+		}
+	}
+	return ""
+}
+
+// CheckAccountHierarchyBudgetUsage checks account-scoped BudgetUsage rows for the account
+// owned by orgID and each of its ancestors. Organizations without an account skip the check.
+func (gs *LocalGovernanceStore) CheckAccountHierarchyBudgetUsage(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return DecisionAllow, nil
+	}
+	accountIDs, unique := gs.accountHierarchyIDs(orgID)
+	if !unique {
+		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
+	}
+	for _, accountID := range accountIDs {
+		decision, err := gs.CheckAccountBudgetUsage(ctx, accountID, request, baselines)
+		if err != nil || decision != DecisionAllow {
+			return decision, err
+		}
+	}
+	return DecisionAllow, nil
+}
+
+const approvedWalletStatusID = "fe07e71d-cba4-4316-9c7c-4935c3adec34"
+
+// CheckPrepaidWallet enforces a funded wallet on the leaf billing account for orgID when
+// that account is prepaid. Organizations without an account, or postpaid accounts, skip.
+func (gs *LocalGovernanceStore) CheckPrepaidWallet(ctx context.Context, orgID string, serviceID string) (Decision, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return DecisionAllow, nil
+	}
+	accountIDs, unique := gs.accountHierarchyIDs(orgID)
+	if !unique {
+		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
+	}
+	if len(accountIDs) == 0 {
+		return DecisionAllow, nil
+	}
+	leafAccount := gs.loadAccount(accountIDs[0])
+	if leafAccount == nil || !leafAccount.IsPrepaid {
+		return DecisionAllow, nil
+	}
+	wallet := gs.pickWalletForAccount(accountIDs[0], strings.TrimSpace(serviceID))
+	if wallet == nil {
+		return DecisionWalletInsufficient, fmt.Errorf("prepaid account %s has no eligible wallet", accountIDs[0])
+	}
+	if walletFunds(wallet) <= 0 {
+		return DecisionWalletInsufficient, fmt.Errorf("prepaid account %s wallet has no remaining funds", accountIDs[0])
+	}
+	return DecisionAllow, nil
+}
+
+func (gs *LocalGovernanceStore) pickWalletForAccount(accountID, serviceID string) *configstoreTables.TableWallet {
+	candidates := gs.walletsForAccount(accountID)
+	if len(candidates) == 0 {
+		return nil
+	}
+	if serviceID != "" {
+		for _, wallet := range candidates {
+			if wallet != nil && wallet.ServiceID != nil && strings.TrimSpace(*wallet.ServiceID) == serviceID {
+				return wallet
+			}
+		}
+	}
+	for _, wallet := range candidates {
+		if wallet != nil && (wallet.ServiceID == nil || strings.TrimSpace(*wallet.ServiceID) == "") {
+			return wallet
+		}
+	}
+	return nil
+}
+
+func (gs *LocalGovernanceStore) walletsForAccount(accountID string) []*configstoreTables.TableWallet {
+	gs.walletsMu.RLock()
+	defer gs.walletsMu.RUnlock()
+	return gs.walletsByAccountID[accountID]
+}
+
+func (gs *LocalGovernanceStore) reindexWalletsByAccount() {
+	index := make(map[string][]*configstoreTables.TableWallet)
+	gs.wallets.Range(func(_, value interface{}) bool {
+		wallet, ok := value.(*configstoreTables.TableWallet)
+		if !ok || wallet == nil || !walletEligibleForPrepaidCheck(wallet) {
+			return true
+		}
+		if wallet.AccountID == nil {
+			return true
+		}
+		accountID := strings.TrimSpace(*wallet.AccountID)
+		if accountID == "" {
+			return true
+		}
+		index[accountID] = append(index[accountID], wallet)
+		return true
+	})
+	gs.walletsMu.Lock()
+	gs.walletsByAccountID = index
+	gs.walletsMu.Unlock()
+}
+
+func walletEligibleForPrepaidCheck(wallet *configstoreTables.TableWallet) bool {
+	if wallet == nil {
+		return false
+	}
+	if wallet.IsActive == nil || !*wallet.IsActive {
+		return false
+	}
+	if wallet.ApprovalStatus == nil || strings.TrimSpace(*wallet.ApprovalStatus) != approvedWalletStatusID {
+		return false
+	}
+	return true
+}
+
+func walletFunds(wallet *configstoreTables.TableWallet) float64 {
+	if wallet == nil {
+		return 0
+	}
+	if wallet.AvailableBalance != nil {
+		return *wallet.AvailableBalance
+	}
+	return wallet.Balance
 }
 
 // CheckAccountBudgetUsage checks BudgetUsage rows owned by account_id.
@@ -1527,6 +2002,90 @@ func (gs *LocalGovernanceStore) ResetExpiredBudgetsInMemory(ctx context.Context)
 		return true
 	})
 	return snapshots
+}
+
+// ResetExpiredBudgetUsagesInMemory zeroes the cached spend of every BudgetUsage row whose reset
+// window has elapsed and returns a snapshot per row so the caller can persist the reset and its
+// ledger entry. Rows without a reset duration never expire.
+func (gs *LocalGovernanceStore) ResetExpiredBudgetUsagesInMemory(ctx context.Context) []BudgetUsageResetSnapshot {
+	now := time.Now()
+	var snapshots []BudgetUsageResetSnapshot
+	gs.budgetUsages.Range(func(key, value any) bool {
+		usage, ok := value.(*configstoreTables.TableBudgetUsage)
+		if !ok || usage == nil {
+			return true
+		}
+		if !isBudgetUsagePeriodExpired(usage, now) {
+			return true
+		}
+		reset := *usage
+		reset.CurrentUsage = 0
+		reset.LastReset = &now
+		gs.budgetUsages.Store(usage.ID, &reset)
+		snapshots = append(snapshots, BudgetUsageResetSnapshot{
+			Usage:         &reset,
+			PrevUsage:     usage.CurrentUsage,
+			PrevLastReset: budgetUsagePeriodStart(usage),
+		})
+		gs.logger.Debug(fmt.Sprintf("Reset budget usage %s (was %.2f, reset to 0)",
+			usage.ID, usage.CurrentUsage))
+		return true
+	})
+	return snapshots
+}
+
+// ResetExpiredBudgetUsages persists BudgetUsage resets and appends a budgetusage_ledger row for
+// each completed period. The UPDATE is guarded on last_reset so that when several gateway nodes
+// detect the same expiry only one of them writes the ledger entry.
+func (gs *LocalGovernanceStore) ResetExpiredBudgetUsages(ctx context.Context, snapshots []BudgetUsageResetSnapshot) error {
+	if len(snapshots) == 0 || gs.configStore == nil {
+		return nil
+	}
+	if err := gs.configStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+		now := time.Now()
+		hasLedgerTable := tx.Migrator().HasTable(&configstoreTables.TableBudgetUsageLedger{})
+		for _, snap := range snapshots {
+			usage := snap.Usage
+			if usage == nil || usage.LastReset == nil {
+				continue
+			}
+			result := tx.WithContext(ctx).
+				Session(&gorm.Session{SkipHooks: true}).
+				Model(&configstoreTables.TableBudgetUsage{}).
+				Where("id = ? AND (last_reset IS NULL OR last_reset < ?)", usage.ID, *usage.LastReset).
+				Updates(map[string]interface{}{
+					"current_usage": 0,
+					"last_reset":    *usage.LastReset,
+				})
+			if result.Error != nil {
+				return fmt.Errorf("failed to reset budget usage %s: %w", usage.ID, result.Error)
+			}
+			if result.RowsAffected == 0 {
+				// Another node already closed this period; it owns the ledger entry.
+				continue
+			}
+			if !hasLedgerTable {
+				continue
+			}
+			ledgerEntry := configstoreTables.TableBudgetUsageLedger{
+				ID:            uuid.NewString(),
+				BudgetID:      usage.ID,
+				Usage:         snap.PrevUsage,
+				MaxLimit:      usage.MaxLimit,
+				ResetDuration: usage.ResetDuration,
+				PeriodStart:   snap.PrevLastReset,
+				PeriodEnd:     *usage.LastReset,
+				CreatedAt:     now,
+			}
+			if err := tx.WithContext(ctx).Create(&ledgerEntry).Error; err != nil {
+				return fmt.Errorf("failed to insert budget usage ledger for budget usage %s: %w", usage.ID, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to persist budget usage resets to database: %w", err)
+	}
+	return nil
 }
 
 // ResetExpiredRateLimitsInMemory performs background reset of expired rate limits for both provider-level and VK-level.
@@ -1855,11 +2414,32 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load budgets: %w", err)
 	}
 
-	// Load billing BudgetUsage rows (account/contract/user scopes for ai_infra PreLLM).
+	// Load billing BudgetUsage rows (service/provider/account/contract/user scopes for PreLLM).
 	// Missing table returns empty slice.
 	budgetUsages, err := gs.configStore.GetBudgetUsages(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load budget usages: %w", err)
+	}
+
+	// Load billing accounts for the PreLLM account hierarchy walk. Missing table returns empty slice.
+	accounts, err := gs.configStore.GetAccounts(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load accounts: %w", err)
+	}
+
+	wallets, err := gs.configStore.GetWallets(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load wallets: %w", err)
+	}
+
+	orgUnits, err := gs.configStore.GetOrgUnits(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load org units: %w", err)
+	}
+
+	userOrgUnits, err := gs.configStore.GetUserOrgUnits(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load user org units: %w", err)
 	}
 
 	// Load rate limits
@@ -1904,7 +2484,7 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	}
 
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
 	gs.loadModelCards(ctx)
 
 	gs.refreshMu.Lock()
@@ -1934,13 +2514,9 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			gs.DeleteBudget(ctx, budget.ID)
 			continue
 		}
-		if gs.syncBudgetUsageFromDB {
-			// AI infra: apply DB CurrentUsage for governance_budgets into cache.
-			gs.SyncBudgetFromDatabase(ctx, budget.ID, budget)
-		} else {
-			// Unified LLM: preserve in-memory CurrentUsage across config refresh.
-			gs.UpsertBudgetConfig(ctx, budget.ID, budget)
-		}
+		// Spend lives in budgetusage__m; governance budgets are config-only for the gateway,
+		// so DB values (including current_usage) are authoritative.
+		gs.SyncBudgetFromDatabase(ctx, budget.ID, budget)
 	}
 
 	for i := range delta.BudgetUsages {
@@ -1949,10 +2525,56 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			gs.DeleteBudgetUsage(ctx, usage.ID)
 			continue
 		}
-		// ai_infra only: MPilot Rating owns BudgetUsage.current_usage — apply DB values.
-		// unified_llm skips BudgetUsage refresh (PreLLM never checks these rows).
-		if gs.syncBudgetUsageFromDB {
-			gs.SyncBudgetUsageFromDatabase(ctx, usage.ID, usage)
+		// MPilot Rating owns BudgetUsage.current_usage — apply DB values.
+		gs.SyncBudgetUsageFromDatabase(ctx, usage.ID, usage)
+	}
+
+	if len(delta.Accounts) > 0 {
+		for i := range delta.Accounts {
+			account := &delta.Accounts[i]
+			if account.Deleted {
+				gs.accounts.Delete(account.ID)
+				continue
+			}
+			gs.accounts.Store(account.ID, account)
+		}
+		gs.reindexAccountsByCustomerOrg()
+	}
+
+	if len(delta.Wallets) > 0 {
+		for i := range delta.Wallets {
+			wallet := &delta.Wallets[i]
+			if wallet.Deleted {
+				gs.wallets.Delete(wallet.ID)
+				continue
+			}
+			clone := *wallet
+			gs.wallets.Store(wallet.ID, &clone)
+		}
+		gs.reindexWalletsByAccount()
+	}
+
+	if len(delta.OrgUnits) > 0 {
+		for i := range delta.OrgUnits {
+			orgUnit := &delta.OrgUnits[i]
+			if orgUnit.Deleted {
+				gs.orgUnits.Delete(orgUnit.ID)
+				continue
+			}
+			clone := *orgUnit
+			gs.orgUnits.Store(orgUnit.ID, &clone)
+		}
+	}
+
+	if len(delta.UserOrgUnits) > 0 {
+		for i := range delta.UserOrgUnits {
+			mapping := &delta.UserOrgUnits[i]
+			if mapping.Deleted {
+				gs.userOrgUnits.Delete(mapping.ID)
+				continue
+			}
+			clone := *mapping
+			gs.userOrgUnits.Store(mapping.ID, &clone)
 		}
 	}
 
@@ -1972,6 +2594,10 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			continue
 		}
 		gs.UpdateModelConfigInMemory(ctx, mc)
+	}
+
+	for i := range delta.ConfigModels {
+		gs.upsertConfigModelInMemory(&delta.ConfigModels[i])
 	}
 
 	for i := range delta.Providers {
@@ -2033,19 +2659,23 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 
 	// Rebuild in-memory structures (lock-free).
 	// Org-level allowed model configs and provider access are not available from config.json — pass nil.
-	// BudgetUsage is DB-backed (budgetusage__m); config.json path has none.
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
+	// BudgetUsage and accounts are DB-backed (budgetusage__m / account__m); config.json path has none.
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, nil, nil, nil, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
 	gs.budgets = sync.Map{}
 	gs.budgetUsages = sync.Map{}
+	gs.accounts = sync.Map{}
+	gs.wallets = sync.Map{}
+	gs.orgUnits = sync.Map{}
+	gs.userOrgUnits = sync.Map{}
 	gs.rateLimits = sync.Map{}
 	gs.modelConfigs = sync.Map{}
 	gs.configModels = sync.Map{}
@@ -2079,10 +2709,32 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 		gs.budgets.Store(budget.ID, budget)
 	}
 
-	// Build BudgetUsage map (account / contract / user billing scopes)
+	// Build BudgetUsage map (service / provider / account / contract / user billing scopes)
 	for i := range budgetUsages {
 		usage := &budgetUsages[i]
 		gs.budgetUsages.Store(usage.ID, usage)
+	}
+
+	// Build account map and its customer-organization index for hierarchy walks
+	for i := range accounts {
+		account := &accounts[i]
+		gs.accounts.Store(account.ID, account)
+	}
+	gs.reindexAccountsByCustomerOrg()
+
+	for i := range wallets {
+		wallet := &wallets[i]
+		gs.wallets.Store(wallet.ID, wallet)
+	}
+	gs.reindexWalletsByAccount()
+
+	for i := range orgUnits {
+		orgUnit := &orgUnits[i]
+		gs.orgUnits.Store(orgUnit.ID, orgUnit)
+	}
+	for i := range userOrgUnits {
+		mapping := &userOrgUnits[i]
+		gs.userOrgUnits.Store(mapping.ID, mapping)
 	}
 
 	// Build rate limits map
@@ -3095,8 +3747,59 @@ func (gs *LocalGovernanceStore) GetRoutingProgram(ctx context.Context, rule *con
 	return program, nil
 }
 
+// budgetUsagesForRequest collects every BudgetUsage row that governs a request: the billing
+// service behind the model, the provider, the virtual key's billing user, and the account
+// chain of the key's organization. An organization mapped to several accounts is skipped —
+// PreLLM rejects that ambiguity, and routing must not guess which account applies.
+func (gs *LocalGovernanceStore) budgetUsagesForRequest(model string, provider schemas.ModelProvider, vk *configstoreTables.TableVirtualKey) []*configstoreTables.TableBudgetUsage {
+	var usages []*configstoreTables.TableBudgetUsage
+	appendScope := func(match func(*configstoreTables.TableBudgetUsage) bool) {
+		for _, scoped := range gs.collectBudgetUsagesByOwnerFK("Request", match) {
+			usages = append(usages, scoped...)
+		}
+	}
+	if serviceID := gs.ResolveConfigModelServiceID(provider, model); serviceID != "" {
+		appendScope(func(u *configstoreTables.TableBudgetUsage) bool {
+			return u.ServiceID != nil && *u.ServiceID == serviceID
+		})
+	}
+	if providerID := gs.ResolveConfigProviderID(provider); providerID != "" {
+		appendScope(func(u *configstoreTables.TableBudgetUsage) bool {
+			return u.ProviderID != nil && *u.ProviderID == providerID
+		})
+	}
+	if vk == nil {
+		return usages
+	}
+	if vk.UserID != nil {
+		if userID := strings.TrimSpace(*vk.UserID); userID != "" {
+			appendScope(func(u *configstoreTables.TableBudgetUsage) bool {
+				return u.UserID != nil && *u.UserID == userID
+			})
+			if leafID := gs.orgUnitIDForUser(userID); leafID != "" {
+				for _, orgUnitID := range gs.orgUnitHierarchyIDs(leafID) {
+					appendScope(func(u *configstoreTables.TableBudgetUsage) bool {
+						return u.OrgUnitID != nil && *u.OrgUnitID == orgUnitID
+					})
+				}
+			}
+		}
+	}
+	if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
+		if accountIDs, unique := gs.accountHierarchyIDs(orgID); unique {
+			for _, accountID := range accountIDs {
+				appendScope(func(u *configstoreTables.TableBudgetUsage) bool {
+					return u.AccountID != nil && *u.AccountID == accountID
+				})
+			}
+		}
+	}
+	return usages
+}
+
 // GetBudgetAndRateLimitStatus returns the current budget and rate limit status for provider and model combination
-// Accounts for baseline usage from remote nodes when calculating percentages
+// Budget percentages come from BudgetUsage (billing-owned spend); rate limits come from
+// governance_rate_limits. Accounts for baseline usage from remote nodes when calculating percentages
 func (gs *LocalGovernanceStore) GetBudgetAndRateLimitStatus(ctx context.Context, model string, provider schemas.ModelProvider, vk *configstoreTables.TableVirtualKey, budgetBaselines map[string]float64, tokenBaselines map[string]int64, requestBaselines map[string]int64) *BudgetAndRateLimitStatus {
 	// Prevent nil pointer dereferences
 	if budgetBaselines == nil {
@@ -3115,14 +3818,13 @@ func (gs *LocalGovernanceStore) GetBudgetAndRateLimitStatus(ctx context.Context,
 		RateLimitRequestPercentUsed: 0,
 	}
 
-	// Check model-specific rate limits and budgets (takes precedence)
+	// Check model-specific rate limits (takes precedence)
 	if model != "" {
 		// Check model+provider config first (most specific)
 		key := fmt.Sprintf("%s:%s", model, string(provider))
 		if modelValue, ok := gs.modelConfigs.Load(key); ok && modelValue != nil {
 			if modelConfig, ok := modelValue.(*configstoreTables.TableModelConfig); ok && modelConfig != nil {
 				applyRateLimitStatusFromSlice(gs, modelConfig.RateLimits, tokenBaselines, requestBaselines, result)
-				applyBudgetStatusFromSlice(gs, modelConfig.Budgets, budgetBaselines, result)
 			}
 		}
 
@@ -3130,33 +3832,32 @@ func (gs *LocalGovernanceStore) GetBudgetAndRateLimitStatus(ctx context.Context,
 		// Uses findModelOnlyConfig for cross-provider model name normalization
 		if modelConfig, _ := gs.findModelOnlyConfig(ctx, model); modelConfig != nil {
 			applyRateLimitStatusFromSlice(gs, modelConfig.RateLimits, tokenBaselines, requestBaselines, result)
-			applyBudgetStatusFromSlice(gs, modelConfig.Budgets, budgetBaselines, result)
 		}
 	}
 
-	// Check global provider-specific rate limits and budgets
+	// Check global provider-specific rate limits
 	providerValue, ok := gs.providers.Load(string(provider))
 	if ok && providerValue != nil {
 		if providerTable, ok := providerValue.(*configstoreTables.TableProvider); ok && providerTable != nil {
 			applyRateLimitStatusFromSlice(gs, providerTable.RateLimits, tokenBaselines, requestBaselines, result)
-			applyBudgetStatusFromSlice(gs, providerTable.Budgets, budgetBaselines, result)
 		}
 	}
 
-	// Check virtual key level provider-specific rate limits and budgets
+	// Check virtual key level provider-specific rate limits
 	if vk != nil {
 		if vk.AllowedModelConfigs != nil {
 			for _, pc := range vk.AllowedModelConfigs {
 				if pc.Provider == string(provider) {
 					applyRateLimitStatusFromSlice(gs, pc.RateLimits, tokenBaselines, requestBaselines, result)
-					applyBudgetStatusFromSlice(gs, pc.Budgets, budgetBaselines, result)
 					break
 				}
 			}
 		}
 		applyRateLimitStatusFromSlice(gs, vk.RateLimits, tokenBaselines, requestBaselines, result)
-		applyBudgetStatusFromSlice(gs, vk.Budgets, budgetBaselines, result)
 	}
+
+	// Budget status comes from the BudgetUsage rows governing this request.
+	applyBudgetUsageStatus(gs.budgetUsagesForRequest(model, provider, vk), budgetBaselines, result)
 	return result
 }
 

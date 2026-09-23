@@ -1302,6 +1302,9 @@ func (m *TenantMiddleware) authenticateInferenceRequest(ctx *fasthttp.RequestCtx
 	ctx.SetUserValue(schemas.BifrostContextKeyTenantID, claims.TenantID)
 	ctx.SetUserValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, claims.VirtualKey)
 	ctx.SetUserValue(schemas.BifrostContextKeyVirtualKey, claims.VirtualKey)
+	if claims.MorgID != "" {
+		ctx.SetUserValue(schemas.BifrostContextKeyGovernanceOrgID, claims.MorgID)
+	}
 	return nil
 }
 

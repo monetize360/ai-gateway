@@ -7,7 +7,7 @@ import (
 	"github.com/maximhq/bifrost/core/providers/bedrock"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/kvstore"
-	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/framework/asyncjob"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func (m *mockHandlerStore) GetStreamChunkInterceptor() lib.StreamChunkIntercepto
 	return nil
 }
 
-func (m *mockHandlerStore) GetAsyncJobExecutor() *logstore.AsyncJobExecutor {
+func (m *mockHandlerStore) GetAsyncJobExecutor() *asyncjob.Executor {
 	return nil
 }
 

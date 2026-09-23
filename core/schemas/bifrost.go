@@ -294,8 +294,8 @@ const (
 	BifrostContextKeySCIMClaims                          BifrostContextKey = "scim_claims"
 	BifrostContextKeyUserID                              BifrostContextKey = "bifrost-user-id"                    // string (to store the user ID (set by enterprise auth middleware - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyUserName                            BifrostContextKey = "bifrost-user-name"                  // string (to store the user name (set by enterprise auth middleware - DO NOT SET THIS MANUALLY))
-	BifrostContextKeyAccountID                           BifrostContextKey = "bifrost-account-id"                  // string (billing account scope from request body account_id; set by HTTP router)
-	BifrostContextKeyContractID                          BifrostContextKey = "bifrost-contract-id"                 // string (billing contract scope from request body contract_id; set by HTTP router)
+	BifrostContextKeyAccountID                           BifrostContextKey = "bifrost-account-id"                  // string (legacy; InferenceUsage billingAccountRef is resolved from leaf Account.external_id)
+	BifrostContextKeyContractID                          BifrostContextKey = "bifrost-contract-id"                 // string (legacy; no longer stamped from the request body)
 	BifrostContextKeyBillingUserID                       BifrostContextKey = "bifrost-billing-user-id"             // string (billing user scope from request body user_id; set by HTTP router when enterprise auth user id is not used)
 	BifrostContextKeyQueryScope                          BifrostContextKey = "bifrost-query-scope"                // configstore.QueryScope (func that mutates a query; set by upstream wrapper - DO NOT SET THIS MANUALLY)
 	BifrostContextKeyVisibilityFilterProvider            BifrostContextKey = "bifrost-visibility-filter-provider" // DEPRECATED: replaced by BifrostContextKeyQueryScope. Will be removed once all callers migrate.

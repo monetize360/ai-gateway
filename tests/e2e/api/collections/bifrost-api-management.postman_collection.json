@@ -136,7 +136,7 @@
           "}",
           "var successShapes = {",
           "  'Health Check': ['components', 'status'],",
-          "  'Get Config': ['auth_config', 'client_config', 'framework_config', 'is_db_connected', 'is_logs_connected'],",
+          "  'Get Config': ['auth_config', 'client_config', 'framework_config', 'is_db_connected'],",
           "  'Update Config': ['message', 'status'],",
           "  'List Providers': ['providers', 'total'],",
           "  'Add Provider': ['name', 'network_config', 'concurrency_and_buffer_size', 'provider_status'],",
