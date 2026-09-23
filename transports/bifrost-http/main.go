@@ -99,6 +99,7 @@ func init() {
 	if defaultLogLevel == "" {
 		defaultLogLevel = bifrostServer.DefaultLogLevel
 	}
+
 	// Initializing server
 	server = bifrostServer.NewBifrostHTTPServer(Version, uiContent)
 	// Updating server properties from flags
