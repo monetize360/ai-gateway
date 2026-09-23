@@ -137,6 +137,8 @@ func SendError(ctx *fasthttp.RequestCtx, statusCode int, message string) {
 
 // SendBifrostError sends a BifrostError response
 func SendBifrostError(ctx *fasthttp.RequestCtx, bifrostErr *schemas.BifrostError) {
+	logBifrostErrorResponse(ctx, bifrostErr, false)
+
 	if bifrostErr.StatusCode != nil {
 		ctx.SetStatusCode(*bifrostErr.StatusCode)
 	} else if !bifrostErr.IsBifrostError {
@@ -169,6 +171,8 @@ func streamLargeResponseIfActive(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.B
 
 // SendSSEError sends an error in Server-Sent Events format
 func SendSSEError(ctx *fasthttp.RequestCtx, bifrostErr *schemas.BifrostError) {
+	logBifrostErrorResponse(ctx, bifrostErr, true)
+
 	errorJSON, err := json.Marshal(map[string]interface{}{
 		"error": bifrostErr,
 	})
@@ -181,6 +185,51 @@ func SendSSEError(ctx *fasthttp.RequestCtx, bifrostErr *schemas.BifrostError) {
 	if _, err := fmt.Fprintf(ctx, "data: %s\n\n", errorJSON); err != nil {
 		logger.Warn(fmt.Sprintf("Failed to write SSE error: %v", err))
 	}
+}
+
+// logBifrostErrorResponse logs gateway errors at Warn so provider 4xx/5xx (e.g. generic
+// "provider API error (status 404)") show up without needing LOG_LEVEL=debug.
+func logBifrostErrorResponse(ctx *fasthttp.RequestCtx, bifrostErr *schemas.BifrostError, sse bool) {
+	if bifrostErr == nil || logger == nil {
+		return
+	}
+	status := 0
+	if bifrostErr.StatusCode != nil {
+		status = *bifrostErr.StatusCode
+	}
+	msg := ""
+	errType := ""
+	errCode := ""
+	if bifrostErr.Error != nil {
+		msg = bifrostErr.Error.Message
+		if bifrostErr.Error.Type != nil {
+			errType = *bifrostErr.Error.Type
+		}
+		if bifrostErr.Error.Code != nil {
+			errCode = *bifrostErr.Error.Code
+		}
+	}
+	path := ""
+	method := ""
+	if ctx != nil {
+		path = string(ctx.Path())
+		method = string(ctx.Method())
+	}
+	logger.Warn(
+		"returning bifrost error: sse=%v method=%s path=%s status=%d is_bifrost_error=%v type=%q code=%q message=%q provider=%q model_requested=%q model_used=%q request_type=%q",
+		sse,
+		method,
+		path,
+		status,
+		bifrostErr.IsBifrostError,
+		errType,
+		errCode,
+		msg,
+		string(bifrostErr.ExtraFields.Provider),
+		bifrostErr.ExtraFields.OriginalModelRequested,
+		bifrostErr.ExtraFields.ResolvedModelUsed,
+		string(bifrostErr.ExtraFields.RequestType),
+	)
 }
 
 // IsOriginAllowed checks if the given origin is allowed based on localhost rules and configured allowed origins.

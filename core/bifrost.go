@@ -5569,8 +5569,21 @@ func executeRequestWithRetries[T any](
 		lastWasRateLimit = isRateLimit
 	}
 
-	// Add retry information to error
-	if attempts > 0 {
+	// Add retry information to error — Warn so provider failures are visible without LOG_LEVEL=debug
+	if attempts > 0 && bifrostError != nil {
+		status := 0
+		if bifrostError.StatusCode != nil {
+			status = *bifrostError.StatusCode
+		}
+		logger.Warn("request failed after %d %s: provider=%s request_type=%s status=%d error=%q",
+			attempts,
+			map[bool]string{true: "attempts", false: "attempt"}[attempts > 1],
+			providerKey,
+			requestType,
+			status,
+			bifrostError.GetErrorString(),
+		)
+	} else if attempts > 0 {
 		logger.Debug("request failed after %d %s", attempts, map[bool]string{true: "attempts", false: "attempt"}[attempts > 1])
 	}
 
