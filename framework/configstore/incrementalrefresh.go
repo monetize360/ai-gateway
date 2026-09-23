@@ -27,6 +27,9 @@ type GovernanceRefreshDelta struct {
 	UserOrgUnits                   []tables.TableUserOrgUnit
 	RateLimits                     []tables.TableRateLimit
 	ModelConfigs                   []tables.TableModelConfig
+	// ConfigModels carries config_models catalog rows (including service_id) so billing
+	// service mapping refreshes without a gateway restart.
+	ConfigModels                   []tables.TableModel
 	Providers                      []tables.TableProvider
 	RoutingRules                   []tables.TableRoutingRule
 	ReloadOrgAllowedModelConfigs   bool
@@ -50,6 +53,7 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.UserOrgUnits) == 0 &&
 		len(d.RateLimits) == 0 &&
 		len(d.ModelConfigs) == 0 &&
+		len(d.ConfigModels) == 0 &&
 		len(d.Providers) == 0 &&
 		len(d.RoutingRules) == 0
 }
@@ -155,6 +159,12 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	if err != nil {
 		return nil, err
 	}
+	for i := range changedModels {
+		if providerName, ok := names[changedModels[i].ProviderID]; ok {
+			changedModels[i].ProviderName = providerName
+		}
+	}
+	delta.ConfigModels = append(delta.ConfigModels, changedModels...)
 	delta.ModelConfigs = tableModelsToModelConfigs(changedModels, names)
 	var deletedModels []tables.TableModel
 	if err := appendDeletedRowsSince(db, since, &deletedModels); err != nil {
@@ -162,6 +172,10 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 	for i := range deletedModels {
 		deletedModels[i].Deleted = true
+		if providerName, ok := names[deletedModels[i].ProviderID]; ok {
+			deletedModels[i].ProviderName = providerName
+		}
+		delta.ConfigModels = append(delta.ConfigModels, deletedModels[i])
 		if mc := tables.ModelConfigFromTableModel(&deletedModels[i], nil); mc != nil {
 			delta.ModelConfigs = append(delta.ModelConfigs, *mc)
 		}

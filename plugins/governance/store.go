@@ -1003,6 +1003,36 @@ func (gs *LocalGovernanceStore) ResolveConfigModelServiceID(provider schemas.Mod
 	return strings.TrimSpace(*m.ServiceID)
 }
 
+// upsertConfigModelInMemory applies a config_models catalog row to the service-id lookup map.
+// Keys are "providerName:modelName", matching ResolveConfigModelServiceID.
+func (gs *LocalGovernanceStore) upsertConfigModelInMemory(model *configstoreTables.TableModel) {
+	if model == nil {
+		return
+	}
+	providerName := strings.TrimSpace(model.ProviderName)
+	if providerName == "" && model.ProviderID != "" {
+		gs.providers.Range(func(_, value interface{}) bool {
+			provider, ok := value.(*configstoreTables.TableProvider)
+			if !ok || provider == nil || provider.ID != model.ProviderID {
+				return true
+			}
+			providerName = strings.TrimSpace(provider.Name)
+			return false
+		})
+	}
+	if providerName == "" || strings.TrimSpace(model.Name) == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:%s", providerName, model.Name)
+	if model.Deleted {
+		gs.configModels.Delete(key)
+		return
+	}
+	clone := *model
+	clone.ProviderName = providerName
+	gs.configModels.Store(key, &clone)
+}
+
 // Generic check budget method
 // The idea is to keep this as a common method for checking all budgets. The entire business logic resides in here
 func (gs *LocalGovernanceStore) CheckBudget(ctx context.Context, entityWiseBudgets EntityWiseBudgets, baselines map[string]float64) (Decision, error) {
@@ -2557,6 +2587,10 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			continue
 		}
 		gs.UpdateModelConfigInMemory(ctx, mc)
+	}
+
+	for i := range delta.ConfigModels {
+		gs.upsertConfigModelInMemory(&delta.ConfigModels[i])
 	}
 
 	for i := range delta.Providers {
