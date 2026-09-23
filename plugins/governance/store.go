@@ -326,20 +326,11 @@ func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 		return err
 	}
 	if delta.IsEmpty() {
-		gs.logger.Debug("governance refresh: no changes since %s", watermark.Format(time.RFC3339))
 		gs.refreshMu.Lock()
 		gs.lastRefreshAt = refreshStartedAt
 		gs.refreshMu.Unlock()
 		return nil
 	}
-
-	gs.logger.Debug(
-		"governance refresh since %s: orgs=%d vks=%d budgets=%d budget_usages=%d accounts=%d wallets=%d org_units=%d user_org_units=%d config_models=%d providers=%d",
-		watermark.Format(time.RFC3339),
-		len(delta.Organizations), len(delta.VirtualKeys), len(delta.Budgets), len(delta.BudgetUsages),
-		len(delta.Accounts), len(delta.Wallets), len(delta.OrgUnits), len(delta.UserOrgUnits),
-		len(delta.ConfigModels), len(delta.Providers),
-	)
 
 	gs.applyGovernanceRefreshDelta(ctx, delta)
 
@@ -1412,14 +1403,6 @@ func (gs *LocalGovernanceStore) accountsForCustomerOrg(orgID string) []*configst
 	return gs.accountsByCustomerOrgID[orgID]
 }
 
-// derefString returns the pointed-to string, or "" when the pointer is nil.
-func derefString(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
 // loadAccount returns the cached account for an ID, or nil when unknown.
 func (gs *LocalGovernanceStore) loadAccount(accountID string) *configstoreTables.TableAccount {
 	value, ok := gs.accounts.Load(accountID)
@@ -1501,23 +1484,10 @@ func (gs *LocalGovernanceStore) CheckLeafAccountExternalID(orgID string) (Decisi
 		return DecisionAllow, nil
 	}
 	if leaf.ExternalID == nil || strings.TrimSpace(*leaf.ExternalID) == "" {
-		// Logged at Warn: the cached snapshot is what the check ran against, so this is the
-		// only way to tell a stale cache apart from an account that really has no external_id.
-		gs.logger.Warn(
-			"leaf account has no external_id: account=%s org=%s external_id_present=%v hierarchy=%v last_refresh=%s",
-			leaf.ID, orgID, leaf.ExternalID != nil, accountIDs, gs.lastRefreshTime().Format(time.RFC3339),
-		)
 		return DecisionMissingAccountExternalID, fmt.Errorf(
 			"set external_id on account %s for organization %s", leaf.ID, orgID)
 	}
 	return DecisionAllow, nil
-}
-
-// lastRefreshTime returns the watermark of the most recent successful governance refresh.
-func (gs *LocalGovernanceStore) lastRefreshTime() time.Time {
-	gs.refreshMu.Lock()
-	defer gs.refreshMu.Unlock()
-	return gs.lastRefreshAt
 }
 
 func (gs *LocalGovernanceStore) orgUnitIDForUser(userID string) string {
@@ -2557,16 +2527,9 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			account := &delta.Accounts[i]
 			if account.Deleted {
 				gs.accounts.Delete(account.ID)
-				gs.logger.Debug("governance refresh: account %s deleted", account.ID)
 				continue
 			}
 			gs.accounts.Store(account.ID, account)
-			gs.logger.Debug("governance refresh: account %s external_id=%q customer_org_id=%q parent_account=%q",
-				account.ID,
-				derefString(account.ExternalID),
-				derefString(account.CustomerOrganizationID),
-				derefString(account.ParentAccount),
-			)
 		}
 		gs.reindexAccountsByCustomerOrg()
 	}

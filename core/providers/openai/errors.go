@@ -9,8 +9,6 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-const providerErrorBodyLogLimit = 512
-
 // ErrorConverter is a function that converts provider-specific error responses to BifrostError.
 type ErrorConverter func(resp *fasthttp.Response) *schemas.BifrostError
 
@@ -43,27 +41,14 @@ func ParseOpenAIError(resp *fasthttp.Response) *schemas.BifrostError {
 		bifrostErr.Error = &schemas.ErrorField{}
 	}
 	if strings.TrimSpace(bifrostErr.Error.Message) == "" {
-		// Provider returned a non-standard / empty error payload — try common alternate shapes
-		// before falling back to a generic status message.
-		if alt := providerUtils.ExtractAlternateProviderErrorMessage(bifrostErr.ExtraFields.RawResponse); alt != "" {
-			bifrostErr.Error.Message = alt
+		if bifrostErr.StatusCode != nil {
+			bifrostErr.Error.Message = fmt.Sprintf("provider API error (status %d)", *bifrostErr.StatusCode)
 		} else {
-			bodySnippet := providerUtils.TruncateForLog(providerUtils.RawResponseToString(bifrostErr.ExtraFields.RawResponse), providerErrorBodyLogLimit)
-			if bifrostErr.StatusCode != nil {
-				if bodySnippet != "" {
-					bifrostErr.Error.Message = fmt.Sprintf("provider API error (status %d): %s", *bifrostErr.StatusCode, bodySnippet)
-				} else {
-					bifrostErr.Error.Message = fmt.Sprintf("provider API error (status %d)", *bifrostErr.StatusCode)
-				}
-			} else if bodySnippet != "" {
-				bifrostErr.Error.Message = fmt.Sprintf("provider API error: %s", bodySnippet)
-			} else {
-				bifrostErr.Error.Message = "provider API error"
-			}
+			bifrostErr.Error.Message = "provider API error"
 		}
 	}
 
-	providerUtils.LogProviderAPIError(resp, bifrostErr)
+	// Set ExtraFields unconditionally so provider/model/request metadata is always attached
 
 	return bifrostErr
 }

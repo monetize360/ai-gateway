@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -17,9 +16,11 @@ func TestParseOpenAIError_FallbackMessageWhenProviderBodyIsNonOpenAIShape(t *tes
 	if errResp == nil || errResp.Error == nil {
 		t.Fatal("expected non-nil error response")
 	}
-	// FastAPI-style detail[0].msg is extracted when OpenAI error.message is absent.
-	if errResp.Error.Message != "value is not a valid enumeration member" {
-		t.Fatalf("expected alternate detail message, got %q", errResp.Error.Message)
+	if errResp.Error.Message == "" {
+		t.Fatal("expected non-empty error message")
+	}
+	if errResp.Error.Message != "provider API error (status 422)" {
+		t.Fatalf("expected fallback message, got %q", errResp.Error.Message)
 	}
 }
 
@@ -62,11 +63,8 @@ func TestParseOpenAIError_WhitespaceProviderMessageFallsBack(t *testing.T) {
 	if errResp == nil || errResp.Error == nil {
 		t.Fatal("expected non-nil error response")
 	}
-	if !strings.HasPrefix(errResp.Error.Message, "provider API error (status 400)") {
-		t.Fatalf("expected fallback message prefix, got %q", errResp.Error.Message)
-	}
-	if !strings.Contains(errResp.Error.Message, `"type":"invalid_request_error"`) {
-		t.Fatalf("expected truncated provider body in fallback message, got %q", errResp.Error.Message)
+	if errResp.Error.Message != "provider API error (status 400)" {
+		t.Fatalf("expected fallback message, got %q", errResp.Error.Message)
 	}
 }
 
@@ -79,7 +77,7 @@ func TestParseOpenAIError_DefaultStatusCodeFallsBackWithStatusNumber(t *testing.
 	if errResp == nil || errResp.Error == nil {
 		t.Fatal("expected non-nil error response")
 	}
-	if !strings.HasPrefix(errResp.Error.Message, "provider API error (status 200)") {
+	if errResp.Error.Message != "provider API error (status 200)" {
 		t.Fatalf("expected fallback message with default status, got %q", errResp.Error.Message)
 	}
 }
