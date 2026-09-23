@@ -1691,8 +1691,12 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 
 	// High-throughput usage ingest: slim auth (tenant JWT, no VK) — no tracing/tenant VK middleware.
 	// Standard usage publishing uses KAFKA_BOOTSTRAP_SERVERS and the same
-	// KAFKA_USAGE_TOPIC_PREFIX configured in MPilot.
+	// KAFKA_USAGE_TOPIC_PREFIX configured in MPilot. Tenant mode refuses to start
+	// without bootstrap servers so chat cannot run with a silent no-op publisher.
 	if s.Config.TenantStore != nil {
+		if _, err := kafkainject.StandardBootstrapServers(); err != nil {
+			return fmt.Errorf("failed to initialize kafka usage publish: %w", err)
+		}
 		kafkaPool := kafkainject.NewPool(s.Config.Registry())
 		kafkaSchemaCache := kafkainject.NewSchemaCache(s.Config.Registry())
 		s.KafkaIngestHandler = handlers.NewKafkaIngestHandlerWithPool(s.Config.Registry(), kafkaPool, kafkaSchemaCache)

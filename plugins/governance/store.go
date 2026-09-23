@@ -206,6 +206,10 @@ type GovernanceStore interface {
 	CheckAccountBudgetUsage(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckAccountHierarchyBudgetUsage(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckPrepaidWallet(ctx context.Context, orgID string, serviceID string) (Decision, error)
+	// CheckLeafAccountExternalID rejects when the org has a unique billing account with no
+	// external_id. Organizations with no account skip (DecisionAllow); multiple accounts
+	// return DecisionAccountAmbiguous.
+	CheckLeafAccountExternalID(orgID string) (Decision, error)
 	CheckOrgUnitHierarchyBudgetUsage(ctx context.Context, userIDs []string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckContractBudgetUsage(ctx context.Context, contractID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	// User governance in-memory operations (enterprise-only, but interface defined here for compatibility)
@@ -1427,6 +1431,33 @@ func (gs *LocalGovernanceStore) ResolveLeafAccountExternalID(orgID string) strin
 		return ""
 	}
 	return strings.TrimSpace(*leaf.ExternalID)
+}
+
+// CheckLeafAccountExternalID rejects PreLLM when the organization has exactly one billing
+// account and that account's external_id is missing. Rating uses that value as
+// billingAccountRef, so the request would otherwise complete the LLM call and then skip
+// Kafka publish.
+func (gs *LocalGovernanceStore) CheckLeafAccountExternalID(orgID string) (Decision, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return DecisionAllow, nil
+	}
+	accountIDs, unique := gs.accountHierarchyIDs(orgID)
+	if !unique {
+		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
+	}
+	if len(accountIDs) == 0 {
+		return DecisionAllow, nil
+	}
+	leaf := gs.loadAccount(accountIDs[0])
+	if leaf == nil {
+		return DecisionAllow, nil
+	}
+	if leaf.ExternalID == nil || strings.TrimSpace(*leaf.ExternalID) == "" {
+		return DecisionMissingAccountExternalID, fmt.Errorf(
+			"set external_id on account %s for organization %s", leaf.ID, orgID)
+	}
+	return DecisionAllow, nil
 }
 
 func (gs *LocalGovernanceStore) orgUnitIDForUser(userID string) string {
