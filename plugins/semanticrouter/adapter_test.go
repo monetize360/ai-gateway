@@ -49,15 +49,30 @@ func TestFromEvalResponseMapsStableGovernanceContract(t *testing.T) {
 		DecisionResult: &services.EvalDecisionResult{
 			DecisionName: "code-route",
 			Algorithm:    config.DecisionAlgorithmMultiFactor,
+			MatchedSignals: &services.MatchedSignals{
+				Keywords: []string{"code_request"},
+			},
 		},
 		RecommendedModels: []string{"model-a", "model-b"},
 		SelectedModel:     "model-b",
 		SelectionStatus:   services.EvalSelectionSelected,
 		SelectionMethod:   "multi_factor",
+		CapabilityProfile: &config.CapabilityProfile{
+			Prefer: config.CapabilityPreferences{Capabilities: map[string]float64{
+				config.CapabilityReasoning: 1,
+			}},
+			Objectives: config.CapabilityObjectives{CapabilityFit: 1},
+		},
 	}
 	result := fromEvalResponse(response)
 	if result.SelectedModel != "model-b" || result.Decision != "code-route" ||
 		result.Algorithm != "multi_factor" || len(result.Candidates) != 2 {
 		t.Fatalf("PreviewResult = %#v", result)
+	}
+	if result.CapabilityProfile == nil || result.CapabilityProfile.Prefer.Capabilities[config.CapabilityReasoning] != 1 {
+		t.Fatalf("CapabilityProfile = %#v", result.CapabilityProfile)
+	}
+	if result.MatchedSignals == nil || len(result.MatchedSignals.Keywords) != 1 {
+		t.Fatalf("MatchedSignals = %#v", result.MatchedSignals)
 	}
 }

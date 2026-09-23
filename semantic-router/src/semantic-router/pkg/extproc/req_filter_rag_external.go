@@ -1,0 +1,539 @@
+package extproc
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+	httputil "github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/http"
+)
+
+const defaultExternalRAGMaxResponseBytes int64 = 4 * 1024 * 1024
+
+var (
+	externalAPITransport     *http.Transport
+	externalAPITransportOnce sync.Once
+)
+
+func externalAPIClient(timeout time.Duration) *http.Client {
+	externalAPITransportOnce.Do(func() {
+		externalAPITransport = &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		}
+	})
+	return &http.Client{Timeout: timeout, Transport: externalAPITransport}
+}
+
+// validateHeaderName validates a header name to prevent header injection
+// Header names must contain only printable ASCII characters and cannot contain
+// newlines, carriage returns, or colons (which are used as separators)
+func validateHeaderName(name string) error {
+	if name == "" {
+		return fmt.Errorf("header name cannot be empty")
+	}
+
+	for _, r := range name {
+		if r < 32 || r > 126 {
+			return fmt.Errorf("header name contains invalid character: %q", r)
+		}
+		if r == ':' || r == '\n' || r == '\r' {
+			return fmt.Errorf("header name contains forbidden character: %q", r)
+		}
+	}
+
+	return nil
+}
+
+// validateHeaderValue validates and sanitizes a header value to prevent header injection
+// Removes newlines, carriage returns, and other control characters
+func validateHeaderValue(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+
+	// Remove control characters (including newlines and carriage returns)
+	var sanitized strings.Builder
+	for _, r := range value {
+		if unicode.IsPrint(r) || r == '\t' {
+			sanitized.WriteRune(r)
+		} else if r == '\n' || r == '\r' {
+			// Replace newlines with spaces to prevent header injection
+			sanitized.WriteRune(' ')
+		}
+		// Other control characters are silently removed
+	}
+
+	result := strings.TrimSpace(sanitized.String())
+	if len(result) == 0 && len(value) > 0 {
+		return "", fmt.Errorf("header value contains only invalid characters")
+	}
+
+	return result, nil
+}
+
+// retrieveFromExternalAPI retrieves context from external API backend
+func (r *OpenAIRouter) retrieveFromExternalAPI(traceCtx context.Context, ctx *RequestContext, ragConfig *config.RAGPluginConfig) (string, error) {
+	apiConfig, err := ragConfig.ExternalAPIBackendConfig()
+	if err != nil {
+		return "", fmt.Errorf("invalid external API RAG config: %w", err)
+	}
+
+	// Build one request per window of the query for the formats that search by
+	// vector, so a long query is not searched by its opening alone.
+	var requestBodies [][]byte
+	var buildErr error
+
+	switch apiConfig.RequestFormat {
+	case "pinecone", "weaviate":
+		var queryEmbeddings [][]float32
+		queryEmbeddings, buildErr = r.ragQueryEmbeddings(traceCtx, ctx.UserContent, ctx)
+		for _, queryEmbedding := range queryEmbeddings {
+			var body []byte
+			if apiConfig.RequestFormat == "pinecone" {
+				body, buildErr = r.buildPineconeRequest(queryEmbedding, ragConfig)
+			} else {
+				body, buildErr = r.buildWeaviateRequest(queryEmbedding, ragConfig)
+			}
+			if buildErr != nil {
+				break
+			}
+			requestBodies = append(requestBodies, body)
+		}
+	case "elasticsearch":
+		var body []byte
+		body, buildErr = r.buildElasticsearchRequest(ctx, ragConfig)
+		requestBodies = [][]byte{body}
+	case "custom":
+		var body []byte
+		body, buildErr = r.buildCustomRequest(ctx, ragConfig, apiConfig.RequestTemplate)
+		requestBodies = [][]byte{body}
+	default:
+		return "", fmt.Errorf("unsupported request format: %s", apiConfig.RequestFormat)
+	}
+
+	if buildErr != nil {
+		return "", fmt.Errorf("failed to build request: %w", buildErr)
+	}
+
+	topK := 5
+	if ragConfig.TopK != nil {
+		topK = *ragConfig.TopK
+	}
+
+	documents, totalLatency, err := r.retrieveExternalRAGWindows(traceCtx, apiConfig, requestBodies, topK)
+	if err != nil {
+		return "", err
+	}
+	ctx.RAGRetrievalLatency = totalLatency
+
+	if len(documents) == 0 {
+		return "", fmt.Errorf("no content found in %s response", apiConfig.RequestFormat)
+	}
+
+	logging.Infof("Retrieved %d documents from external API over %d query window(s) (latency: %.3fs, format: %s)",
+		len(documents), len(requestBodies), totalLatency, apiConfig.RequestFormat)
+	return strings.Join(documents, "\n\n---\n\n"), nil
+}
+
+// retrieveExternalRAGWindows sends the query-window requests and combines their
+// results. Vector-search formats are merged by score; single-request formats
+// retain their existing first-seen behavior.
+func (r *OpenAIRouter) retrieveExternalRAGWindows(
+	traceCtx context.Context,
+	apiConfig *config.ExternalAPIRAGConfig,
+	requestBodies [][]byte,
+	topK int,
+) ([]string, float64, error) {
+	rankByScore := apiConfig.RequestFormat == "pinecone" || apiConfig.RequestFormat == "weaviate"
+	var rankedDocuments ragHits
+	var documents []string
+	seen := make(map[string]struct{})
+	var totalLatency float64
+	for _, requestBody := range requestBodies {
+		apiResponse, latency, sendErr := r.sendExternalRAGRequest(traceCtx, apiConfig, requestBody)
+		totalLatency += latency
+		if sendErr != nil {
+			return nil, totalLatency, sendErr
+		}
+		windowDocuments, windowScores, extractErr := r.extractDocumentsFromResponse(apiResponse, apiConfig.RequestFormat)
+		if extractErr != nil {
+			return nil, totalLatency, fmt.Errorf("failed to extract context: %w", extractErr)
+		}
+		if rankByScore {
+			rankedDocuments.add(windowDocuments, windowScores)
+			continue
+		}
+		for _, document := range windowDocuments {
+			if _, duplicate := seen[document]; duplicate {
+				continue
+			}
+			seen[document] = struct{}{}
+			documents = append(documents, document)
+		}
+	}
+
+	if rankByScore {
+		documents, _ = rankedDocuments.top(topK)
+	}
+	if topK > 0 && len(documents) > topK {
+		documents = documents[:topK]
+	}
+	return documents, totalLatency, nil
+}
+
+// sendExternalRAGRequest posts one request body and decodes the response,
+// returning how long the call took so a caller that sends several can report
+// their total.
+func (r *OpenAIRouter) sendExternalRAGRequest(traceCtx context.Context, apiConfig *config.ExternalAPIRAGConfig, requestBody []byte) (map[string]interface{}, float64, error) {
+	req, err := http.NewRequestWithContext(traceCtx, "POST", apiConfig.Endpoint, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	if apiConfig.APIKey != "" {
+		authHeader := apiConfig.AuthHeader
+		if authHeader == "" {
+			authHeader = "Authorization"
+		}
+
+		// Validate header name
+		if validateErr := validateHeaderName(authHeader); validateErr != nil {
+			return nil, 0, fmt.Errorf("invalid auth header name: %w", validateErr)
+		}
+
+		// Validate and sanitize API key to prevent header injection
+		sanitizedAPIKey, validateErr := validateHeaderValue(apiConfig.APIKey)
+		if validateErr != nil {
+			logging.Errorf("Failed to sanitize API key: %v", validateErr)
+			return nil, 0, fmt.Errorf("invalid API key format")
+		}
+
+		req.Header.Set(authHeader, fmt.Sprintf("Bearer %s", sanitizedAPIKey))
+	}
+
+	// Add custom headers with validation
+	for k, v := range apiConfig.Headers {
+		// Validate header name
+		if validateErr := validateHeaderName(k); validateErr != nil {
+			logging.Warnf("Skipping invalid header name: %s (error: %v)", k, validateErr)
+			continue
+		}
+
+		// Validate and sanitize header value
+		sanitizedValue, validateErr := validateHeaderValue(v)
+		if validateErr != nil {
+			logging.Warnf("Skipping invalid header value for %s: %v", k, validateErr)
+			continue
+		}
+
+		req.Header.Set(k, sanitizedValue)
+	}
+
+	client := externalAPIClient(apiConfig.GetTimeout())
+
+	// Execute request
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("API request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	latency := time.Since(start).Seconds()
+
+	if resp.StatusCode != http.StatusOK {
+		// Limit error response body size to prevent memory exhaustion
+		const maxErrorBodySize = 1024 * 10 // 10KB limit
+		limitedReader := io.LimitReader(resp.Body, maxErrorBodySize)
+		body, _ := io.ReadAll(limitedReader)
+		return nil, latency, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	apiResponse, decodeErr := decodeExternalRAGResponse(resp.Body, apiConfig.MaxResponseBytes)
+	if decodeErr != nil {
+		return nil, latency, fmt.Errorf("failed to parse response: %w", decodeErr)
+	}
+	return apiResponse, latency, nil
+}
+
+func decodeExternalRAGResponse(body io.Reader, maxResponseBytes int64) (map[string]interface{}, error) {
+	if maxResponseBytes == 0 {
+		maxResponseBytes = defaultExternalRAGMaxResponseBytes
+	}
+	responseBody, err := httputil.ReadLimitedBody(body, maxResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read external RAG response: %w", err)
+	}
+
+	var apiResponse map[string]interface{}
+	if err := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&apiResponse); err != nil {
+		return nil, err
+	}
+	return apiResponse, nil
+}
+
+// buildPineconeRequest builds a Pinecone query request
+func (r *OpenAIRouter) buildPineconeRequest(queryEmbedding []float32, ragConfig *config.RAGPluginConfig) ([]byte, error) {
+	topK := 5
+	if ragConfig.TopK != nil {
+		topK = *ragConfig.TopK
+	}
+
+	request := map[string]interface{}{
+		"vector":          queryEmbedding,
+		"topK":            topK,
+		"includeMetadata": true,
+		"filter":          map[string]interface{}{},
+	}
+
+	return json.Marshal(request)
+}
+
+// buildWeaviateRequest builds a Weaviate query request
+func (r *OpenAIRouter) buildWeaviateRequest(queryEmbedding []float32, ragConfig *config.RAGPluginConfig) ([]byte, error) {
+	topK := 5
+	if ragConfig.TopK != nil {
+		topK = *ragConfig.TopK
+	}
+
+	// Properly JSON-encode the vector for GraphQL query
+	embeddingJSON, err := json.Marshal(queryEmbedding)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal embedding: %w", err)
+	}
+
+	// Build GraphQL query with properly encoded vector
+	query := fmt.Sprintf(`
+		{
+			Get {
+				Document(
+					nearVector: {
+						vector: %s
+					}
+					limit: %d
+				) {
+					content
+					_additional {
+						distance
+					}
+				}
+			}
+		}`, string(embeddingJSON), topK)
+
+	request := map[string]interface{}{
+		"query": query,
+	}
+
+	return json.Marshal(request)
+}
+
+// buildElasticsearchRequest builds an Elasticsearch query request
+func (r *OpenAIRouter) buildElasticsearchRequest(ctx *RequestContext, ragConfig *config.RAGPluginConfig) ([]byte, error) {
+	topK := 5
+	if ragConfig.TopK != nil {
+		topK = *ragConfig.TopK
+	}
+
+	request := map[string]interface{}{
+		"query": map[string]interface{}{
+			"match": map[string]interface{}{
+				"content": ctx.UserContent,
+			},
+		},
+		"size": topK,
+	}
+
+	return json.Marshal(request)
+}
+
+// buildCustomRequest builds a custom request using template
+func (r *OpenAIRouter) buildCustomRequest(ctx *RequestContext, ragConfig *config.RAGPluginConfig, template string) ([]byte, error) {
+	if template == "" {
+		return nil, fmt.Errorf("request template is required for custom format")
+	}
+
+	// Simple template substitution (can be enhanced with proper template engine)
+	query := ctx.UserContent
+	topK := 5
+	if ragConfig.TopK != nil {
+		topK = *ragConfig.TopK
+	}
+	threshold := 0.7
+	if ragConfig.SimilarityThreshold != nil {
+		threshold = float64(*ragConfig.SimilarityThreshold)
+	}
+
+	// Replace template variables with basic validation
+	// Note: This is a simple substitution. For production use, consider using
+	// a proper template engine (e.g., text/template) with escaping.
+	// Basic validation: check if user content contains template markers (could indicate injection attempt)
+	if strings.Contains(query, "{{") || strings.Contains(query, "}}") || strings.Contains(query, "${") {
+		logging.Warnf("User content contains template markers, potential injection attempt")
+		// Escape the markers to prevent injection
+		query = strings.ReplaceAll(query, "{{", "\\{\\{")
+		query = strings.ReplaceAll(query, "}}", "\\}\\}")
+		query = strings.ReplaceAll(query, "${", "\\${")
+	}
+
+	replaced := strings.ReplaceAll(template, "{{.Query}}", query)
+	replaced = strings.ReplaceAll(replaced, "{{.TopK}}", fmt.Sprintf("%d", topK))
+	replaced = strings.ReplaceAll(replaced, "{{.Threshold}}", fmt.Sprintf("%.3f", threshold))
+	replaced = strings.ReplaceAll(replaced, "${user_content}", query)
+	replaced = strings.ReplaceAll(replaced, "${top_k}", fmt.Sprintf("%d", topK))
+	replaced = strings.ReplaceAll(replaced, "${threshold}", fmt.Sprintf("%.3f", threshold))
+
+	return []byte(replaced), nil
+}
+
+// extractDocumentsFromResponse extracts documents and ranking scores from an API response.
+func (r *OpenAIRouter) extractDocumentsFromResponse(response map[string]interface{}, format string) ([]string, []float32, error) {
+	switch format {
+	case "pinecone":
+		return r.extractPineconeContext(response)
+	case "weaviate":
+		return r.extractWeaviateContext(response)
+	case "elasticsearch":
+		return r.extractElasticsearchContext(response)
+	case "custom":
+		// For custom format, assume response has a "content" or "text" field
+		if content, ok := response["content"].(string); ok {
+			return []string{content}, nil, nil
+		}
+		if text, ok := response["text"].(string); ok {
+			return []string{text}, nil, nil
+		}
+		// Try to extract from results array
+		if results, ok := response["results"].([]interface{}); ok {
+			var parts []string
+			for _, result := range results {
+				if resultMap, ok := result.(map[string]interface{}); ok {
+					if content, ok := resultMap["content"].(string); ok {
+						parts = append(parts, content)
+					} else if text, ok := resultMap["text"].(string); ok {
+						parts = append(parts, text)
+					}
+				}
+			}
+			return parts, nil, nil
+		}
+		return nil, nil, fmt.Errorf("unable to extract context from custom response format")
+	default:
+		return nil, nil, fmt.Errorf("unknown response format: %s", format)
+	}
+}
+
+// extractPineconeContext extracts context from Pinecone response
+func (r *OpenAIRouter) extractPineconeContext(response map[string]interface{}) ([]string, []float32, error) {
+	matches, ok := response["matches"].([]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no matches in Pinecone response")
+	}
+
+	var parts []string
+	var scores []float32
+	for _, match := range matches {
+		if matchMap, ok := match.(map[string]interface{}); ok {
+			if metadata, ok := matchMap["metadata"].(map[string]interface{}); ok {
+				var content string
+				if value, ok := metadata["content"].(string); ok {
+					content = value
+				} else if text, ok := metadata["text"].(string); ok {
+					content = text
+				} else {
+					continue
+				}
+				score, ok := matchMap["score"].(float64)
+				if !ok {
+					return nil, nil, fmt.Errorf("pinecone match for %q has no numeric score", content)
+				}
+				parts = append(parts, content)
+				scores = append(scores, float32(score))
+			}
+		}
+	}
+
+	return parts, scores, nil
+}
+
+// extractWeaviateContext extracts context from Weaviate response
+func (r *OpenAIRouter) extractWeaviateContext(response map[string]interface{}) ([]string, []float32, error) {
+	data, ok := response["data"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no data in Weaviate response")
+	}
+
+	get, ok := data["Get"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no Get in Weaviate response")
+	}
+
+	document, ok := get["Document"].([]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no Document in Weaviate response")
+	}
+
+	var parts []string
+	var scores []float32
+	for _, doc := range document {
+		if docMap, ok := doc.(map[string]interface{}); ok {
+			if content, ok := docMap["content"].(string); ok {
+				additional, ok := docMap["_additional"].(map[string]interface{})
+				if !ok {
+					return nil, nil, fmt.Errorf("weaviate document %q has no _additional data", content)
+				}
+				distance, ok := additional["distance"].(float64)
+				if !ok {
+					return nil, nil, fmt.Errorf("weaviate document %q has no numeric distance", content)
+				}
+				parts = append(parts, content)
+				// Weaviate distance is lower-is-better; ragHits expects higher scores.
+				scores = append(scores, -float32(distance))
+			}
+		}
+	}
+
+	return parts, scores, nil
+}
+
+// extractElasticsearchContext extracts context from Elasticsearch response
+func (r *OpenAIRouter) extractElasticsearchContext(response map[string]interface{}) ([]string, []float32, error) {
+	hits, ok := response["hits"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no hits in Elasticsearch response")
+	}
+
+	hitsArray, ok := hits["hits"].([]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("no hits array in Elasticsearch response")
+	}
+
+	var parts []string
+	for _, hit := range hitsArray {
+		if hitMap, ok := hit.(map[string]interface{}); ok {
+			if source, ok := hitMap["_source"].(map[string]interface{}); ok {
+				if content, ok := source["content"].(string); ok {
+					parts = append(parts, content)
+				} else if text, ok := source["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+
+	return parts, nil, nil
+}

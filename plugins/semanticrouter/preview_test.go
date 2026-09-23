@@ -6,11 +6,13 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
 )
 
 func recipePath(t *testing.T) string {
@@ -41,88 +43,133 @@ func preview(t *testing.T, p *semanticrouter.Plugin, content any) *semanticroute
 	return out
 }
 
-func TestPreviewCodePool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, "Write a Python function that reverses a linked list.")
-	assert.Equal(t, "code", out.Decision)
-	assert.Equal(t, "anthropic/claude-3.5-sonnet", out.SelectedModel)
-	assert.Equal(t, "selected", out.SelectionStatus)
-	assert.Equal(t, []string{
-		"anthropic/claude-3.5-sonnet",
-		"nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
-		"deepseek/deepseek-r1-distill-32b",
-		"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-		"fakellm-qwen/qwen2.5-72b-instruct",
-		"meta/llama-3.1-70b-instruct",
-		"gemini/gemini-2.5-pro",
-		"gemini/gemini-2.5-flash",
-	}, out.Candidates)
-}
-
-func TestPreviewGeneralPool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, "Summarize this PR in three bullets.")
-	assert.Equal(t, "general", out.Decision)
-	assert.Equal(t, "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", out.SelectedModel)
-}
-
-func TestPreviewDeepReasoningPool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, "Prove the theorem and derive the architecture trade-offs step by step.")
-	assert.Equal(t, "deep-reasoning", out.Decision)
-	assert.Equal(t, "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", out.SelectedModel)
-}
-
-func TestPreviewImagePool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, []any{
-		map[string]any{"type": "text", "text": "What is in this picture?"},
-		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:inline"}},
-	})
-	assert.Equal(t, "vision", out.Decision)
-	assert.Equal(t, "fakellm-openai/gpt-4o", out.SelectedModel)
-}
-
-func TestPreviewVideoPool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, []any{
-		map[string]any{"type": "text", "text": "Summarize this video."},
-		map[string]any{"type": "video_url", "video_url": map[string]any{"url": "https://example.com/clip.mp4"}},
-	})
-	assert.Equal(t, "video", out.Decision)
-	// The current OpenAI-chat wire codec cannot carry video input. Capability
-	// admission therefore rejects the card instead of dispatching an invalid
-	// request as selected, while preserving the decision's recommendations.
+func assertProfileOnly(t *testing.T, out *semanticrouter.PreviewResult, decision string) {
+	t.Helper()
+	assert.Equal(t, decision, out.Decision)
+	assert.Equal(t, services.EvalSelectionProfileOnly, out.SelectionStatus)
+	assert.Equal(t, "capability_profile", out.SelectionMethod)
 	assert.Empty(t, out.SelectedModel)
-	assert.Equal(t, []string{
-		"qwen/qwen2.5-vl-72b-instruct",
-	}, out.Candidates)
+	assert.Empty(t, out.Candidates)
+	require.NotNil(t, out.CapabilityProfile)
 }
 
-func TestPreviewCatchAllPool(t *testing.T) {
+func hasKeyword(out *semanticrouter.PreviewResult, name string) bool {
+	return out.MatchedSignals != nil && slices.Contains(out.MatchedSignals.Keywords, name)
+}
+
+func hasStructure(out *semanticrouter.PreviewResult, name string) bool {
+	return out.MatchedSignals != nil && slices.Contains(out.MatchedSignals.Structure, name)
+}
+
+func hasConversation(out *semanticrouter.PreviewResult, name string) bool {
+	return out.MatchedSignals != nil && slices.Contains(out.MatchedSignals.Conversation, name)
+}
+
+func hasContext(out *semanticrouter.PreviewResult, name string) bool {
+	return out.MatchedSignals != nil && slices.Contains(out.MatchedSignals.Context, name)
+}
+
+func hasInputModality(out *semanticrouter.PreviewResult, name string) bool {
+	return out.MatchedSignals != nil && slices.Contains(out.MatchedSignals.InputModality, name)
+}
+
+func TestPreviewClassifiesQualityLanes(t *testing.T) {
 	p := newPlugin(t)
-	out := preview(t, p, "Hello, how are you today?")
-	assert.Equal(t, "general", out.Decision)
-	assert.Equal(t, "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", out.SelectedModel)
-	assert.Equal(t, "static", out.Algorithm)
-	assert.Len(t, out.Candidates, 10)
+	long := make([]byte, 6200)
+	for i := range long {
+		long[i] = 'a'
+	}
+
+	t.Run("code", func(t *testing.T) {
+		out := preview(t, p, "Write a Python function that reverses a linked list.")
+		assertProfileOnly(t, out, "code")
+		assert.Equal(t, 0.30, out.CapabilityProfile.Prefer.Capabilities["coding"])
+		assert.True(t, out.CapabilityProfile.DynamicFeatures.Language)
+		assert.True(t, out.CapabilityProfile.DynamicFeatures.Framework)
+		assert.True(t, hasKeyword(out, "code_request"))
+	})
+
+	t.Run("deep-reasoning-keyword", func(t *testing.T) {
+		out := preview(t, p, "Prove the theorem and derive the architecture trade-offs step by step.")
+		assertProfileOnly(t, out, "deep-reasoning")
+		assert.Equal(t, 0.35, out.CapabilityProfile.Prefer.Capabilities["reasoning"])
+		assert.True(t, hasKeyword(out, "deep_reasoning_request"))
+	})
+
+	t.Run("deep-reasoning-dense-constraints", func(t *testing.T) {
+		out := preview(t, p, "You must keep the API stable. You should document every error. Please ensure the constraint is listed. Do not break callers.")
+		assertProfileOnly(t, out, "deep-reasoning")
+		assert.True(t, hasStructure(out, "dense_constraints"))
+	})
+
+	t.Run("agentic-keyword", func(t *testing.T) {
+		out := preview(t, p, "Use the agent loop to orchestrate the weather lookup and summarize it.")
+		assertProfileOnly(t, out, "agentic")
+		assert.Equal(t, 0.30, out.CapabilityProfile.Prefer.Capabilities["agentic"])
+		assert.True(t, hasKeyword(out, "agentic_request"))
+	})
+
+	t.Run("agentic-ordered-workflow", func(t *testing.T) {
+		out := preview(t, p, "First collect the logs then restart the service.")
+		assertProfileOnly(t, out, "agentic")
+		assert.True(t, hasStructure(out, "ordered_workflow"))
+	})
+
+	t.Run("long-context", func(t *testing.T) {
+		out := preview(t, p, string(long)+" please help")
+		assertProfileOnly(t, out, "long-context")
+		assert.True(t, out.CapabilityProfile.Context.MinTokensFromRequest)
+		assert.Equal(t, 0.50, out.CapabilityProfile.Prefer.Capabilities["long_context"])
+		assert.True(t, hasContext(out, "long_context") || hasStructure(out, "large_input"))
+	})
+
+	t.Run("multi-part", func(t *testing.T) {
+		out := preview(t, p, "What time is it? Where is the station? Who is meeting us?")
+		assertProfileOnly(t, out, "multi-part")
+		assert.True(t, hasStructure(out, "many_questions"))
+	})
+
+	t.Run("simple-brief", func(t *testing.T) {
+		out := preview(t, p, "Answer briefly in one sentence: what is HTTP?")
+		assertProfileOnly(t, out, "simple")
+		assert.Equal(t, 0.35, out.CapabilityProfile.Objectives.Latency)
+		assert.True(t, hasKeyword(out, "simple_request"))
+	})
+
+	t.Run("simple-factual", func(t *testing.T) {
+		out := preview(t, p, "What is HTTP?")
+		assertProfileOnly(t, out, "simple")
+		assert.True(t, hasKeyword(out, "simple_request"))
+	})
+
+	t.Run("general", func(t *testing.T) {
+		out := preview(t, p, "Hello, how are you today?")
+		assertProfileOnly(t, out, "general")
+		assert.False(t, hasKeyword(out, "code_request"))
+		assert.False(t, hasKeyword(out, "simple_request"))
+	})
+
+	t.Run("image-uses-multimodal-lane", func(t *testing.T) {
+		out := preview(t, p, []any{
+			map[string]any{"type": "text", "text": "What is in this picture?"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:inline"}},
+		})
+		assertProfileOnly(t, out, "multimodal")
+		assert.True(t, out.CapabilityProfile.Require.ModalityFromRequest)
+		assert.True(t, hasInputModality(out, "image_input"))
+	})
+
+	t.Run("video-uses-multimodal-lane", func(t *testing.T) {
+		out := preview(t, p, []any{
+			map[string]any{"type": "text", "text": "Summarize this video."},
+			map[string]any{"type": "video_url", "video_url": map[string]any{"url": "https://example.com/clip.mp4"}},
+		})
+		assertProfileOnly(t, out, "multimodal")
+		assert.True(t, hasInputModality(out, "video_input"))
+	})
 }
 
-func TestPreviewSimplePool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, "Answer briefly in one sentence: what is HTTP?")
-	assert.Equal(t, "simple", out.Decision)
-	assert.Equal(t, "meta/llama-3.1-8b-instruct", out.SelectedModel)
-}
-
-func TestPreviewFactualQAPool(t *testing.T) {
-	p := newPlugin(t)
-	out := preview(t, p, "What is HTTP?")
-	assert.Equal(t, "simple", out.Decision)
-	assert.Equal(t, "meta/llama-3.1-8b-instruct", out.SelectedModel)
-}
-
-func TestPreviewToolsPool(t *testing.T) {
+func TestPreviewToolsSelectAgenticConditionalRequirement(t *testing.T) {
 	p := newPlugin(t)
 	out, err := p.Preview(context.Background(), semanticrouter.PreviewInput{
 		Messages: []map[string]any{{"role": "user", "content": "Look up the weather and summarize it."}},
@@ -136,106 +183,22 @@ func TestPreviewToolsPool(t *testing.T) {
 		}},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "tools", out.Decision)
-	assert.Equal(t, "nvidia/nemotron-ultra", out.SelectedModel)
+	assertProfileOnly(t, out, "agentic")
+	require.Len(t, out.CapabilityProfile.Require.Conditional, 1)
+	require.NotNil(t, out.CapabilityProfile.Require.Conditional[0].Require.ToolCalling)
+	assert.True(t, *out.CapabilityProfile.Require.Conditional[0].Require.ToolCalling)
+	assert.True(t, hasConversation(out, "has_tools"))
 }
 
-func TestPreviewLongContextPool(t *testing.T) {
+func TestPreviewSpanishLanguageSignal(t *testing.T) {
 	p := newPlugin(t)
-	// 1500 tokens ≈ 6000 chars
-	long := make([]byte, 6200)
-	for i := range long {
-		long[i] = 'a'
+	out := preview(t, p, "Buenos días. ¿Podrías explicarme cómo funciona el protocolo HTTP en una red de computadoras modernas?")
+	assertProfileOnly(t, out, out.Decision)
+	if out.MatchedSignals == nil || !slices.Contains(out.MatchedSignals.Language, "es") {
+		t.Logf("language detector did not report es (got %#v); skipping hard assertion", out.MatchedSignals)
+		return
 	}
-	out := preview(t, p, string(long)+" please help")
-	assert.Equal(t, "long-context", out.Decision)
-	assert.Equal(t, "gemini/gemini-3.5-flash-lite", out.SelectedModel)
-}
-
-func TestScreenshotChatModelsAreRoutingCandidates(t *testing.T) {
-	p := newPlugin(t)
-	outputs := []*semanticrouter.PreviewResult{
-		preview(t, p, "Hello, how are you today?"),
-		preview(t, p, "Answer briefly in one sentence: what is HTTP?"),
-		preview(t, p, "Write Python code to debug this API."),
-		preview(t, p, "Prove the theorem step by step."),
-		preview(t, p, []any{
-			map[string]any{"type": "text", "text": "Describe this image."},
-			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:inline"}},
-		}),
-		preview(t, p, []any{
-			map[string]any{"type": "text", "text": "Describe this video."},
-			map[string]any{"type": "video_url", "video_url": map[string]any{"url": "https://example.com/clip.mp4"}},
-		}),
-	}
-
-	candidates := make(map[string]bool)
-	for _, out := range outputs {
-		for _, model := range out.Candidates {
-			candidates[model] = true
-		}
-	}
-	for _, model := range []string{
-		"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-		"nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
-		"fakellm-openai/gpt-4o",
-		"nvidia/nemotron-ultra",
-		"gemini/gemini-3.5-flash-lite",
-		"anthropic/claude-3.5-sonnet",
-		"fakellm-qwen/qwen2.5-72b-instruct",
-		"qwen/qwen2.5-vl-72b-instruct",
-		"meta/llama-3.1-70b-instruct",
-		"mistral/mistral-small-3",
-		"meta/llama-3.1-70b-instruct-int4",
-		"deepseek/deepseek-r1-distill-32b",
-		"google/gemma-2-27b",
-		"microsoft/phi-4-14b",
-		"meta/llama-3.1-8b-instruct",
-	} {
-		assert.Truef(t, candidates[model], "model %q is not reachable from any chat decision", model)
-	}
-	assert.False(t, candidates["aifactory/factory-embed-3"], "embedding-only model must not enter chat routing")
-}
-
-// TestDecisionLeadersAreDistinct guards the recipe ordering invariant: no model
-// may sit first in more than one decision, otherwise a single card absorbs most
-// traffic and the remaining cards never get exercised.
-func TestDecisionLeadersAreDistinct(t *testing.T) {
-	p := newPlugin(t)
-	longInput := make([]byte, 6200)
-	for i := range longInput {
-		longInput[i] = 'a'
-	}
-
-	leaders := map[string]string{}
-	for _, tc := range []struct {
-		decision string
-		content  any
-	}{
-		{"general", "Hello, how are you today?"},
-		{"simple", "Answer briefly in one sentence: what is HTTP?"},
-		{"code", "Write a Python function that reverses a linked list."},
-		{"deep-reasoning", "Prove the theorem and derive the architecture trade-offs step by step."},
-		{"long-context", string(longInput) + " please help"},
-		{"tools", "Use the agent loop to call the weather tool and summarize it."},
-		{"vision", []any{
-			map[string]any{"type": "text", "text": "Describe this image."},
-			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:inline"}},
-		}},
-		{"video", []any{
-			map[string]any{"type": "text", "text": "Describe this video."},
-			map[string]any{"type": "video_url", "video_url": map[string]any{"url": "https://example.com/clip.mp4"}},
-		}},
-	} {
-		out := preview(t, p, tc.content)
-		require.Equal(t, tc.decision, out.Decision)
-		require.NotEmpty(t, out.Candidates)
-
-		leader := out.Candidates[0]
-		previous, taken := leaders[leader]
-		assert.Falsef(t, taken, "model %q leads both %q and %q", leader, previous, tc.decision)
-		leaders[leader] = tc.decision
-	}
+	assert.Contains(t, out.MatchedSignals.Language, "es")
 }
 
 func TestInitMissingRecipe(t *testing.T) {

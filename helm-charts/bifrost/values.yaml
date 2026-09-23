@@ -426,6 +426,19 @@ bifrost:
         is_vk_mandatory: false
         required_headers: []
         is_enterprise: false
+        # semantic_routing:
+        #   enabled: true
+        #   default_for_all: true
+        #   router:
+        #     mode: plugin
+        #     timeout_ms: 2000
+
+    semanticRouter:
+      enabled: false
+      version: 1
+      config:
+        recipe_file: /app/data/semantic-router/config.yaml
+        entrypoint: vllm-sr/auto
 
     maxim:
       enabled: false

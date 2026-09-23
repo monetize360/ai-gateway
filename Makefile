@@ -18,7 +18,7 @@ FLOW ?=
 VERSION ?= dev-build
 LOCAL ?=
 DEBUG ?=
-SEMANTIC_ROUTER_DIR ?= ../semantic-router
+SEMANTIC_ROUTER_DIR ?= ./semantic-router
 
 # Colors for output
 RED=\033[0;31m
@@ -138,8 +138,11 @@ install-delve: ## Install delve for debugging (if not already installed)
 	@which dlv > /dev/null || ($(ECHO) "$(YELLOW)Installing delve for debugging...$(NC)" && go install github.com/go-delve/delve/cmd/dlv@latest)
 	@$(ECHO) "$(GREEN)Delve is ready$(NC)"
 
-build-semantic-router-native: ## Build Candle CPU and supporting Semantic Router native libraries
-	@env -u CARGO_TARGET_DIR $(MAKE) -C "$(SEMANTIC_ROUTER_DIR)" rust
+build-semantic-router-native: ## Build CPU Semantic Router native libraries (same flags as transports/Dockerfile.local)
+	@cd "$(SEMANTIC_ROUTER_DIR)/candle-binding" && env -u CARGO_TARGET_DIR cargo build --release --no-default-features
+	@cd "$(SEMANTIC_ROUTER_DIR)/ml-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@cd "$(SEMANTIC_ROUTER_DIR)/nlp-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@cd "$(SEMANTIC_ROUTER_DIR)/onnx-binding" && env -u CARGO_TARGET_DIR cargo build --release --lib --locked --no-default-features --features dynamic
 
 install-gotestsum: ## Install gotestsum for test reporting (if not already installed)
 	@which gotestsum > /dev/null || ($(ECHO) "$(YELLOW)Installing gotestsum for test reporting...$(NC)" && go install gotest.tools/gotestsum@latest)
@@ -1592,13 +1595,12 @@ ui:
 
 # plugins/semanticrouter requires these via path-only replace directives, which
 # `go work sync` does not resolve. They must be workspace modules instead.
-SEMANTIC_ROUTER_ROOT ?= ../semantic-router
+SEMANTIC_ROUTER_ROOT ?= ./semantic-router
 SEMANTIC_ROUTER_MODULES := \
 	$(SEMANTIC_ROUTER_ROOT)/candle-binding \
 	$(SEMANTIC_ROUTER_ROOT)/ml-binding \
 	$(SEMANTIC_ROUTER_ROOT)/nlp-binding \
 	$(SEMANTIC_ROUTER_ROOT)/onnx-binding \
-	$(SEMANTIC_ROUTER_ROOT)/openvino-binding \
 	$(SEMANTIC_ROUTER_ROOT)/src/semantic-router
 
 setup-workspace: ## Set up Go workspace with all local modules for development

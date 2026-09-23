@@ -1,0 +1,373 @@
+/*
+Copyright 2025 vLLM Semantic Router.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package extproc
+
+import (
+	"context"
+
+	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/openai/openai-go"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/llmprotocol"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/looper"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/protocolcodec"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/sessiontelemetry"
+)
+
+// isLooperRequest checks if the incoming request is from looper (internal request)
+// If so, extproc should skip plugin processing to avoid recursion
+func (r *OpenAIRouter) isLooperRequest(ctx *RequestContext) bool {
+	return ctx.LooperRequest
+}
+
+// shouldUseLooper checks if the decision requires looper execution
+// Returns true if:
+// - Decision has an Algorithm configured AND
+// - Decision has at least one ModelRef (ReMoM supports single model) AND
+// - Looper endpoint is configured in router config
+func (r *OpenAIRouter) shouldUseLooper(decision *config.Decision) bool {
+	if decision == nil || r.Config == nil {
+		return false
+	}
+	if decision.Algorithm == nil {
+		return false
+	}
+	if !config.IsLooperAlgorithmType(decision.Algorithm.Type) {
+		return false
+	}
+
+	if !hasLooperModelInputs(decision) {
+		return false
+	}
+
+	if !r.Config.Looper.IsEnabled() {
+		logging.Warnf("Decision %s has algorithm configured but looper endpoint is not set", decision.Name)
+		return false
+	}
+	return true
+}
+
+func hasLooperModelInputs(decision *config.Decision) bool {
+	switch decision.Algorithm.Type {
+	case config.DecisionAlgorithmReMoM:
+		return len(decision.ModelRefs) >= 1
+	case config.DecisionAlgorithmFusion:
+		return len(decision.ModelRefs) >= 1 || hasFusionAnalysisModels(decision)
+	case config.DecisionAlgorithmWorkflows:
+		return len(decision.ModelRefs) >= 1
+	default:
+		return len(decision.ModelRefs) > 1
+	}
+}
+
+func hasFusionAnalysisModels(decision *config.Decision) bool {
+	return decision.Algorithm.Fusion != nil &&
+		len(decision.Algorithm.Fusion.AnalysisModels) > 0
+}
+
+func (r *OpenAIRouter) createLooper(
+	decision *config.Decision,
+	reqCtx *RequestContext,
+) (looper.Looper, error) {
+	l, err := looper.FactoryWithClientAndWorkflowState(
+		&r.Config.Looper,
+		decision.Algorithm.Type,
+		r.looperModelClient(),
+		r.WorkflowStateService,
+	)
+	if err != nil {
+		logging.ComponentErrorEvent("extproc", "looper_construction_failed", map[string]interface{}{
+			"request_id": reqCtx.RequestID,
+			"decision":   decision.Name,
+			"algorithm":  decision.Algorithm.Type,
+			"error":      err.Error(),
+		})
+	}
+	return l, err
+}
+
+func (r *OpenAIRouter) looperModelClient() *looper.Client {
+	if r.looperClient != nil {
+		return r.looperClient
+	}
+	return looper.NewClient(&r.Config.Looper)
+}
+
+// handleLooperExecution executes the looper for multi-model decisions
+// Returns an ImmediateResponse with the aggregated result
+func (r *OpenAIRouter) handleLooperExecution(
+	ctx context.Context,
+	request *llmprotocol.Request,
+	decision *config.Decision,
+	reqCtx *RequestContext,
+) (*ext_proc.ProcessingResponse, error) {
+	ctx = looper.WithExpectedConfigHash(ctx, headerValueCI(reqCtx, headers.SRBenchExpectedConfigHash))
+	if r.WorkflowStateService != nil && decision != nil && decision.Algorithm != nil &&
+		decision.Algorithm.Type == config.DecisionAlgorithmWorkflows {
+		if !r.WorkflowStateService.Acquire() {
+			return r.createErrorResponse(503, "Router is shutting down"), nil
+		}
+		defer r.WorkflowStateService.Release()
+	}
+	// Create looper based on algorithm type
+	l, err := r.createLooper(decision, reqCtx)
+	if err != nil {
+		return r.createErrorResponse(500, "Looper construction failed: "+err.Error()), nil
+	}
+	looperReq, errorResponse := r.buildLooperRequest(request, decision, reqCtx)
+	if errorResponse != nil {
+		return errorResponse, nil
+	}
+	resp, errorResponse := r.executeLooperRequest(ctx, l, looperReq, request.Model, decision, reqCtx)
+	if errorResponse != nil {
+		return errorResponse, nil
+	}
+
+	// The looper's final model must land on the request context before the
+	// response headers are built. Runtime model selection has already put a
+	// preliminary panel candidate in VSRSelectedModel, and appendLooperRoutingFacts
+	// prefers that value, so building headers first would advertise a panel model
+	// as the responder even when a fallback target produced the answer.
+	reqCtx.RequestModel = resp.Model
+	reqCtx.VSRSelectedModel = resp.Model
+	reqCtx.VSRSelectionMethod = resp.AlgorithmType
+
+	response, semanticResponse, clientBody, err := r.prepareLooperResponse(resp, reqCtx)
+	if err != nil {
+		logging.ComponentErrorEvent("extproc", "looper_response_encode_failed", map[string]interface{}{
+			"request_id": reqCtx.RequestID,
+			"format":     reqCtx.SourceFormat,
+			"error":      err.Error(),
+		})
+		// Encoding failed, so an error response is returned instead of the
+		// recovered fallback.
+		// Promote the terminal disposition first, then route through the shared
+		// failure recorder. That helper is what actually creates the Replay
+		// record: the usage, status, body, and quorum writers all no-op while
+		// RouterReplayID is empty, so recording evidence without starting Replay
+		// would persist nothing and return no Replay ID header.
+		finalizeLooperQuorumOutcome(reqCtx, resp.QuorumOutcome, decision, false)
+		return r.recordLooperFailure(
+			reqCtx, request.Model, decision, 502,
+			"Looper returned an invalid response", "looper_response_encode_failed",
+			looperFailureEvidence{
+				algorithm:    resp.AlgorithmType,
+				modelsUsed:   resp.ModelsUsed,
+				iterations:   resp.Iterations,
+				usage:        resp.Usage,
+				fusionQuorum: resp.QuorumOutcome,
+			},
+		), nil
+	}
+	r.recordSuccessfulLooperExecution(
+		resp, request.Model, decision, reqCtx, semanticResponse, clientBody,
+	)
+	// Replay starts inside the recorder, so its ID only exists now. Attach it to
+	// the already-built immediate response, as the failure path does, otherwise a
+	// successful looper response omits the header for the record just created.
+	addRouterReplayHeaderToImmediateResponse(response, reqCtx.RouterReplayID)
+	return response, nil
+}
+
+func (r *OpenAIRouter) buildLooperRequest(
+	request *llmprotocol.Request,
+	decision *config.Decision,
+	reqCtx *RequestContext,
+) (*looper.Request, *ext_proc.ProcessingResponse) {
+	modelRefs := decision.ModelRefs
+	if reqCtx.VSREligibleModelRefs != nil {
+		modelRefs = reqCtx.VSREligibleModelRefs
+	}
+	// Build looper request.
+	// Responses uses buffered aggregation so its codec can enforce the existing
+	// target capability and projection gates on the complete neutral result.
+	// This controls internal execution only: the final transport gate renders
+	// the client's requested JSON or SSE representation independently.
+	streaming := reqCtx.ExpectStreamingResponse
+	if isResponseAPIRequest(reqCtx) {
+		streaming = false
+	}
+	logging.ComponentEvent("extproc", "looper_execution_started", map[string]interface{}{
+		"request_id":       reqCtx.RequestID,
+		"decision":         decision.Name,
+		"algorithm":        decision.Algorithm.Type,
+		"candidate_models": len(modelRefs),
+		"streaming":        streaming,
+		"response_api":     isResponseAPIRequest(reqCtx),
+	})
+	if _, err := r.applyDispatchRequestParams(request, reqCtx); err != nil {
+		return nil, r.createErrorResponse(400, "Invalid request parameter policy")
+	}
+	engine, err := r.protocolEngine()
+	if err == nil {
+		var encoded protocolcodec.RequestResult
+		encoded, err = engine.EncodeRequest(llmprotocol.OpenAIChatV1, *request, llmprotocol.Envelope{})
+		if err == nil {
+			var openAIRequest *openai.ChatCompletionNewParams
+			openAIRequest, err = parseOpenAIRequest(encoded.Body)
+			if err == nil {
+				looperReq := &looper.Request{
+					OriginalRequest:       openAIRequest,
+					CandidateRequirements: r.candidateRequirements(reqCtx).Clone(),
+					PermittedModels:       looperPermittedModels(modelRefs, decision.Algorithm),
+					Grounding:             r.groundingForRecipe(reqCtx.Routing.RecipeName()),
+					BaseContextTokens:     reqCtx.VSRContextTokenCount,
+					ModelRefs:             modelRefs,
+					ModelParams:           r.getModelParams(),
+					Algorithm:             decision.Algorithm,
+					IsStreaming:           streaming,
+					DecisionName:          decision.Name,
+					RecipeName:            reqCtx.Routing.RecipeName(),
+					OutputContract:        decision.OutputContract,
+					OutputContractSpec:    decision.OutputContractSpec,
+				}
+				if params := decision.GetRequestParamsConfig(); params != nil && params.MaxTokensLimit != nil {
+					limit := *params.MaxTokensLimit
+					looperReq.MaxTokensLimit = &limit
+				}
+				return looperReq, nil
+			}
+		}
+	}
+	if err != nil {
+		return nil, r.recordLooperFailure(
+			reqCtx, request.Model, decision, 400,
+			"Looper cannot represent the request semantics", "looper_request_unsupported",
+		)
+	}
+	return nil, r.recordLooperFailure(
+		reqCtx, request.Model, decision, 400,
+		"Looper cannot represent the request semantics", "looper_request_unsupported",
+	)
+}
+
+func (r *OpenAIRouter) executeLooperRequest(
+	ctx context.Context,
+	l looper.Looper,
+	req *looper.Request,
+	originalModel string,
+	decision *config.Decision,
+	reqCtx *RequestContext,
+) (*looper.Response, *ext_proc.ProcessingResponse) {
+	// Execute looper, recording the wall-clock latency of the full execution
+	// (all model calls plus algorithm overhead) on the response for the
+	// x-vsr-looper-latency-ms debug header (#2694).
+	resp, err := looper.ExecuteWithLatency(ctx, l, req)
+	if err != nil {
+		return nil, r.looperExecutionErrorResponse(err, originalModel, decision, reqCtx)
+	}
+	logging.ComponentEvent("extproc", "looper_execution_completed", map[string]interface{}{
+		"request_id":     reqCtx.RequestID,
+		"decision":       decision.Name,
+		"algorithm":      resp.AlgorithmType,
+		"models_used":    resp.ModelsUsed,
+		"iterations":     resp.Iterations,
+		"selected_model": resp.Model,
+	})
+	return resp, nil
+}
+
+func (r *OpenAIRouter) recordSuccessfulLooperExecution(
+	resp *looper.Response,
+	originalModel string,
+	decision *config.Decision,
+	reqCtx *RequestContext,
+	semanticResponse *llmprotocol.Response,
+	clientBody []byte,
+) {
+	// Protocol encoding succeeded and the immediate response is about to be
+	// returned to Envoy, so promote a ready fallback to its terminal disposition
+	// and emit the single quorum metric.
+	finalizeLooperQuorumOutcome(reqCtx, resp.QuorumOutcome, decision, true)
+
+	// Capture router replay information if enabled. Detailed attempts remain in
+	// Replay; the public response surface keeps only aggregate Looper headers.
+	reqCtx.VSRLooperDiagnostics = looperReplayDiagnostics(resp.ExecutionTrace)
+	r.startRouterReplay(reqCtx, originalModel, resp.Model, decision.Name)
+	r.updateLooperReplayUsage(reqCtx, resp.Usage)
+	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
+		// Looper usage is an aggregate across potentially differently priced
+		// calls. Preserve continuity and token totals without charging the whole
+		// cascade at the final response model's price.
+		recordSessionTurn(reqCtx, responseUsageMetrics{
+			promptTokens:     int(resp.Usage.PromptTokens),
+			completionTokens: int(resp.Usage.CompletionTokens),
+		}, sessiontelemetry.TurnPricing{})
+	}
+
+	// Update router replay with success status (looper returns immediate response with 200)
+	r.updateRouterReplayStatus(reqCtx, 200, false)
+
+	// Attach response body to router replay record
+	r.attachRouterReplayResponse(reqCtx, clientBody, true)
+
+	// Memory auto_store: the normal response body pipeline (where
+	// scheduleResponseMemoryStore runs) is bypassed by ImmediateResponse.
+	// A buffered looper result is decoded once into the same neutral response
+	// contract used by direct inference. Streaming memory storage is deferred
+	// until a terminal semantic accumulator is available.
+	if semanticResponse != nil {
+		r.scheduleSemanticResponseMemoryStore(reqCtx, semanticResponse)
+	}
+}
+
+func (r *OpenAIRouter) updateLooperReplayUsage(ctx *RequestContext, usage looper.TokenUsage) {
+	promptTokens := int(usage.PromptTokens)
+	completionTokens := int(usage.CompletionTokens)
+	totalTokens := int(usage.TotalTokens)
+	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 {
+		return
+	}
+
+	// A looper result can aggregate differently priced model calls. Persist its
+	// exact reported token counts, but leave pricing fields unset rather than
+	// attributing the whole cascade to the selected model's price.
+	r.updateRouterReplayUsageCost(ctx, routerreplay.UsageCost{
+		PromptTokens:     replayIntPtr(promptTokens),
+		CompletionTokens: replayIntPtr(completionTokens),
+		TotalTokens:      replayIntPtr(totalTokens),
+	})
+}
+
+func (r *OpenAIRouter) groundingForRecipe(recipe config.RecipeName) *looper.GroundingBackends {
+	if r.RecipeClassifiers != nil {
+		classifier, ok := r.RecipeClassifiers.ForRecipe(recipe)
+		if !ok {
+			return nil
+		}
+		return classifier.GroundingBackends()
+	}
+	if recipe == "" || recipe == config.DefaultRecipeName {
+		return r.Classifier.GroundingBackends()
+	}
+	return nil
+}
+
+func looperPermittedModels(refs []config.ModelRef, algorithm *config.AlgorithmConfig) []string {
+	var models []string
+	for _, ref := range refs {
+		models = append(models, ref.Model)
+		if ref.LoRAName != "" {
+			models = append(models, ref.LoRAName)
+		}
+	}
+	return append(models, explicitAlgorithmModels(algorithm)...)
+}

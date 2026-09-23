@@ -1,0 +1,13 @@
+{{- /* Recipe YAML for in-process semantic-router. Source of truth: plugins/governance/vllm_sr/config.yaml */ -}}
+{{- if (.Values.bifrost.plugins.semanticRouter | default dict).enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bifrost.fullname" . }}-semantic-router-recipe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ .Files.Get "files/semantic-router-config.yaml" | nindent 4 }}
+{{- end }}

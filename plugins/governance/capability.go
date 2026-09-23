@@ -154,7 +154,11 @@ type routeCandidate struct {
 	estCost         float64
 	hasCost         bool
 	contextScore    float64
+	costScore       float64
 	score           float64
+
+	card          *modelCard
+	capabilityFit float64
 }
 
 func (c routeCandidate) qualified() string {
@@ -238,6 +242,9 @@ func (p *GovernancePlugin) candidateSatisfiesProfile(candidate routeCandidate, p
 
 	entry := p.routingEntry(candidate)
 	if entry == nil {
+		if candidate.card != nil {
+			return cardSatisfiesRequest(candidate.card, profile)
+		}
 		return false, "no catalog entry"
 	}
 
@@ -387,6 +394,7 @@ func (p *GovernancePlugin) rankCandidates(candidates []routeCandidate, profile *
 				costScore = 1
 			}
 		}
+		candidates[i].costScore = costScore
 
 		preferenceScore := 0.0
 		if idx := candidates[i].preferenceIndex; idx >= 0 && len(preferences) > 0 {
@@ -664,7 +672,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 	}
 
 	step = time.Now()
-	ranked, skipRewrite := p.selectWithLayer2(ctx, body, profile, candidates, cfg, preferenceOverride)
+	ranked, skipRewrite := p.selectWithLayer2(ctx, comp, body, profile, candidates, cfg, preferenceOverride)
 	p.logSemantic(ctx, schemas.LogLevelInfo, "2/select: router-ordered %s took=%s", describeRanking(ranked), formatTook(time.Since(step)))
 	if skipRewrite {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "Skipped: Layer 2 did not require a model rewrite; %s", declineTail)
@@ -760,7 +768,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 // selectWithLayer2 is Step 2: Layer 2 (in-process plugin or vLLM-SR HTTP)
 // orders the models associated with the virtual key. Capability/catalog filtering
 // intentionally happens afterward so Layer 1 never prevents the router call.
-func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string) ([]routeCandidate, bool) {
+func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string) ([]routeCandidate, bool) {
 	if !p.layer2Enabled(cfg) {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 router unset; declining semantic rewrite")
 		return nil, false
@@ -772,9 +780,18 @@ func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, body ma
 		return nil, false
 	}
 	if route.skipRewrite() {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 selection_status=%q selection_method=%q; no model rewrite required",
-			route.SelectionStatus, route.SelectionMethod)
-		return nil, true
+		if route.Profile == nil {
+			p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 selection_status=%q selection_method=%q; no model rewrite required",
+				route.SelectionStatus, route.SelectionMethod)
+			return nil, true
+		}
+		ranked := p.rankByModelCards(ctx, comp, pool, profile, cfg, preferenceOverride, route)
+		if len(ranked) == 0 {
+			p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: decision=%q no VK model card matched the capability profile; falling back to requested model",
+				route.Decision)
+			return nil, true
+		}
+		return ranked, false
 	}
 
 	// Score the VK pool for observability and deterministic tail fallbacks;

@@ -8,17 +8,15 @@ require (
 	github.com/vllm-project/semantic-router/src/semantic-router v0.0.0
 )
 
-replace github.com/vllm-project/semantic-router/src/semantic-router => ../../../semantic-router/src/semantic-router
+replace github.com/vllm-project/semantic-router/src/semantic-router => ../../semantic-router/src/semantic-router
 
-replace github.com/vllm-project/semantic-router/candle-binding => ../../../semantic-router/candle-binding
+replace github.com/vllm-project/semantic-router/candle-binding => ../../semantic-router/candle-binding
 
-replace github.com/vllm-project/semantic-router/ml-binding => ../../../semantic-router/ml-binding
+replace github.com/vllm-project/semantic-router/ml-binding => ../../semantic-router/ml-binding
 
-replace github.com/vllm-project/semantic-router/nlp-binding => ../../../semantic-router/nlp-binding
+replace github.com/vllm-project/semantic-router/nlp-binding => ../../semantic-router/nlp-binding
 
-replace github.com/vllm-project/semantic-router/onnx-binding => ../../../semantic-router/onnx-binding
-
-replace github.com/vllm-project/semantic-router/openvino-binding => ../../../semantic-router/openvino-binding
+replace github.com/vllm-project/semantic-router/onnx-binding => ../../semantic-router/onnx-binding
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
@@ -85,7 +83,6 @@ require (
 	github.com/vllm-project/semantic-router/ml-binding v0.0.0-00010101000000-000000000000 // indirect
 	github.com/vllm-project/semantic-router/nlp-binding v0.0.0-00010101000000-000000000000 // indirect
 	github.com/vllm-project/semantic-router/onnx-binding v0.0.0-00010101000000-000000000000 // indirect
-	github.com/vllm-project/semantic-router/openvino-binding v0.0.0-00010101000000-000000000000 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

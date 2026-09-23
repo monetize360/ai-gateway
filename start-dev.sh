@@ -20,9 +20,9 @@ cd "$ROOT"
 export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${PATH}"
 
 # Embedded Semantic Router native runtimes (Candle/selection/NLP). The Go
-# bindings link from these sibling build outputs; keep them discoverable when
-# the hot-reload child process starts.
-SEMANTIC_ROUTER_ROOT="${SEMANTIC_ROUTER_ROOT:-${ROOT}/../semantic-router}"
+# bindings link from these build outputs under ./semantic-router; keep them
+# discoverable when the hot-reload child process starts.
+SEMANTIC_ROUTER_ROOT="${SEMANTIC_ROUTER_ROOT:-${ROOT}/semantic-router}"
 NATIVE_LIBRARY_DIRS=(
 	"${SEMANTIC_ROUTER_ROOT}/candle-binding/target/release"
 	"${SEMANTIC_ROUTER_ROOT}/ml-binding/target/release"

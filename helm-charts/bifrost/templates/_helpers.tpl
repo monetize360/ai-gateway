@@ -1023,6 +1023,12 @@ false
 {{- if hasKey .Values.bifrost.plugins.logging "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.logging.version | int) }}{{- end }}
 {{- $plugins = append $plugins $plugin }}
 {{- end }}
+{{- if and .Values.bifrost.plugins.semanticRouter .Values.bifrost.plugins.semanticRouter.enabled }}
+{{- $srConfig := .Values.bifrost.plugins.semanticRouter.config | default dict }}
+{{- $plugin := dict "enabled" true "name" "semantic-router" "config" $srConfig }}
+{{- if hasKey .Values.bifrost.plugins.semanticRouter "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.semanticRouter.version | int) }}{{- end }}
+{{- $plugins = append $plugins $plugin }}
+{{- end }}
 {{- if .Values.bifrost.plugins.governance.enabled }}
 {{- $governanceConfig := dict }}
 {{- if hasKey .Values.bifrost.plugins.governance.config "is_vk_mandatory" }}
@@ -1033,6 +1039,9 @@ false
 {{- end }}
 {{- if hasKey .Values.bifrost.plugins.governance.config "is_enterprise" }}
 {{- $_ := set $governanceConfig "is_enterprise" .Values.bifrost.plugins.governance.config.is_enterprise }}
+{{- end }}
+{{- if and .Values.bifrost.plugins.governance.config (hasKey .Values.bifrost.plugins.governance.config "semantic_routing") }}
+{{- $_ := set $governanceConfig "semantic_routing" .Values.bifrost.plugins.governance.config.semantic_routing }}
 {{- end }}
 {{- $plugin := dict "enabled" true "name" "governance" "config" $governanceConfig }}
 {{- if hasKey .Values.bifrost.plugins.governance "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.governance.version | int) }}{{- end }}
@@ -1286,6 +1295,17 @@ Call this template at the beginning of deployment/stateful templates
 {{- end }}
 {{- if and .Values.bifrost.plugins.governance.enabled (hasKey .Values.bifrost.plugins.governance "version") (gt (int .Values.bifrost.plugins.governance.version) 32767) }}
 {{- fail "ERROR: bifrost.plugins.governance.version must be <= 32767." }}
+{{- end }}
+{{- if and .Values.bifrost.plugins.semanticRouter .Values.bifrost.plugins.semanticRouter.enabled (hasKey .Values.bifrost.plugins.semanticRouter "version") (lt (int .Values.bifrost.plugins.semanticRouter.version) 1) }}
+{{- fail "ERROR: bifrost.plugins.semanticRouter.version must be >= 1. Bump to >1 to force DB-backed plugin config updates." }}
+{{- end }}
+{{- if and .Values.bifrost.plugins.semanticRouter .Values.bifrost.plugins.semanticRouter.enabled (hasKey .Values.bifrost.plugins.semanticRouter "version") (gt (int .Values.bifrost.plugins.semanticRouter.version) 32767) }}
+{{- fail "ERROR: bifrost.plugins.semanticRouter.version must be <= 32767." }}
+{{- end }}
+{{- if and .Values.bifrost.plugins.semanticRouter .Values.bifrost.plugins.semanticRouter.enabled }}
+{{- if not (and .Values.bifrost.plugins.semanticRouter.config .Values.bifrost.plugins.semanticRouter.config.recipe_file) }}
+{{- fail "ERROR: bifrost.plugins.semanticRouter.config.recipe_file is required when semanticRouter is enabled." }}
+{{- end }}
 {{- end }}
 {{- if and .Values.bifrost.plugins.maxim.enabled (hasKey .Values.bifrost.plugins.maxim "version") (lt (int .Values.bifrost.plugins.maxim.version) 1) }}
 {{- fail "ERROR: bifrost.plugins.maxim.version must be >= 1. Bump to >1 to force DB-backed plugin config updates." }}

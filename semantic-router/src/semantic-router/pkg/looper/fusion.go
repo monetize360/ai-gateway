@@ -1,0 +1,667 @@
+package looper
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/openai/openai-go"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+)
+
+// FusionLooper implements Fusion-style multi-model deliberation:
+// parallel panel responses, judge analysis, then a final synthesized answer.
+type FusionLooper struct {
+	grounding *GroundingBackends
+	*BaseLooper
+}
+
+func NewFusionLooper(cfg *config.LooperConfig) *FusionLooper {
+	return newFusionLooper(cfg, ownClient(NewClient(cfg)))
+}
+
+func newFusionLooper(cfg *config.LooperConfig, binding clientBinding) *FusionLooper {
+	return &FusionLooper{BaseLooper: newBaseLooper(cfg, binding)}
+}
+
+type fusionExecutionConfig struct {
+	Model                        string
+	AnalysisModels               []string
+	AnalysisMode                 string
+	AnalysisOverrides            map[string]config.FusionModelOverride
+	MaxConcurrent                int
+	MaxCompletionTokens          int
+	RoundTimeoutSeconds          int
+	MinSuccessfulResponses       int
+	Temperature                  *float64
+	IncludeAnalysis              bool
+	IncludeIntermediateResponses bool
+	OnError                      string
+	QuorumFailurePolicy          config.FusionQuorumFailurePolicy
+	QuorumFallbackTarget         string
+	AnalysisTemplate             string
+	SynthesisTemplate            string
+	JudgePromptVersion           string
+
+	GroundingEnabled                 bool
+	GroundingReference               string
+	GroundingPolicy                  string
+	GroundingMinScore                float64
+	GroundingMinKeep                 int
+	GroundingNLIContradictionPenalty float64
+	GroundingOnError                 string
+}
+
+type FusionAnalysis struct {
+	Consensus       []string `json:"consensus,omitempty"`
+	Contradictions  []string `json:"contradictions,omitempty"`
+	PartialCoverage []string `json:"partial_coverage,omitempty"`
+	UniqueInsights  []string `json:"unique_insights,omitempty"`
+	BlindSpots      []string `json:"blind_spots,omitempty"`
+	Raw             string   `json:"raw,omitempty"`
+	ParseFailed     bool     `json:"parse_failed,omitempty"`
+}
+
+type FusionPanelResponse struct {
+	Model     string `json:"model"`
+	Content   string `json:"content"`
+	Reasoning string `json:"reasoning,omitempty"`
+}
+
+type FusionFailedModel struct {
+	Model string `json:"model"`
+	Error string `json:"error"`
+}
+
+type FusionTrace struct {
+	AnalysisMode   string                `json:"analysis_mode,omitempty"`
+	Analysis       *FusionAnalysis       `json:"analysis,omitempty"`
+	Responses      []FusionPanelResponse `json:"responses,omitempty"`
+	FailedModels   []FusionFailedModel   `json:"failed_models,omitempty"`
+	JudgeModel     string                `json:"judge_model,omitempty"`
+	AnalysisModels []string              `json:"analysis_models,omitempty"`
+	PromptVersion  string                `json:"prompt_version,omitempty"`
+	Grounding      *FusionGroundingTrace `json:"grounding,omitempty"`
+}
+
+type fusionPublicTrace struct {
+	Analysis       *FusionAnalysis       `json:"analysis,omitempty"`
+	Responses      []FusionPanelResponse `json:"responses,omitempty"`
+	FailedModels   []FusionFailedModel   `json:"failed_models,omitempty"`
+	JudgeModel     string                `json:"judge_model,omitempty"`
+	AnalysisModels []string              `json:"analysis_models,omitempty"`
+	PromptVersion  string                `json:"prompt_version,omitempty"`
+	Grounding      *FusionGroundingTrace `json:"grounding,omitempty"`
+}
+
+func projectFusionPublicTrace(trace *FusionTrace) *fusionPublicTrace {
+	if trace == nil {
+		return nil
+	}
+	return &fusionPublicTrace{
+		Analysis:       trace.Analysis,
+		Responses:      trace.Responses,
+		FailedModels:   trace.FailedModels,
+		JudgeModel:     trace.JudgeModel,
+		AnalysisModels: trace.AnalysisModels,
+		PromptVersion:  trace.PromptVersion,
+		Grounding:      trace.Grounding,
+	}
+}
+
+// FusionQuorumAttemptOutcome is the bounded per-attempt projection carried on
+// the internal quorum outcome.
+//
+// It deliberately does not embed FusionPanelAttemptEvidence, which carries an
+// Error string holding raw provider error text. Only a model name, a
+// closed-enum state, and token counts cross into Replay, metrics, and logs.
+type FusionQuorumAttemptOutcome struct {
+	Model string
+	State FusionPanelAttemptState
+	Usage TokenUsage
+}
+
+// FusionQuorumOutcome records a below-quorum panel and the policy applied to it,
+// for operator surfaces only.
+//
+// It is not serialized to the caller: a recovered quorum failure returns the
+// fallback target's ordinary protocol response, and this evidence goes to Router
+// Replay, metrics, and structured logs instead. Nothing here belongs in a
+// response body.
+type FusionQuorumOutcome struct {
+	RequiredCount  int
+	UsableCount    int
+	SelectedPolicy string
+	FallbackTarget string
+	Disposition    FusionQuorumDisposition
+	Attempts       []FusionQuorumAttemptOutcome
+}
+
+// newFusionQuorumOutcome projects panel evidence onto the bounded operator type,
+// dropping the per-attempt error text that must not leave the router.
+func newFusionQuorumOutcome(
+	evidence FusionQuorumEvidence,
+	policy string,
+	target string,
+	disposition FusionQuorumDisposition,
+) *FusionQuorumOutcome {
+	attempts := make([]FusionQuorumAttemptOutcome, 0, len(evidence.Attempts))
+	for _, attempt := range evidence.Attempts {
+		attempts = append(attempts, FusionQuorumAttemptOutcome{
+			Model: attempt.Model,
+			State: attempt.State,
+			Usage: attempt.Usage,
+		})
+	}
+	return &FusionQuorumOutcome{
+		RequiredCount:  evidence.RequiredCount,
+		UsableCount:    evidence.UsableCount,
+		SelectedPolicy: policy,
+		FallbackTarget: target,
+		Disposition:    disposition,
+		Attempts:       attempts,
+	}
+}
+
+func (l *FusionLooper) Execute(ctx context.Context, req *Request) (*Response, error) {
+	ctx = contextWithFusionDepth(ctx, 1)
+
+	cfg := l.resolveFusionExecutionConfig(req)
+	if len(cfg.AnalysisModels) == 0 {
+		return nil, fmt.Errorf("fusion analysis_models cannot be empty")
+	}
+	if cfg.Model == "" {
+		cfg.Model = cfg.AnalysisModels[0]
+	}
+	if err := validateFusionExecutionConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := l.validateFusionModels(cfg); err != nil {
+		return nil, err
+	}
+
+	logging.ComponentEvent("looper", "fusion_execution_started", map[string]interface{}{
+		"decision":        req.DecisionName,
+		"judge_model":     cfg.Model,
+		"analysis_models": len(cfg.AnalysisModels),
+		"analysis_mode":   cfg.AnalysisMode,
+		"streaming":       req.IsStreaming,
+	})
+
+	panel, err := l.executeFusionPanel(ctx, req, cfg)
+	if err != nil {
+		return l.applyQuorumFailurePolicy(ctx, req, cfg, panel, err)
+	}
+	if len(panel.failedModels) > 0 {
+		logging.ComponentWarnEvent("looper", "fusion_panel_partial", map[string]interface{}{
+			"decision":  req.DecisionName,
+			"responses": len(panel.responses),
+			"failures":  len(panel.failedModels),
+		})
+	}
+
+	// Grounding (optional) ranks/filters the panel before the judge. It makes no
+	// model calls, so usage is summed from the full panel (the real cost paid).
+	groundedPanel, groundingScores, groundingMode, err := l.applyGrounding(ctx, req, cfg, panel.responses)
+	if err != nil {
+		return nil, err
+	}
+
+	panelAttempts := len(panel.dispatchedModels)
+	judge, err := l.runFusionJudgeStages(
+		ctx, req, cfg, groundedPanel, groundingScores, panelAttempts+1)
+	if err != nil {
+		return nil, err
+	}
+	usage := panel.usage.Add(judge.analysisResponse, judge.finalResponse)
+
+	trace := buildFusionTrace(cfg, groundedPanel, panel.failedModels, judge.analysis, groundingMode, groundingScores)
+	// Accounting describes calls actually made, not the configured plan: early
+	// quorum can stop workers still queued behind max_concurrent.
+	modelsUsed := orderedFusionModelsUsed(panel.dispatchedModels, cfg.Model)
+	iterations := panelAttempts + judge.iterations
+
+	if req.IsStreaming {
+		return l.formatFusionStreamingResponse(judge.finalResponse, modelsUsed, iterations, cfg, trace, usage)
+	}
+	return l.formatFusionJSONResponse(judge.finalResponse, modelsUsed, iterations, cfg, trace, usage)
+}
+
+func (l *FusionLooper) validateFusionModels(cfg fusionExecutionConfig) error {
+	for _, model := range append(append([]string{}, cfg.AnalysisModels...), cfg.Model) {
+		for _, fusionName := range l.cfg.Fusion.EffectiveModelNames() {
+			if model == fusionName {
+				return fmt.Errorf("fusion model %q cannot be used as a judge or analysis model", model)
+			}
+		}
+	}
+	return nil
+}
+
+func (l *FusionLooper) callFusionModel(
+	ctx context.Context,
+	req *Request,
+	stageReq *openai.ChatCompletionNewParams,
+	cfg fusionExecutionConfig,
+	modelName string,
+	allowTools bool,
+	streaming bool,
+	iteration int,
+	override config.FusionModelOverride,
+) (*ModelResponse, error) {
+	callReq := cloneRequest(stageReq)
+	if !allowTools {
+		callReq = stripFusionToolUse(callReq)
+	}
+	if override.Temperature != nil {
+		callReq.Temperature = openai.Float(*override.Temperature)
+	} else if cfg.Temperature != nil {
+		callReq.Temperature = openai.Float(*cfg.Temperature)
+	}
+	if override.MaxCompletionTokens > 0 {
+		callReq.MaxTokens = (openai.ChatCompletionNewParams{}).MaxTokens
+		callReq.MaxCompletionTokens = openai.Int(int64(override.MaxCompletionTokens))
+	} else if cfg.MaxCompletionTokens > 0 {
+		callReq.MaxTokens = (openai.ChatCompletionNewParams{}).MaxTokens
+		callReq.MaxCompletionTokens = openai.Int(int64(cfg.MaxCompletionTokens))
+	}
+	return l.dispatchModel(
+		ctx,
+		req,
+		callReq,
+		ModelTarget{Name: modelName, AccessKey: accessKeyForModel(req, modelName)},
+		CallOptions{
+			DecisionName: req.DecisionName,
+			Iteration:    iteration,
+			FusionDepth:  1,
+			Mode:         responseMode(streaming),
+		},
+	)
+}
+
+func accessKeyForModel(req *Request, modelName string) string {
+	if req == nil || req.ModelParams == nil {
+		return ""
+	}
+	if params, ok := req.ModelParams[modelName]; ok {
+		return params.AccessKey
+	}
+	for _, params := range req.ModelParams {
+		for _, extID := range params.ExternalModelIDs {
+			if extID == modelName {
+				return params.AccessKey
+			}
+		}
+	}
+	return ""
+}
+
+func (l *FusionLooper) runFusionAnalysis(
+	ctx context.Context,
+	req *Request,
+	cfg fusionExecutionConfig,
+	panelResponses []*ModelResponse,
+	groundingScores []groundingScore,
+	callOrdinal int,
+) (*FusionAnalysis, *ModelResponse) {
+	prompt := buildFusionAnalysisPrompt(cfg, extractOriginalContent(req.OriginalRequest), panelResponses)
+	if notes := formatGroundingNotes(groundingScores); notes != "" {
+		prompt = prompt + "\n\n" + notes
+	}
+	analysisReq := appendFusionStageMessage(req.OriginalRequest, prompt)
+	resp, err := l.callFusionModel(ctx, req, analysisReq, cfg, cfg.Model, false, false, callOrdinal, config.FusionModelOverride{})
+	if err != nil {
+		logging.ComponentWarnEvent("looper", "fusion_analysis_failed", map[string]interface{}{
+			"judge_model": cfg.Model,
+			"error":       err.Error(),
+		})
+		return nil, nil
+	}
+	analysis, parseErr := parseFusionAnalysis(resp.Content)
+	if parseErr != nil {
+		logging.ComponentWarnEvent("looper", "fusion_analysis_parse_failed", map[string]interface{}{
+			"judge_model": cfg.Model,
+			"error":       parseErr.Error(),
+		})
+		return &FusionAnalysis{Raw: resp.Content, ParseFailed: true}, resp
+	}
+	return analysis, resp
+}
+
+func (l *FusionLooper) runFusionFinal(
+	ctx context.Context,
+	req *Request,
+	cfg fusionExecutionConfig,
+	panelResponses []*ModelResponse,
+	analysis *FusionAnalysis,
+	groundingScores []groundingScore,
+	callOrdinal int,
+) (*ModelResponse, error) {
+	original := extractOriginalContent(req.OriginalRequest)
+	outputContract := requestOutputContract(req.OriginalRequest, req.OutputContract)
+	prompt := buildFusionFinalPrompt(cfg, original, outputContract, panelResponses, analysis)
+	// Under weight/annotate policies the panel was not pruned, so the judge needs
+	// the per-response groundedness signal at synthesis time to soft-weight.
+	if notes := groundingSynthesisNotes(groundingScores, cfg.GroundingPolicy); notes != "" {
+		prompt = prompt + "\n\n" + notes
+	}
+	finalReq := appendFusionStageMessage(req.OriginalRequest, prompt)
+	resp, err := l.callFusionModel(ctx, req, finalReq, cfg, cfg.Model, true, false, callOrdinal, config.FusionModelOverride{})
+	if err != nil {
+		return nil, fmt.Errorf("fusion final synthesis failed for judge model %q: %w", cfg.Model, err)
+	}
+	applyJSONActionOutputContract(req.OutputContractSpec, resp, panelResponses)
+	applyFinalOutputContract(req.OutputContractSpec, resp)
+	return resp, nil
+}
+
+func buildFusionAnalysisPrompt(cfg fusionExecutionConfig, original string, responses []*ModelResponse) string {
+	if cfg.AnalysisTemplate != "" {
+		return renderFusionPrompt(cfg.AnalysisTemplate, original, responses, nil)
+	}
+	return fmt.Sprintf(`You are the Fusion analysis judge. Compare the panel responses and return only valid JSON with these keys: consensus, contradictions, partial_coverage, unique_insights, blind_spots. Return compact JSON only: no markdown, no code fences, no prose before or after the JSON. Each value must be an array with at most two concise strings.
+
+Original prompt:
+%s
+
+Panel responses:
+%s`, original, formatPanelResponses(responses))
+}
+
+func buildFusionFinalPrompt(
+	cfg fusionExecutionConfig,
+	original string,
+	outputContract string,
+	responses []*ModelResponse,
+	analysis *FusionAnalysis,
+) string {
+	if cfg.SynthesisTemplate != "" {
+		return appendOutputContractForPrompt(
+			renderFusionPrompt(cfg.SynthesisTemplate, original, responses, analysis),
+			outputContract,
+		)
+	}
+	analysisBlock := "No structured analysis is available. Synthesize directly from the panel responses."
+	if analysis != nil && !analysis.ParseFailed {
+		if data, err := json.MarshalIndent(analysis, "", "  "); err == nil {
+			analysisBlock = string(data)
+		}
+	}
+	prompt := fmt.Sprintf(`You are the Fusion calling model. Produce the final answer for the user using the panel responses and structured analysis. Resolve contradictions explicitly and do not mention internal model names unless the user asks.
+
+Rules:
+- Preserve the original output contract exactly.
+- Do not reveal hidden reasoning, scratch work, panel reasoning, tool traces, or internal deliberation.
+- Provide a concise explanation only when the original output contract asks for one.
+
+Original prompt:
+%s
+
+Structured analysis:
+%s
+
+Panel responses:
+%s
+
+Final answer:`, original, analysisBlock, formatPanelResponses(responses))
+
+	return appendOutputContractForPrompt(prompt, outputContract)
+}
+
+func renderFusionPrompt(template string, original string, responses []*ModelResponse, analysis *FusionAnalysis) string {
+	replacer := strings.NewReplacer(
+		"{{original}}", original,
+		"{{responses}}", formatPanelResponses(responses),
+		"{{analysis}}", formatFusionAnalysisForPrompt(analysis),
+	)
+	return replacer.Replace(template)
+}
+
+func formatPanelResponses(responses []*ModelResponse) string {
+	var b strings.Builder
+	for i, resp := range responses {
+		if resp == nil {
+			continue
+		}
+		fmt.Fprintf(&b, "Response %d (%s):\n%s\n\n", i+1, resp.Model, resp.Content)
+		if resp.ReasoningContent != "" {
+			fmt.Fprintf(&b, "Reasoning %d (%s):\n%s\n\n", i+1, resp.Model, resp.ReasoningContent)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func formatFusionAnalysisForPrompt(analysis *FusionAnalysis) string {
+	if analysis == nil {
+		return ""
+	}
+	data, err := json.MarshalIndent(analysis, "", "  ")
+	if err != nil {
+		return analysis.Raw
+	}
+	return string(data)
+}
+
+func parseFusionAnalysis(content string) (*FusionAnalysis, error) {
+	candidates := jsonObjectParseCandidates(content)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("empty fusion analysis response")
+	}
+	var failures []string
+	for _, candidate := range candidates {
+		var analysis FusionAnalysis
+		if err := json.Unmarshal([]byte(candidate), &analysis); err == nil {
+			return &analysis, nil
+		} else {
+			failures = append(failures, err.Error())
+		}
+	}
+	return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
+}
+
+func buildFusionTrace(
+	cfg fusionExecutionConfig,
+	panelResponses []*ModelResponse,
+	failedModels []FusionFailedModel,
+	analysis *FusionAnalysis,
+	groundingMode string,
+	groundingScores []groundingScore,
+) *FusionTrace {
+	trace := &FusionTrace{
+		AnalysisMode:   config.EffectiveFusionAnalysisMode(cfg.AnalysisMode),
+		JudgeModel:     cfg.Model,
+		AnalysisModels: append([]string(nil), cfg.AnalysisModels...),
+		FailedModels:   failedModels,
+		PromptVersion:  cfg.JudgePromptVersion,
+	}
+	if len(groundingScores) > 0 {
+		trace.Grounding = &FusionGroundingTrace{
+			ReferenceMode: groundingMode,
+			Policy:        cfg.GroundingPolicy,
+			Scores:        groundingScores,
+		}
+	}
+	if cfg.IncludeAnalysis {
+		trace.Analysis = analysis
+	}
+	if cfg.IncludeIntermediateResponses {
+		trace.Responses = make([]FusionPanelResponse, 0, len(panelResponses))
+		for _, resp := range panelResponses {
+			trace.Responses = append(trace.Responses, FusionPanelResponse{
+				Model:     resp.Model,
+				Content:   resp.Content,
+				Reasoning: resp.ReasoningContent,
+			})
+		}
+	}
+	return trace
+}
+
+func orderedFusionModelsUsed(analysisModels []string, judge string) []string {
+	seen := map[string]bool{}
+	models := make([]string, 0, len(analysisModels)+1)
+	add := func(model string) {
+		if model == "" || seen[model] {
+			return
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	for _, model := range analysisModels {
+		add(model)
+	}
+	add(judge)
+	return models
+}
+
+// shouldIncludeFusionTrace reports whether the caller-visible Fusion extension
+// belongs on this response.
+//
+// A nil trace means the stage deliberately produced no caller-visible evidence.
+// The quorum fallback uses that: it returns the fallback target's ordinary
+// response and routes its evidence to Replay, metrics, and logs instead.
+func shouldIncludeFusionTrace(cfg fusionExecutionConfig, trace *FusionTrace) bool {
+	return trace != nil && (cfg.IncludeAnalysis ||
+		cfg.IncludeIntermediateResponses ||
+		len(trace.FailedModels) > 0 ||
+		trace.Grounding != nil)
+}
+
+func (l *FusionLooper) formatFusionJSONResponse(
+	finalResp *ModelResponse,
+	modelsUsed []string,
+	iterations int,
+	cfg fusionExecutionConfig,
+	trace *FusionTrace,
+	usage TokenUsage,
+) (*Response, error) {
+	if finalResp.HasToolCalls {
+		return l.formatFusionToolCallJSONResponse(finalResp, modelsUsed, iterations, cfg, trace, usage)
+	}
+
+	completion := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-fusion-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   finalResp.Model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": finalResp.Content,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": usage.Map(),
+	}
+	body, err := json.Marshal(completion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal fusion response: %w", err)
+	}
+	return withFusionExtension(&Response{
+		Body:                  body,
+		ContentType:           "application/json",
+		Model:                 finalResp.Model,
+		ModelsUsed:            modelsUsed,
+		Iterations:            iterations,
+		AlgorithmType:         "fusion",
+		IntermediateResponses: trace,
+		Usage:                 usage,
+	}, cfg, trace)
+}
+
+func (l *FusionLooper) formatFusionToolCallJSONResponse(
+	finalResp *ModelResponse,
+	modelsUsed []string,
+	iterations int,
+	cfg fusionExecutionConfig,
+	trace *FusionTrace,
+	usage TokenUsage,
+) (*Response, error) {
+	var completion map[string]interface{}
+	if err := json.Unmarshal(finalResp.Raw, &completion); err != nil {
+		return nil, fmt.Errorf("failed to parse fusion tool-call response: %w", err)
+	}
+	completion["id"] = fmt.Sprintf("chatcmpl-fusion-%d", time.Now().UnixNano())
+	completion["model"] = finalResp.Model
+	completion["usage"] = usage.Map()
+	normalizeCompletionToolFinishReason(completion)
+	body, err := json.Marshal(completion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal fusion tool-call response: %w", err)
+	}
+	return withFusionExtension(&Response{
+		Body:                  body,
+		ContentType:           "application/json",
+		Model:                 finalResp.Model,
+		ModelsUsed:            modelsUsed,
+		Iterations:            iterations,
+		AlgorithmType:         "fusion",
+		IntermediateResponses: trace,
+		Usage:                 usage,
+	}, cfg, trace)
+}
+
+func (l *FusionLooper) formatFusionStreamingResponse(
+	finalResp *ModelResponse,
+	modelsUsed []string,
+	iterations int,
+	cfg fusionExecutionConfig,
+	trace *FusionTrace,
+	usage TokenUsage,
+) (*Response, error) {
+	timestamp := time.Now().Unix()
+	id := fmt.Sprintf("chatcmpl-fusion-%d", timestamp)
+	var (
+		body []byte
+		err  error
+	)
+	if finalResp.HasToolCalls {
+		body, err = buildFusionStreamingToolCallSSE(id, timestamp, finalResp.Model, finalResp.Raw)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		body = buildFusionStreamingSSE(id, timestamp, finalResp.Model, finalResp.Content)
+	}
+	resp := streamingLooperResponse(body, finalResp.Model, modelsUsed, iterations, "fusion")
+	resp.IntermediateResponses = trace
+	resp.Usage = usage
+	return withFusionExtension(resp, cfg, trace)
+}
+
+func buildFusionStreamingSSE(
+	id string,
+	created int64,
+	model string,
+	content string,
+) []byte {
+	var body []byte
+	roleChoice := map[string]interface{}{
+		"index":         0,
+		"delta":         map[string]interface{}{"role": "assistant"},
+		"finish_reason": nil,
+	}
+	body = appendSSEDataLine(body, chatCompletionChunkPayload(id, created, model, roleChoice, nil))
+	for _, chunk := range splitIntoChunks(content, 50) {
+		contentChoice := map[string]interface{}{
+			"index":         0,
+			"delta":         map[string]interface{}{"content": chunk},
+			"finish_reason": nil,
+		}
+		body = appendSSEDataLine(body, chatCompletionChunkPayload(id, created, model, contentChoice, nil))
+	}
+	finalChoice := map[string]interface{}{
+		"index":         0,
+		"delta":         map[string]interface{}{},
+		"finish_reason": "stop",
+	}
+	body = appendSSEDataLine(body, chatCompletionChunkPayload(id, created, model, finalChoice, nil))
+	return appendSSEDone(body)
+}

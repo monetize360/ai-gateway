@@ -37,6 +37,9 @@ private
 build/
 target/
 
+# Nested Semantic Router Cargo build outputs (also covered by target/ above)
+semantic-router/**/target/
+
 # Go workspaces (local only)
 go.work
 go.work.sum

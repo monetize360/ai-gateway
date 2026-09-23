@@ -676,6 +676,40 @@
                     "is_enterprise": {
                       "type": "boolean",
                       "description": "Enable enterprise mode features"
+                    },
+                    "semantic_routing": {
+                      "type": "object",
+                      "description": "In-process Layer 2 semantic routing. Requires bifrost.plugins.semanticRouter.enabled.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "default_for_all": {
+                          "type": "boolean"
+                        },
+                        "router": {
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "enum": ["plugin", "http"]
+                            },
+                            "timeout_ms": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "base_url": {
+                              "type": "string"
+                            },
+                            "preview_path": {
+                              "type": "string"
+                            },
+                            "entrypoint": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -951,6 +985,47 @@
                     "enable_traces": {
                       "type": "boolean"
                     }
+                  }
+                }
+              }
+            },
+            "semanticRouter": {
+              "type": "object",
+              "description": "In-process vLLM Semantic Router plugin (Layer 2). Mounts recipe YAML when enabled.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 32767
+                },
+                "config": {
+                  "type": "object",
+                  "properties": {
+                    "recipe_file": {
+                      "type": "string",
+                      "description": "Path to the recipe YAML inside the pod. Default matches the chart mount."
+                    },
+                    "entrypoint": {
+                      "type": "string",
+                      "description": "Routing-model entrypoint, for example vllm-sr/auto"
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": {
+                    "required": ["recipe_file"]
                   }
                 }
               }

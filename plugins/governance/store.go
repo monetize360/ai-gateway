@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -34,6 +35,9 @@ type LocalGovernanceStore struct {
 	configModels  sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
 	providers     sync.Map // string -> *Provider (Provider name -> Provider with preloaded relationships)
 	routingRules  sync.Map // string -> []*TableRoutingRule (key: "scope:scopeID" -> rules, scopeID="" for global)
+
+	// modelCards indexes tenant model_card rows by "provider/model" and "model".
+	modelCards atomic.Pointer[map[string]*modelCard]
 
 	// Last DB usages for budgets and rate limits
 	LastDBUsagesBudgetsMu            sync.RWMutex       // Last DB usages for budgets
@@ -294,6 +298,8 @@ func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 		gs.refreshMu.Unlock()
 		return nil
 	}
+
+	gs.loadModelCards(ctx)
 
 	watermark := configstore.NormalizeRefreshSince(since).Add(-configstore.RefreshOverlap)
 	delta, err := gs.configStore.GetGovernanceRefreshDelta(ctx, watermark)
@@ -1899,6 +1905,7 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 
 	// Rebuild in-memory structures (lock-free)
 	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
+	gs.loadModelCards(ctx)
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()

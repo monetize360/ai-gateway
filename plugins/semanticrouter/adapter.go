@@ -75,6 +75,10 @@ func fromEvalResponse(response *services.EvalResponse) *PreviewResult {
 		SelectionStatus: response.SelectionStatus,
 		SelectionMethod: response.SelectionMethod,
 		Candidates:      append([]string(nil), response.RecommendedModels...),
+		MatchedSignals:  cloneMatchedSignals(response),
+	}
+	if response.CapabilityProfile != nil {
+		result.CapabilityProfile = response.CapabilityProfile.Clone()
 	}
 	if response.DecisionResult != nil {
 		result.Decision = response.DecisionResult.DecisionName
@@ -87,6 +91,17 @@ func fromEvalResponse(response *services.EvalResponse) *PreviewResult {
 		result.Algorithm = response.SelectionMethod
 	}
 	return result
+}
+
+func cloneMatchedSignals(response *services.EvalResponse) *services.MatchedSignals {
+	if response == nil {
+		return nil
+	}
+	if response.DecisionResult != nil && response.DecisionResult.MatchedSignals != nil {
+		copy := *response.DecisionResult.MatchedSignals
+		return &copy
+	}
+	return nil
 }
 
 func rawValue(value any) (json.RawMessage, error) {

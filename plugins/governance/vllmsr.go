@@ -135,6 +135,10 @@ type vllmsrRoute struct {
 	SelectionStatus string
 	SelectionMethod string
 	Candidates      []string
+
+	// Profile and Signals are set only by the in-process plugin router.
+	Profile *semanticrouter.CapabilityProfile
+	Signals *semanticrouter.MatchedSignals
 }
 
 func (r *vllmsrRoute) skipRewrite() bool {
@@ -143,7 +147,7 @@ func (r *vllmsrRoute) skipRewrite() bool {
 	}
 	status := strings.ToLower(strings.TrimSpace(r.SelectionStatus))
 	method := strings.ToLower(strings.TrimSpace(r.SelectionMethod))
-	return status == "not_required" || method == "fast_response"
+	return status == "not_required" || status == "profile_only" || method == "fast_response"
 }
 
 // semanticRouteResult labels Layer 2 outcomes for counters / logs.
@@ -313,6 +317,8 @@ func (p *GovernancePlugin) previewPluginRoute(ctx *schemas.BifrostContext, body 
 		SelectionStatus: out.SelectionStatus,
 		SelectionMethod: out.SelectionMethod,
 		Candidates:      append([]string(nil), out.Candidates...),
+		Profile:         out.CapabilityProfile,
+		Signals:         out.MatchedSignals,
 	}
 	if route.skipRewrite() {
 		p.recordSemanticRoute(semanticRouteSkip, latency)
@@ -324,8 +330,9 @@ func (p *GovernancePlugin) previewPluginRoute(ctx *schemas.BifrostContext, body 
 		p.recordSemanticRoute(semanticRouteSelected, latency)
 	}
 	p.logSemantic(ctx, schemas.LogLevelInfo,
-		"2/route: plugin response took=%s selected=%s recommended=%v decision=%q algorithm=%q status=%q method=%q",
-		formatTook(latency), route.SelectedModel, route.Candidates, route.Decision, route.Algorithm, route.SelectionStatus, route.SelectionMethod)
+		"2/route: plugin response took=%s selected=%s recommended=%v decision=%q algorithm=%q status=%q method=%q profile=%s signals=%s",
+		formatTook(latency), route.SelectedModel, route.Candidates, route.Decision, route.Algorithm, route.SelectionStatus, route.SelectionMethod,
+		out.ProfileSummary(), out.SignalSummary())
 	return route, nil
 }
 

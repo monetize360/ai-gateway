@@ -1,14 +1,42 @@
 # Dockerfile.local - Uses local module sources via go workspace
 # For pre-release CI builds where module versions aren't published yet
+#
+# The in-process semantic-router plugin links Rust shared libraries via CGO, so
+# this image is glibc (Debian) and dynamically linked; musl static linking cannot
+# consume the .so files.
+
+  # --- Native Stage: Semantic Router Rust libraries (CPU-only, mirrors upstream `make rust-ci`) ---
+  FROM rust:1.90-bookworm AS native-builder
+  WORKDIR /build/semantic-router
+
+  # cmake: onnx-binding's turbojpeg-sys build script
+  RUN apt-get update && apt-get install -y --no-install-recommends cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+  COPY semantic-router/candle-binding/ ./candle-binding/
+  RUN cd candle-binding && cargo build --release --no-default-features
+  COPY semantic-router/ml-binding/ ./ml-binding/
+  RUN cd ml-binding && cargo build --release
+  COPY semantic-router/nlp-binding/ ./nlp-binding/
+  RUN cd nlp-binding && cargo build --release
+  COPY semantic-router/onnx-binding/ ./onnx-binding/
+  RUN cd onnx-binding && cargo build --release --lib --locked --no-default-features --features dynamic
+
+  RUN mkdir -p /out && \
+    cp candle-binding/target/release/libcandle_semantic_router.so \
+      ml-binding/target/release/libml_semantic_router.so \
+      nlp-binding/target/release/libnlp_binding.so \
+      onnx-binding/target/release/libonnx_semantic_router.so \
+      /out/
 
   # --- Go Build Stage: Compile the Go binary using local modules ---
-  FROM golang:1.26.2-alpine3.23@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS builder
+  FROM golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec74a67bd13a627d242b19 AS builder
   WORKDIR /build
 
-  # Install dependencies including gcc for CGO and sqlite
-  RUN apk add --no-cache gcc musl-dev sqlite-dev binutils binutils-gold
+  RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-  # Set environment for CGO-enabled build (required for go-sqlite3)
+  # Set environment for CGO-enabled build (required for go-sqlite3 and semantic-router)
   ENV CGO_ENABLED=1 GOOS=linux
 
   # Copy all local modules
@@ -16,8 +44,17 @@
   COPY framework/ ./framework/
   COPY plugins/ ./plugins/
   COPY transports/ ./transports/
+  COPY semantic-router/ ./semantic-router/
 
-  # Set up go workspace to resolve local module dependencies
+  # CGO directives link against <binding>/target/release relative to each binding.
+  COPY --from=native-builder /out/libcandle_semantic_router.so ./semantic-router/candle-binding/target/release/
+  COPY --from=native-builder /out/libml_semantic_router.so ./semantic-router/ml-binding/target/release/
+  COPY --from=native-builder /out/libnlp_binding.so ./semantic-router/nlp-binding/target/release/
+  COPY --from=native-builder /out/libonnx_semantic_router.so ./semantic-router/onnx-binding/target/release/
+
+  # Set up go workspace to resolve local module dependencies.
+  # plugins/semanticrouter reaches semantic-router through path-only replaces,
+  # which only resolve when those modules are workspace members.
   RUN go work init && \
     go work use ./core && \
     go work use ./framework && \
@@ -31,15 +68,21 @@
     go work use ./plugins/otel && \
     go work use ./plugins/prompts && \
     go work use ./plugins/semanticcache && \
+    go work use ./plugins/semanticrouter && \
     go work use ./plugins/telemetry && \
+    go work use ./semantic-router/candle-binding && \
+    go work use ./semantic-router/ml-binding && \
+    go work use ./semantic-router/nlp-binding && \
+    go work use ./semantic-router/onnx-binding && \
+    go work use ./semantic-router/src/semantic-router && \
     go work use ./transports
 
 
-  # Build the binary with CGO enabled and static SQLite linking
+  # Build the binary with CGO enabled (dynamically linked against the native libraries)
   ARG VERSION=unknown
   RUN cd /build/transports && \
     go build \
-      -ldflags="-w -s -X main.Version=v${VERSION} -extldflags '-static'" \
+      -ldflags="-w -s -X main.Version=v${VERSION}" \
       -a -trimpath \
       -tags "sqlite_static" \
       -o /app/main \
@@ -49,18 +92,23 @@
   RUN test -f /app/main || (echo "Build failed" && exit 1)
 
   # --- Runtime Stage: Minimal runtime image ---
-  FROM alpine:3.21.7@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+  FROM debian:bookworm-slim
   WORKDIR /app
 
-  # Install runtime dependencies for CGO-enabled binary
-  # musl: C standard library (required for CGO binaries)
-  # libgcc: GCC runtime library
   # ca-certificates: For HTTPS connections
-  RUN apk add --no-cache musl libgcc ca-certificates wget zlib=1.3.2-r0
+  # wget: container health check
+  RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates wget && \
+    rm -rf /var/lib/apt/lists/*
 
   # Create data directory and set up user
   COPY --from=builder /app/main .
   COPY --from=builder /build/transports/docker-entrypoint.sh .
+  COPY --from=native-builder /out/ /app/lib/
+  ENV LD_LIBRARY_PATH=/app/lib
+
+  # Fail the image build if any shared library is unresolved.
+  RUN ! ldd /app/main /app/lib/*.so | grep "not found"
 
   # Getting arguments
   ARG ARG_APP_PORT=8080
@@ -78,7 +126,7 @@
 
 
   RUN mkdir -p "$APP_DIR/logs" && \
-    adduser -D -s /bin/sh appuser && \
+    useradd -m -s /bin/sh appuser && \
     chown -R appuser:appuser /app && \
     { [ "$APP_DIR" = "/app" ] || [ "${APP_DIR#/app/}" != "$APP_DIR" ] || chown -R appuser:appuser "$APP_DIR"; } && \
     chmod +x /app/docker-entrypoint.sh

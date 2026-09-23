@@ -134,6 +134,11 @@ func TestVLLMSRFastResponseSkipsRewrite(t *testing.T) {
 	assert.True(t, route.skipRewrite())
 }
 
+func TestVLLMSRProfileOnlySkipsRewrite(t *testing.T) {
+	route := &vllmsrRoute{SelectionStatus: "profile_only", SelectionMethod: "capability_profile"}
+	assert.True(t, route.skipRewrite())
+}
+
 func TestIntersectRouteDropsModelsOutsideL1(t *testing.T) {
 	eligible := testCandidates(testTextModel, testVisionModel)
 	ordered := intersectRouteWithEligible(eligible, &vllmsrRoute{

@@ -1,0 +1,144 @@
+package cache
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/milvus-io/milvus-sdk-go/v2/client"
+	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
+)
+
+var errMilvusCacheEntryNotFound = errors.New("milvus cache entry not found")
+
+// GetAllEntries retrieves all entries from Milvus for HNSW index rebuilding
+// Returns slices of request_ids and embeddings for efficient bulk loading
+func (c *MilvusCache) GetAllEntries(ctx context.Context) ([]string, [][]float32, error) {
+	start := time.Now()
+
+	if !c.enabled {
+		return nil, nil, fmt.Errorf("milvus cache is not enabled")
+	}
+
+	logging.Infof("MilvusCache.GetAllEntries: querying all entries for HNSW rebuild")
+
+	// Query all entries with embeddings and request_ids
+	// Filter to only get entries with complete responses (not pending)
+	queryResult, err := c.client.Query(
+		ctx,
+		c.collectionName,
+		[]string{}, // Empty partitions means search all
+		fmt.Sprintf(
+			`response_body != "" && query != %s`,
+			milvusStringLiteral(exactCacheQueryMarker),
+		),
+		[]string{"request_id", c.config.Collection.VectorField.Name}, // Get IDs and embeddings
+		c.searchQueryOptions()...,
+	)
+	if err != nil {
+		logging.Warnf("MilvusCache.GetAllEntries: query failed: %v", err)
+		return nil, nil, fmt.Errorf("milvus query all failed: %w", err)
+	}
+
+	// Milvus automatically includes the primary key but column order may vary
+	// We requested ["request_id", embedding_field], so we expect 2-3 columns
+	// If 3 columns: primary key was auto-included, adjust indices
+	requestIDColIndex := 0
+	embeddingColIndex := 1
+	expectedMinCols := 2
+
+	if len(queryResult) >= 3 {
+		// Primary key was auto-included, adjust indices
+		requestIDColIndex = 1
+		embeddingColIndex = 2
+	}
+
+	if len(queryResult) < expectedMinCols {
+		logging.Infof("MilvusCache.GetAllEntries: no entries found or incomplete result")
+		return []string{}, [][]float32{}, nil
+	}
+
+	// Extract request IDs
+	requestIDColumn, ok := queryResult[requestIDColIndex].(*entity.ColumnVarChar)
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected request_id column type: %T", queryResult[requestIDColIndex])
+	}
+
+	// Extract embeddings
+	embeddingColumn, ok := queryResult[embeddingColIndex].(*entity.ColumnFloatVector)
+	if !ok {
+		return nil, nil, fmt.Errorf("unexpected embedding column type: %T", queryResult[embeddingColIndex])
+	}
+
+	if requestIDColumn.Len() != embeddingColumn.Len() {
+		return nil, nil, fmt.Errorf("column length mismatch: request_ids=%d, embeddings=%d",
+			requestIDColumn.Len(), embeddingColumn.Len())
+	}
+
+	entryCount := requestIDColumn.Len()
+	requestIDs := make([]string, entryCount)
+
+	// Extract request IDs from column
+	for i := 0; i < entryCount; i++ {
+		requestID, err := requestIDColumn.ValueByIdx(i)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get request_id at index %d: %w", i, err)
+		}
+		requestIDs[i] = requestID
+	}
+
+	// Extract embeddings directly from column data
+	embeddings := embeddingColumn.Data()
+	if len(embeddings) != entryCount {
+		return nil, nil, fmt.Errorf("embedding data length mismatch: got %d, expected %d",
+			len(embeddings), entryCount)
+	}
+
+	elapsed := time.Since(start)
+	logging.Infof("MilvusCache.GetAllEntries: loaded %d entries in %v (%.0f entries/sec)",
+		entryCount, elapsed, float64(entryCount)/elapsed.Seconds())
+
+	return requestIDs, embeddings, nil
+}
+
+// GetByID retrieves a completed response from an exact model partition.
+// Semantic callers use getEntryByID to also validate the stored query.
+func (c *MilvusCache) GetByID(ctx context.Context, requestID, model string) ([]byte, error) {
+	entry, err := c.getEntryByID(ctx, requestID, model)
+	return entry.ResponseBody, err
+}
+
+func (c *MilvusCache) getEntryByID(ctx context.Context, requestID, model string) (CacheEntry, error) {
+	start := time.Now()
+	if !c.enabled {
+		return CacheEntry{}, fmt.Errorf("milvus cache is not enabled")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var queryResult client.ResultSet
+	var err error
+	if c.queryByIDFn != nil {
+		queryResult, err = c.queryByIDFn(ctx, requestID, model)
+	} else {
+		queryResult, err = c.client.Query(ctx, c.collectionName, []string{},
+			fmt.Sprintf("request_id == %s && model == %s && response_body != \"\" && (expires_at == 0 || expires_at > %d)", milvusStringLiteral(requestID), milvusStringLiteral(model), time.Now().Unix()),
+			[]string{"query", "response_body", "timestamp", "expires_at"}, c.searchQueryOptions()...)
+	}
+	if err != nil {
+		metrics.RecordCacheOperation("milvus", "get_by_id", "error", time.Since(start).Seconds())
+		return CacheEntry{}, fmt.Errorf("milvus query failed: %w", err)
+	}
+	entry := milvusEntryAt(queryResult, 0)
+	if len(entry.ResponseBody) == 0 || (!entry.ExpiresAt.IsZero() && !entry.ExpiresAt.After(time.Now())) {
+		metrics.RecordCacheOperation("milvus", "get_by_id", "miss", time.Since(start).Seconds())
+		return CacheEntry{}, fmt.Errorf("%w: %s", errMilvusCacheEntryNotFound, requestID)
+	}
+	entry.RequestID, entry.Model = requestID, model
+	metrics.RecordCacheOperation("milvus", "get_by_id", "success", time.Since(start).Seconds())
+	return entry, nil
+}
