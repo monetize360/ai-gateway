@@ -14,11 +14,26 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Default ingest envelope (standard Kafka connection + InferenceUsage-shaped message).
-var defaultBody = []byte(`{"connectionId":"b2c3d4e5-f6a7-4890-b123-456789abcdef","dataSourceId":"c3d4e5f6-a7b8-4901-c234-56789abcdef0","message":{"provider":"openai","model":"gpt-4o","prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"account":"k6-account","user":"k6-user"}}`)
+// Default body for POST /v1/ingest/usage (InferenceUsage-shaped message).
+// organizationId may be omitted when the JWT carries morgId; the gateway fills it in.
+var defaultBody = []byte(`{
+  "key": "loadgen-ingest",
+  "message": {
+    "externalTransactionId": "loadgen-txn-1",
+    "serviceId": "00000000-0000-0000-0000-000000000001",
+    "eventTimestamp": "2026-01-01T00:00:00Z",
+    "billingAccountRef": "k6-account",
+    "dimensions": {
+      "input_tokens": "10",
+      "output_tokens": "5",
+      "model": "gpt-4o",
+      "provider": "openai"
+    }
+  }
+}`)
 
 func main() {
-	url := flag.String("url", "http://127.0.0.1:8082/v1/ingest/kafka", "target URL")
+	url := flag.String("url", "http://127.0.0.1:8082/v1/ingest/usage", "target URL")
 	token := flag.String("token", envOr("MPILOT_ACCESS_TOKEN", envOr("AUTH_TOKEN", "")), "bearer token")
 	targetRPS := flag.Int("rps", 20000, "target requests per second")
 	duration := flag.Duration("duration", 60*time.Second, "test duration")
