@@ -25,7 +25,7 @@ type ScopeLevel struct {
 // RoutingDecision is the output of routing rule evaluation
 // Represents which provider/model to route to and fallback chain
 type RoutingDecision struct {
-	SemanticRouting bool     // true when cel_expression is the reserved semantic_routing literal
+	SemanticRouting bool     // true when cel_expression is the reserved semantic_routing == true handoff
 	Provider        string   // Primary provider (e.g., "openai", "azure"); unused for semantic routing
 	Model           string   // Model to use (or empty to use original); unused for semantic routing
 	KeyID           string   // Optional: pin a specific API key by UUID ("" = no pin)
@@ -250,7 +250,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 			chainSuffix = " [chain_rule=true, continuing]"
 		}
 		if stepDecision.IsSemanticRouting() {
-			re.logger.Info("[RoutingEngine] 0/handoff: rule %q matched cel=semantic_routing; handing off to semantic routing%s", matchedRule.Name, chainSuffix)
+			re.logger.Info("[RoutingEngine] 0/handoff: rule %q matched cel=%q; handing off to semantic routing%s", matchedRule.Name, matchedRule.CelExpression, chainSuffix)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("0/handoff: Rule '%s' [%s] → matched; handing off to semantic routing%s", matchedRule.Name, matchedRule.CelExpression, chainSuffix))
 		} else {
 			re.logger.Info("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
@@ -325,7 +325,7 @@ func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgAncestors
 }
 
 // routingDecisionFromMatchedRule builds the Layer 1 result for a CEL match.
-// The reserved semantic_routing literal hands off without applying pin fields.
+// The reserved semantic_routing == true expression hands off without applying pin fields.
 func routingDecisionFromMatchedRule(rule *configstoreTables.TableRoutingRule, currentProvider schemas.ModelProvider, currentModel string) *RoutingDecision {
 	isSemanticRouting := configstoreTables.IsSemanticRoutingCELExpression(rule.CelExpression)
 	provider := string(currentProvider)

@@ -324,7 +324,7 @@ func TestEvaluateRoutingRules_OrgScopedSemanticRouting(t *testing.T) {
 	assert.Nil(t, japanDecision, "Japan Entity VK must not match India Entity org semantic rule")
 }
 
-// Org-scoped cel_expression == "semantic_routing" enables semantic.
+// Org-scoped cel_expression "semantic_routing == true" enables semantic.
 // VK pin guardrails still win when they match first.
 func TestEvaluateRoutingRules_OrgSemanticRoutingCEL(t *testing.T) {
 	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)

@@ -57,17 +57,18 @@ type TableRoutingRule struct {
 	Deleted   bool      `gorm:"not null;default:false;index" json:"-"`
 }
 
-// CelExpressionSemanticRouting is a reserved CEL literal. It always matches
-// and hands the request to semantic routing instead of pinning a target.
-const CelExpressionSemanticRouting = "semantic_routing"
+// CelExpressionSemanticRouting is the reserved org-level handoff expression.
+// It always matches and hands the request to semantic routing instead of pinning a target.
+const CelExpressionSemanticRouting = "semantic_routing == true"
 
 // TableName for TableRoutingRule
 func (TableRoutingRule) TableName() string { return "routing_rules" }
 
 // IsSemanticRoutingCELExpression reports whether expr is the reserved
-// semantic_routing literal (not evaluated as normal CEL).
+// semantic_routing == true handoff (not evaluated as normal CEL).
+// Whitespace and case are ignored so "Semantic_Routing==TRUE" also matches.
 func IsSemanticRoutingCELExpression(expr string) bool {
-	return strings.EqualFold(strings.TrimSpace(expr), CelExpressionSemanticRouting)
+	return strings.ToLower(strings.Join(strings.Fields(expr), "")) == "semantic_routing==true"
 }
 
 // ValidateSemanticRouting rejects combinations the engine cannot honor.

@@ -72,10 +72,14 @@ func TestUnmarshalJSON_LegacyVirtualKeyScope(t *testing.T) {
 }
 
 func TestSemanticRoutingCELExpression(t *testing.T) {
-	assert.True(t, IsSemanticRoutingCELExpression("semantic_routing"))
-	assert.True(t, IsSemanticRoutingCELExpression(" Semantic_Routing "))
+	assert.True(t, IsSemanticRoutingCELExpression("semantic_routing == true"))
+	assert.True(t, IsSemanticRoutingCELExpression(" Semantic_Routing == TRUE "))
+	assert.True(t, IsSemanticRoutingCELExpression("semantic_routing==true"))
+	assert.False(t, IsSemanticRoutingCELExpression("semantic_routing"))
+	assert.False(t, IsSemanticRoutingCELExpression("semantic_routing == false"))
 	assert.False(t, IsSemanticRoutingCELExpression("true"))
 	assert.False(t, IsSemanticRoutingCELExpression("budget_used >= 50"))
+	assert.False(t, IsSemanticRoutingCELExpression("semantic_routing == true && model == \"gpt-4\""))
 }
 
 func TestValidateSemanticRoutingRejectsChainRule(t *testing.T) {

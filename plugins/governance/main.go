@@ -543,7 +543,7 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 	}
 
 	//2. Semantic routing — only when a matching rule asked for it (cel_expression
-	// semantic_routing), when default_for_all is on, or when the request omitted
+	// semantic_routing == true), when default_for_all is on, or when the request omitted
 	// model. No matching CEL rule keeps the requested model for load balancing.
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
@@ -1137,7 +1137,7 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 		if decision.IsSemanticRouting() {
 			// Semantic selection is applied by the caller after this returns.
 			// Do not pin provider/model, write rule fallbacks, or pin a key.
-			p.logger.Info("[Governance] 0/handoff: routing rule %q matched cel=semantic_routing; handing off to semantic routing", decision.MatchedRuleName)
+			p.logger.Info("[Governance] 0/handoff: routing rule %q matched semantic_routing == true; handing off to semantic routing", decision.MatchedRuleName)
 			return body, decision, nil
 		}
 
