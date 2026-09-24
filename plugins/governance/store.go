@@ -3520,10 +3520,80 @@ func (gs *LocalGovernanceStore) UpdateProviderInMemory(ctx context.Context, prov
 		gs.rateLimits.Store(clone.RateLimits[i].ID, &clone.RateLimits[i])
 	}
 
-	// Store under provider name
+	// Provider name is the runtime lookup key for config_models.service_id
+	// (providerName:modelName). Renames must re-key that map and drop the old
+	// providers entry — config_models rows themselves are not updated_at-bumped
+	// on provider rename, so they won't arrive in the same refresh delta.
+	newName := strings.TrimSpace(clone.Name)
+	if oldName := gs.findProviderNameByID(clone.ID); oldName != "" && newName != "" && oldName != newName {
+		gs.rekeyConfigModelsForProviderRename(oldName, newName)
+		gs.providers.Delete(oldName)
+	}
+
 	gs.providers.Store(clone.Name, &clone)
 
 	return &clone
+}
+
+// findProviderNameByID returns the in-memory provider name for the given config_providers.id.
+func (gs *LocalGovernanceStore) findProviderNameByID(providerID string) string {
+	if strings.TrimSpace(providerID) == "" {
+		return ""
+	}
+	var found string
+	gs.providers.Range(func(key, value interface{}) bool {
+		provider, ok := value.(*configstoreTables.TableProvider)
+		if !ok || provider == nil || provider.ID != providerID {
+			return true
+		}
+		found = strings.TrimSpace(provider.Name)
+		if found == "" {
+			if name, ok := key.(string); ok {
+				found = strings.TrimSpace(name)
+			}
+		}
+		return false
+	})
+	return found
+}
+
+// rekeyConfigModelsForProviderRename moves configModels entries from
+// oldName:modelName → newName:modelName so ResolveConfigModelServiceID keeps working.
+// When newName is empty, entries under oldName are removed (provider delete).
+func (gs *LocalGovernanceStore) rekeyConfigModelsForProviderRename(oldName, newName string) {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || oldName == newName {
+		return
+	}
+	oldPrefix := oldName + ":"
+	type movedModel struct {
+		oldKey string
+		model  *configstoreTables.TableModel
+	}
+	var moves []movedModel
+	gs.configModels.Range(func(key, value interface{}) bool {
+		keyStr, ok := key.(string)
+		if !ok || !strings.HasPrefix(keyStr, oldPrefix) {
+			return true
+		}
+		model, ok := value.(*configstoreTables.TableModel)
+		if !ok || model == nil {
+			moves = append(moves, movedModel{oldKey: keyStr})
+			return true
+		}
+		clone := *model
+		clone.ProviderName = newName
+		moves = append(moves, movedModel{oldKey: keyStr, model: &clone})
+		return true
+	})
+	for _, move := range moves {
+		gs.configModels.Delete(move.oldKey)
+		if newName == "" || move.model == nil {
+			continue
+		}
+		gs.configModels.Store(fmt.Sprintf("%s:%s", newName, move.model.Name), move.model)
+	}
 }
 
 // DeleteProviderInMemory removes a provider from the in-memory store (lock-free)
@@ -3543,6 +3613,8 @@ func (gs *LocalGovernanceStore) DeleteProviderInMemory(ctx context.Context, prov
 		}
 	}
 	gs.providers.Delete(providerName)
+	// Drop stale model→service mappings keyed under this provider name.
+	gs.rekeyConfigModelsForProviderRename(providerName, "")
 }
 
 // Helper functions

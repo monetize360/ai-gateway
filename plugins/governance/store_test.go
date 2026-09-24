@@ -1463,3 +1463,46 @@ func TestGovernanceStore_ApplyRefreshDelta_BillingTables(t *testing.T) {
 	})
 	assert.Equal(t, "", store.ResolveConfigModelServiceID(schemas.ModelProvider(providerName), modelName))
 }
+
+func TestApplyGovernanceRefreshDelta_ProviderRenameRekeysConfigModelServiceID(t *testing.T) {
+	logger := NewMockLogger()
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+
+	providerID := "provider-1"
+	oldProviderName := "nvidia"
+	newProviderName := "nvidia-renamed"
+	modelName := "NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+	serviceID := "service-1"
+
+	store.applyGovernanceRefreshDelta(context.Background(), &configstore.GovernanceRefreshDelta{
+		Providers: []configstoreTables.TableProvider{{
+			ID:   providerID,
+			Name: oldProviderName,
+		}},
+		ConfigModels: []configstoreTables.TableModel{{
+			ID:           "model-1",
+			ProviderID:   providerID,
+			Name:         modelName,
+			ServiceID:    &serviceID,
+			ProviderName: oldProviderName,
+		}},
+	})
+
+	assert.Equal(t, serviceID, store.ResolveConfigModelServiceID(schemas.ModelProvider(oldProviderName), modelName))
+
+	// Provider rename alone (no ConfigModels in the delta) must re-key the lookup map.
+	store.applyGovernanceRefreshDelta(context.Background(), &configstore.GovernanceRefreshDelta{
+		Providers: []configstoreTables.TableProvider{{
+			ID:   providerID,
+			Name: newProviderName,
+		}},
+	})
+
+	assert.Equal(t, "", store.ResolveConfigModelServiceID(schemas.ModelProvider(oldProviderName), modelName),
+		"old provider name must no longer resolve the billing service")
+	assert.Equal(t, serviceID, store.ResolveConfigModelServiceID(schemas.ModelProvider(newProviderName), modelName),
+		"new provider name must resolve the same billing service without a gateway restart")
+	assert.Equal(t, providerID, store.ResolveConfigProviderID(schemas.ModelProvider(newProviderName)))
+	assert.Equal(t, "", store.ResolveConfigProviderID(schemas.ModelProvider(oldProviderName)))
+}
