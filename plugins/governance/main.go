@@ -2011,10 +2011,10 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		"eventTimestamp":        eventTimestamp.Format(time.RFC3339Nano),
 		"billingAccountRef":     billingAccountRef,
 		"dimensions": map[string]string{
-			"Input_Tokens":  strconv.Itoa(promptTokens),
-			"Output_Tokens": strconv.Itoa(completionTokens),
-			"Model":         model,
-			"Provider":      string(provider),
+			"input_tokens":  strconv.Itoa(promptTokens),
+			"output_tokens": strconv.Itoa(completionTokens),
+			"model":         model,
+			"provider":      string(provider),
 		},
 	}
 	if orgUnitID != "" {
