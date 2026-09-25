@@ -18,8 +18,11 @@ MPilot API  ──AiGatewayClient──►  AI Gateway (:8082)  ──►  LLM p
 | Tool | Notes |
 |------|--------|
 | Go **1.26.2+** | Required to build / run |
+| Rust / `cargo` | Required once for Semantic Router native libs (`rustup`) |
 | Docker | Postgres + Keycloak for MPilot |
 | Sibling checkout | `mpilotv2/` next to `ai-gateway/` |
+
+The in-process `semantic-router` plugin links **gitignored** Rust libraries under `semantic-router/*/target/release/`. They are **not** in git. `./start-dev.sh` and `make dev` / `make build` call `make ensure-semantic-router-native`, which builds them on first use (needs `cargo`). Docker builds them inside `transports/Dockerfile.local`.
 
 ---
 
@@ -38,6 +41,7 @@ bash clean-restart-services.sh
 
 ```bash
 cd ../ai-gateway
+# First clone only: installs Rust natives if missing (or: make build-semantic-router-native)
 PORT=8082 APP_DIR=. ./start-dev.sh
 ```
 
@@ -82,16 +86,22 @@ Interactive testing uses the MPilot **AI Gateway Simulator** — there is no bun
 
 ```bash
 make setup-workspace
-LOCAL=1 make build
+LOCAL=1 make build   # also ensures Semantic Router natives
 # → tmp/bifrost-http
 ```
 
 Prefer `LOCAL=1` / `./start-dev.sh` so builds use the local `go.work` modules.
 
+Manual native rebuild (after deleting `semantic-router/*/target` or changing binding sources):
+
+```bash
+make build-semantic-router-native
+```
+
 Docker images under `transports/` are **API-only** (no web UI stage):
 
 - `transports/Dockerfile`
-- `transports/Dockerfile.local`
+- `transports/Dockerfile.local` (builds Semantic Router `.so` in a Rust stage)
 
 ---
 
@@ -104,9 +114,10 @@ ai-gateway/
 ├── transports/
 │   └── bifrost-http/     # HTTP API (historical path name — do not rename lightly)
 │       └── ui/.gitkeep   # Embed stub only (no UI assets)
-├── plugins/              # Governance, logging, caching, …
+├── plugins/              # Governance, semantic-router, logging, …
+├── semantic-router/      # Nested routing core + Rust bindings (natives in */target/)
 ├── config.json           # Local MPilot-integrated config
-└── start-dev.sh          # Hot-reload API entrypoint
+└── start-dev.sh          # Hot-reload API entrypoint (ensures natives)
 ```
 
 ---

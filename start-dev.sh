@@ -19,9 +19,9 @@ cd "$ROOT"
 # Go + dev tools (air, etc.) — extend if your install paths differ
 export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${PATH}"
 
-# Embedded Semantic Router native runtimes (Candle/selection/NLP). The Go
-# bindings link from these build outputs under ./semantic-router; keep them
-# discoverable when the hot-reload child process starts.
+# Embedded Semantic Router native runtimes (Candle/NLP/ML/ONNX). Built libs are
+# gitignored under */target/release — ensure-semantic-router-native builds them
+# once on a fresh clone before hot-reload starts.
 SEMANTIC_ROUTER_ROOT="${SEMANTIC_ROUTER_ROOT:-${ROOT}/semantic-router}"
 NATIVE_LIBRARY_DIRS=(
 	"${SEMANTIC_ROUTER_ROOT}/candle-binding/target/release"
@@ -51,6 +51,10 @@ if ! command -v make >/dev/null 2>&1; then
 	echo "error: make not found" >&2
 	exit 1
 fi
+
+# Build natives if missing (requires Rust/cargo on first run only).
+echo "Ensuring Semantic Router native libraries..."
+make ensure-semantic-router-native
 
 # Ensure embed stub exists for //go:embed all:ui
 mkdir -p transports/bifrost-http/ui
