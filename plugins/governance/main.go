@@ -101,6 +101,11 @@ type GovernancePlugin struct {
 	tenantSyncOnce   sync.Once
 	tenantSyncCancel context.CancelFunc
 
+	// streamTTFTMs stores first-chunk latency (ms) per requestID until the final
+	// InferenceUsage publish. ExtraFields.Latency on the last stream chunk is total
+	// duration, not TTFT.
+	streamTTFTMs sync.Map // string (requestID) → int64
+
 	cfgMutex sync.RWMutex
 
 	isVkMandatory         *bool
@@ -1910,6 +1915,11 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 	// Streaming detection
 	isStreaming := bifrost.IsStreamRequestType(requestType)
 
+	if isStreaming && !isFinalChunk {
+		p.rememberStreamTTFT(requestID, responseLatencyMs(result))
+		return
+	}
+
 	if !isStreaming || (isStreaming && isFinalChunk) {
 		promptTokens, completionTokens := extractBudgetTokenCounts(result)
 		tokensUsed := 0
@@ -1977,9 +1987,24 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 			}
 		}
 
+		// ExtraFields.Latency is total request duration even when usage is missing.
+		apiLatencyMs := responseLatencyMs(result)
+		if durationMs == 0 {
+			durationMs = apiLatencyMs
+		}
+
+		// Streams report total duration on the final chunk, so fall back to the
+		// first-chunk latency captured earlier; non-streaming TTFT is the duration.
+		ttftMs := durationMs
+		if isStreaming {
+			if stored, ok := p.takeStreamTTFT(requestID); ok {
+				ttftMs = stored
+			}
+		}
+
 		// Spend is always rated by MPilot from the published InferenceUsage event.
 		p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
-			promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs)
+			promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs, ttftMs, apiLatencyMs)
 
 		// Cost stays 0: the tracker only advances rate-limit counters, and BudgetUsage spend
 		// arrives back from the database once MPilot Rating has priced the request.
@@ -2008,6 +2033,8 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	virtualKey, requestID, userID string,
 	promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens int,
 	durationMs int64,
+	ttftMs int64,
+	apiLatencyMs int64,
 ) {
 	if p.usagePublisher == nil {
 		return
@@ -2071,18 +2098,28 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		eventTimestamp = eventTimestamp.Add(-time.Duration(durationMs) * time.Millisecond)
 	}
 
+	// Keys must match the Service INPUT dimension names created by MPilot's
+	// model inventory publish API.
+	dimensions := map[string]string{
+		"input_token":  strconv.Itoa(promptTokens),
+		"output_token": strconv.Itoa(completionTokens),
+		"model":        model,
+		"provider":     string(provider),
+	}
+	if ttftMs > 0 {
+		dimensions["ttft_ms"] = strconv.FormatInt(ttftMs, 10)
+	}
+	if apiLatencyMs > 0 {
+		dimensions["api_latency_ms"] = strconv.FormatInt(apiLatencyMs, 10)
+	}
+
 	message := map[string]any{
 		"externalTransactionId": externalTransactionID,
 		"organizationId":        organizationID,
 		"serviceId":             serviceID,
 		"eventTimestamp":        eventTimestamp.Format(time.RFC3339Nano),
 		"billingAccountRef":     billingAccountRef,
-		"dimensions": map[string]string{
-			"input_tokens":  strconv.Itoa(promptTokens),
-			"output_tokens": strconv.Itoa(completionTokens),
-			"model":         model,
-			"provider":      string(provider),
-		},
+		"dimensions":            dimensions,
 	}
 	if orgUnitID != "" {
 		message["orgUnitId"] = orgUnitID
@@ -2095,6 +2132,39 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	if err := p.usagePublisher.PublishUsage(context.WithoutCancel(ctx), tenantID, key, message); err != nil {
 		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
 	}
+}
+
+// rememberStreamTTFT records the latency of the first chunk seen for a request.
+// Later chunks are ignored so the stored value stays the time to first token.
+func (p *GovernancePlugin) rememberStreamTTFT(requestID string, latencyMs int64) {
+	if requestID == "" || latencyMs <= 0 {
+		return
+	}
+	p.streamTTFTMs.LoadOrStore(requestID, latencyMs)
+}
+
+// takeStreamTTFT returns and removes the stored first-chunk latency for a request.
+func (p *GovernancePlugin) takeStreamTTFT(requestID string) (int64, bool) {
+	if requestID == "" {
+		return 0, false
+	}
+	value, ok := p.streamTTFTMs.LoadAndDelete(requestID)
+	if !ok {
+		return 0, false
+	}
+	latencyMs, ok := value.(int64)
+	return latencyMs, ok
+}
+
+// responseLatencyMs reads the latency the provider reported for this response.
+func responseLatencyMs(result *schemas.BifrostResponse) int64 {
+	if result == nil {
+		return 0
+	}
+	if extra := result.GetExtraFields(); extra != nil {
+		return extra.Latency
+	}
+	return 0
 }
 
 // GetGovernanceStore returns the governance store for the tenant in ctx.
