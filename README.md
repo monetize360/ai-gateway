@@ -17,12 +17,20 @@ MPilot API  ──AiGatewayClient──►  AI Gateway (:8082)  ──►  LLM p
 
 | Tool | Notes |
 |------|--------|
-| Go **1.26.2+** | Required to build / run |
-| Rust / `cargo` | Required once for Semantic Router native libs (`rustup`) |
+| Go **1.26.2+** | Required to build / run — install manually |
+| `make` | Required — install manually |
+| Rust / `cargo`, `cmake`, C compiler | Installed automatically when missing |
 | Docker | Postgres + Keycloak for MPilot |
 | Sibling checkout | `mpilotv2/` next to `ai-gateway/` |
 
-The in-process `semantic-router` plugin links **gitignored** Rust libraries under `semantic-router/*/target/release/`. They are **not** in git. `./start-dev.sh` and `make dev` / `make build` call `make ensure-semantic-router-native`, which builds them on first use (needs `cargo`). Docker builds them inside `transports/Dockerfile.local`.
+The in-process `semantic-router` plugin links **gitignored** Rust libraries under `semantic-router/*/target/release/`. They are **not** in git.
+
+`./start-dev.sh` and `make dev` / `make build` run `make ensure-semantic-router-native`, which:
+
+1. calls `make ensure-native-toolchain` (`scripts/ensure-native-toolchain.sh`) to install a missing C compiler, `cmake`, or Rust, and
+2. builds the native libraries once (a few minutes), skipping the build when they already exist.
+
+Use `TOOLCHAIN_AUTO_INSTALL=0` to report missing tools instead of installing them. Docker builds the same libraries inside `transports/Dockerfile.local`.
 
 ---
 
