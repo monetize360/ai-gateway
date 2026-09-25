@@ -2207,9 +2207,11 @@ func preloadVirtualKeyBaseRelations(db *gorm.DB) *gorm.DB {
 		Preload("AllowedModelConfigs.Budgets", active("governance_budgets")).
 		Preload("AllowedModelConfigs.RateLimits", active("governance_rate_limits")).
 		Preload("AllowedModelConfigs.Keys", func(db *gorm.DB) *gorm.DB {
-			return db.Table("config_keys").
-				Where("config_keys.deleted = ?", false).
-				Joins("JOIN governance_virtual_key_provider_config_keys j ON j.table_key_id = config_keys.id AND j.table_virtual_key_provider_config_id = governance_virtual_key_provider_configs.id AND j.deleted = ?", false).
+			// GORM loads many-to-many keys in a separate query and applies the
+			// provider-config IDs through the join table automatically. Referencing
+			// governance_virtual_key_provider_configs here produces invalid SQL
+			// because that table is not part of the preload query.
+			return db.Where("config_keys.deleted = ?", false).
 				Select("config_keys.id, config_keys.name, config_keys.key_id, config_keys.models_json, config_keys.provider_id")
 		}).
 		Preload("MCPConfigs", active("governance_virtual_key_mcp_configs")).

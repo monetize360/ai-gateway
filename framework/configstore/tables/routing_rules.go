@@ -57,8 +57,27 @@ type TableRoutingRule struct {
 	Deleted   bool      `gorm:"not null;default:false;index" json:"-"`
 }
 
+// CelExpressionSemanticRouting is the reserved org-level handoff expression.
+// It always matches and hands the request to semantic routing instead of pinning a target.
+const CelExpressionSemanticRouting = "semantic_routing == true"
+
 // TableName for TableRoutingRule
 func (TableRoutingRule) TableName() string { return "routing_rules" }
+
+// IsSemanticRoutingCELExpression reports whether expr is the reserved
+// semantic_routing == true handoff (not evaluated as normal CEL).
+// Whitespace and case are ignored so "Semantic_Routing==TRUE" also matches.
+func IsSemanticRoutingCELExpression(expr string) bool {
+	return strings.ToLower(strings.Join(strings.Fields(expr), "")) == "semantic_routing==true"
+}
+
+// ValidateSemanticRouting rejects combinations the engine cannot honor.
+func ValidateSemanticRouting(celExpression string, chainRule bool) error {
+	if IsSemanticRoutingCELExpression(celExpression) && chainRule {
+		return fmt.Errorf("chain_rule is not supported when cel_expression is %q", CelExpressionSemanticRouting)
+	}
+	return nil
+}
 
 // EnabledValue returns the effective Enabled bool, treating nil as true (DB default).
 func (r *TableRoutingRule) EnabledValue() bool {
@@ -131,13 +150,13 @@ func (r *TableRoutingRule) RoutingScopeOrgID() string {
 
 // RoutingScopeName returns the scope level used by the routing engine.
 func (r *TableRoutingRule) RoutingScopeName() string {
-	switch r.RoutingRulesCacheKey() {
-	case "global:":
+	key := r.RoutingRulesCacheKey()
+	switch {
+	case key == "global:":
 		return "global"
+	case strings.HasPrefix(key, "virtual_key:"):
+		return "virtual_key"
 	default:
-		if strings.HasPrefix(r.RoutingRulesCacheKey(), "virtual_key:") {
-			return "virtual_key"
-		}
 		return "org"
 	}
 }

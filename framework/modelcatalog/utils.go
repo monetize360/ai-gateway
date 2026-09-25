@@ -154,6 +154,17 @@ func convertPricingDataToTableModelPricing(modelKey string, entry PricingEntry) 
 		MaxOutputTokens: entry.MaxOutputTokens,
 		Architecture:    entry.Architecture,
 
+		SupportsVision:     entry.SupportsVision,
+		SupportsPDFInput:   entry.SupportsPDFInput,
+		SupportsAudioInput: entry.SupportsAudioInput,
+
+		Categories:        append([]string(nil), entry.Categories...),
+		CapabilityTier:    string(entry.CapabilityTier),
+		SupportsReasoning: entry.SupportsReasoning,
+		Status:            string(entry.Status),
+		LatencyClass:      entry.LatencyClass,
+		SheetJSON:         marshalRoutingSheet(entry.Sheet),
+
 		// Costs - Text
 		InputCostPerToken:                         entry.InputCostPerToken,
 		OutputCostPerToken:                        entry.OutputCostPerToken,
@@ -325,7 +336,19 @@ func convertTableModelPricingToPricingData(pricing *configstoreTables.TableModel
 		MaxInputTokens:  pricing.MaxInputTokens,
 		MaxOutputTokens: pricing.MaxOutputTokens,
 		Architecture:    pricing.Architecture,
-		PricingOptions:  options,
+
+		SupportsVision:     pricing.SupportsVision,
+		SupportsPDFInput:   pricing.SupportsPDFInput,
+		SupportsAudioInput: pricing.SupportsAudioInput,
+
+		Categories:        append([]string(nil), pricing.Categories...),
+		CapabilityTier:    CapabilityTier(pricing.CapabilityTier),
+		SupportsReasoning: pricing.SupportsReasoning,
+		Status:            ModelStatus(pricing.Status),
+		LatencyClass:      pricing.LatencyClass,
+		Sheet:             unmarshalRoutingSheet(pricing.SheetJSON),
+
+		PricingOptions: options,
 	}
 }
 
@@ -373,8 +396,20 @@ type modelParametersParseResult struct {
 	SupportsResponseSchema          *bool `json:"supports_response_schema,omitempty"`
 	SupportsServiceTier             *bool `json:"supports_service_tier,omitempty"`
 	SupportsPromptCaching           *bool `json:"supports_prompt_caching,omitempty"`
+	SupportsVision                  *bool `json:"supports_vision,omitempty"`
+	SupportsPDFInput                *bool `json:"supports_pdf_input,omitempty"`
+	SupportsAudioInput              *bool `json:"supports_audio_input,omitempty"`
 	VertexMultiRegionOnly           *bool `json:"vertex_multi_region_only,omitempty"`
 }
+
+// Input-modality capability markers emitted into the supported-parameters index.
+// These are not request parameters (like assistant_prefill above); they record
+// which input modalities a model accepts so callers can gate routing on them.
+const (
+	CapabilityVision     = "vision"
+	CapabilityPDFInput   = "pdf_input"
+	CapabilityAudioInput = "audio_input"
+)
 
 // extractSupportedParams builds a list of supported OpenAI-compatible parameter
 // names from model_parameters[].id values and supports_* boolean flags.
@@ -430,6 +465,15 @@ func extractSupportedParams(parsed *modelParametersParseResult) []string {
 		addParam("cache_control")
 		addParam("prompt_cache_key")
 		addParam("prompt_cache_retention")
+	}
+	if parsed.SupportsVision != nil && *parsed.SupportsVision {
+		addParam(CapabilityVision)
+	}
+	if parsed.SupportsPDFInput != nil && *parsed.SupportsPDFInput {
+		addParam(CapabilityPDFInput)
+	}
+	if parsed.SupportsAudioInput != nil && *parsed.SupportsAudioInput {
+		addParam(CapabilityAudioInput)
 	}
 
 	return supported

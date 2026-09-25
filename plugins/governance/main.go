@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -23,6 +24,8 @@ import (
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/tenantstore"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
+	"github.com/valyala/fasthttp"
 )
 
 // PluginName is the name of the governance plugin
@@ -35,6 +38,10 @@ const (
 
 	// testTenantID is used by InitFromStore for unit tests without a live registry.
 	testTenantID = "__bifrost_test_tenant__"
+
+	// semanticRoutingDisableHeader opts a single request out of semantic routing, so a
+	// caller can pin an exact model for evals or to reproduce a misroute.
+	semanticRoutingDisableHeader = "x-bf-disable-semantic-routing"
 )
 
 // Config is the configuration for the governance plugin
@@ -44,6 +51,10 @@ type Config struct {
 	IsEnterprise          bool      `json:"is_enterprise"`
 	DisableAutoToolInject *bool     `json:"disable_auto_tool_inject"`
 	RoutingChainMaxDepth  *int      `json:"routing_chain_max_depth"` // Pointer to live config value; changes are reflected immediately without restart
+	// SemanticRouting configures capability-aware semantic model selection.
+	// When enabled with default_for_all, selection runs for every VK request
+	// that did not match a pin rule; otherwise it runs only for semantic_routing CEL rules.
+	SemanticRouting *SemanticRoutingConfig `json:"semantic_routing,omitempty"`
 }
 
 type InMemoryStore interface {
@@ -97,6 +108,23 @@ type GovernancePlugin struct {
 	isEnterprise          bool
 	disableAutoToolInject *bool
 	routingChainMaxDepth  *int
+	semanticRouting       *SemanticRoutingConfig
+
+	// Shared vLLM-SR transport (not per-request).
+	vllmsrClient  *fasthttp.Client
+	vllmsrBreaker *vllmsrCircuitBreaker
+
+	// semanticLayer2 is the in-process Preview router (plugins/semanticrouter).
+	// Injected by the HTTP transport when router.mode=plugin.
+	semanticLayer2 semanticrouter.Router
+
+	// Layer 2 outcome counters (semantic_route_total{result=...} style).
+	semanticRouteSelected  atomic.Uint64
+	semanticRouteSkip      atomic.Uint64
+	semanticRouteFailOpen  atomic.Uint64
+	semanticRouteTimeout   atomic.Uint64
+	semanticRoutePreviewNs atomic.Uint64
+	semanticRoutePreviewN  atomic.Uint64
 
 	// usagePublisher publishes InferenceUsage to Kafka (injected by HTTP transport).
 	usagePublisher UsageEventPublisher
@@ -164,15 +192,25 @@ func Init(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
+	var semanticRouting *SemanticRoutingConfig
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
+		semanticRouting = config.SemanticRouting
 	}
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
+	}
+	if semanticRouting != nil {
+		if err := semanticRouting.validateAndNormalizeSemanticRouting(logger); err != nil {
+			return nil, err
+		}
+		if err := semanticRouting.loadModelOverridesFromFile(); err != nil {
+			return nil, fmt.Errorf("semantic routing model overrides file: %w", err)
+		}
 	}
 
 	ctx, cancelFunc := context.WithCancel(ctx)
@@ -189,8 +227,10 @@ func Init(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
+		semanticRouting:       semanticRouting,
 		inMemoryStore:         inMemoryStore,
 	}
+	plugin.initVLLMSRTransport()
 	return plugin, nil
 }
 
@@ -233,15 +273,25 @@ func InitFromStore(
 	var requiredHeaders *[]string
 	var disableAutoToolInject *bool
 	var routingChainMaxDepth *int
+	var semanticRouting *SemanticRoutingConfig
 	if config != nil {
 		isVkMandatory = config.IsVkMandatory
 		requiredHeaders = config.RequiredHeaders
 		disableAutoToolInject = config.DisableAutoToolInject
 		routingChainMaxDepth = config.RoutingChainMaxDepth
+		semanticRouting = config.SemanticRouting
 	}
 	if routingChainMaxDepth == nil {
 		defaultDepth := DefaultRoutingChainMaxDepth
 		routingChainMaxDepth = &defaultDepth
+	}
+	if semanticRouting != nil {
+		if err := semanticRouting.validateAndNormalizeSemanticRouting(logger); err != nil {
+			return nil, err
+		}
+		if err := semanticRouting.loadModelOverridesFromFile(); err != nil {
+			return nil, fmt.Errorf("semantic routing model overrides file: %w", err)
+		}
 	}
 	resolver := NewBudgetResolver(governanceStore, modelCatalog, logger, inMemoryStore)
 	tracker := NewUsageTracker(ctx, governanceStore, resolver, configStore, logger)
@@ -280,6 +330,7 @@ func InitFromStore(
 		isEnterprise:          config != nil && config.IsEnterprise,
 		disableAutoToolInject: disableAutoToolInject,
 		routingChainMaxDepth:  routingChainMaxDepth,
+		semanticRouting:       semanticRouting,
 	}
 	plugin.tenantComponents.Store(testTenantID, &tenantGovernanceComponents{
 		store:    governanceStore,
@@ -287,7 +338,32 @@ func InitFromStore(
 		tracker:  tracker,
 		engine:   engine,
 	})
+	plugin.initVLLMSRTransport()
 	return plugin, nil
+}
+
+// SetSemanticLayer2 injects the in-process semantic-router Preview implementation.
+// Called by the HTTP transport after both plugins are initialized.
+func (p *GovernancePlugin) SetSemanticLayer2(r semanticrouter.Router) {
+	if p == nil {
+		return
+	}
+	p.semanticLayer2 = r
+}
+
+// layer2Enabled reports whether Layer 2 can run (HTTP sidecar or in-process plugin).
+func (p *GovernancePlugin) layer2Enabled(cfg *SemanticRoutingConfig) bool {
+	if cfg == nil || cfg.Router == nil || !cfg.Router.enabled() {
+		return false
+	}
+	switch cfg.Router.resolvedMode() {
+	case routerModePlugin:
+		return p.semanticLayer2 != nil
+	case routerModeHTTP:
+		return cfg.Router.httpEnabled()
+	default:
+		return cfg.Router.httpEnabled() || p.semanticLayer2 != nil
+	}
 }
 
 // GetName returns the name of the plugin
@@ -460,20 +536,35 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 				Body:       errorBody,
 			}, nil
 		}
-		// Mark for marshal if a routing rule matched
-		if routingDecision != nil {
+		// Mark for marshal if a routing rule matched (pin / cost ceiling already applied)
+		if routingDecision != nil && !routingDecision.IsSemanticRouting() {
 			needsMarshal = true
+		}
+	}
+
+	//2. Semantic routing — only when a matching rule asked for it (cel_expression
+	// semantic_routing == true), when default_for_all is on, or when the request omitted
+	// model. No matching CEL rule keeps the requested model for load balancing.
+	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
+	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		var routed bool
+		payload, routed = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
+		if routed {
+			needsMarshal = true
+		} else {
+			p.logSemantic(ctx, schemas.LogLevelInfo, "Did not rewrite the model; continuing to load balancing")
 		}
 	}
 
 	// Process virtual key if provided
 	if virtualKey != nil {
-		//2. Load balance provider
+		//3. Load balance provider
 		payload, err = p.loadBalanceProvider(ctx, req, payload, virtualKey)
 		if err != nil {
 			return nil, err
 		}
-		//3. Add MCP tools only when auto-inject is enabled and header not already set by the caller
+		//4. Add MCP tools only when auto-inject is enabled and header not already set by the caller
 		p.cfgMutex.RLock()
 		autoInjectDisabled := p.disableAutoToolInject != nil && *p.disableAutoToolInject
 		p.cfgMutex.RUnlock()
@@ -548,12 +639,35 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	stampRoutingSourceModelIDsContext(ctx, comp.store, provider, model)
 
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
+	var routingDecision *RoutingDecision
 	if hasRoutingRules {
 		var err error
-		payload, _, err = p.applyRoutingRules(ctx, req, payload, virtualKey)
+		payload, routingDecision, err = p.applyRoutingRules(ctx, req, payload, virtualKey)
 		if err != nil {
 			return nil, err
 		}
+		if routingDecision != nil && routingDecision.Block {
+			blockMsg := fmt.Sprintf("Request blocked by routing rule '%s': model %s blocked by cost ceiling policy",
+				routingDecision.MatchedRuleName, routingDecision.Model)
+			p.logger.Info("[HTTPTransport] %s (rule_id=%s)", blockMsg, routingDecision.MatchedRuleID)
+			errorBody, _ := sonic.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": blockMsg,
+					"type":    "routing_rule_blocked",
+				},
+			})
+			return &schemas.HTTPResponse{
+				StatusCode: 403,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       errorBody,
+			}, nil
+		}
+	}
+
+	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
+	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		payload, _ = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
 	}
 
 	// Process virtual key: load balance + MCP tool headers
@@ -653,12 +767,35 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	stampRoutingSourceModelIDsContext(ctx, comp.store, provider, model)
 
 	// Apply routing rules
+	var routingDecision *RoutingDecision
 	if hasRoutingRules {
 		var err error
-		payload, _, err = p.applyRoutingRules(ctx, req, payload, virtualKey)
+		payload, routingDecision, err = p.applyRoutingRules(ctx, req, payload, virtualKey)
 		if err != nil {
 			return nil, err
 		}
+		if routingDecision != nil && routingDecision.Block {
+			blockMsg := fmt.Sprintf("Request blocked by routing rule '%s': model %s blocked by cost ceiling policy",
+				routingDecision.MatchedRuleName, routingDecision.Model)
+			p.logger.Info("[HTTPTransport] %s (rule_id=%s)", blockMsg, routingDecision.MatchedRuleID)
+			errorBody, _ := sonic.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": blockMsg,
+					"type":    "routing_rule_blocked",
+				},
+			})
+			return &schemas.HTTPResponse{
+				StatusCode: 403,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       errorBody,
+			}, nil
+		}
+	}
+
+	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
+	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		payload, _ = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
 	}
 
 	// Process virtual key: load balance provider
@@ -704,55 +841,13 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 	if comp == nil {
 		return body, nil
 	}
-	// Check if the request has a model field
-	modelValue, hasModel := body["model"]
-	isGeminiPath := strings.Contains(req.Path, "/genai")
-	isBedrockPath := strings.Contains(req.Path, "/bedrock")
-	if !hasModel {
-		// For genai integration, model is present in URL path instead of the request body
-		if isGeminiPath {
-			// Prefer context value set by a routing rule (format: "provider/model:suffix")
-			if ctxModel, ok := ctx.Value("model").(string); ok && ctxModel != "" {
-				modelValue = ctxModel
-			} else {
-				modelValue = req.CaseInsensitivePathParamLookup("model")
-			}
-		} else if isBedrockPath {
-			// For bedrock integration, model is present in URL path as modelId
-			// Prefer context value set by a routing rule (format: "provider/model")
-			if ctxModelID, ok := ctx.Value("modelId").(string); ok && ctxModelID != "" {
-				modelValue = ctxModelID
-			} else {
-				rawModelID := req.CaseInsensitivePathParamLookup("modelId")
-				if rawModelID == "" {
-					return body, nil
-				}
-				// URL-decode the modelId (Bedrock model IDs may be URL-encoded, e.g. anthropic%2Fclaude-3-5-sonnet)
-				decoded, err := url.PathUnescape(rawModelID)
-				if err != nil {
-					decoded = rawModelID
-				}
-				modelValue = decoded
-			}
-		} else {
-			return body, nil
-		}
-	}
-	modelStr, ok := modelValue.(string)
-	if !ok || modelStr == "" {
+	resolved, ok := resolveRoutedModel(ctx, req, body)
+	if !ok {
 		return body, nil
 	}
-	var genaiRequestSuffix string
-	// Remove Google GenAI API endpoint suffixes if present
-	if isGeminiPath {
-		for _, sfx := range gemini.GeminiRequestSuffixPaths {
-			if before, ok := strings.CutSuffix(modelStr, sfx); ok {
-				modelStr = before
-				genaiRequestSuffix = sfx
-				break
-			}
-		}
-	}
+	modelStr := resolved.Model
+	isGeminiPath, isBedrockPath, genaiRequestSuffix := resolved.IsGeminiPath, resolved.IsBedrockPath, resolved.GenAISuffix
+
 	// Check if model already has provider prefix (contains "/")
 	if strings.Contains(modelStr, "/") {
 		provider, _ := schemas.ParseModelString(modelStr, "")
@@ -886,34 +981,24 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 	p.logger.Debug("[governance] Selected provider: %s", selectedProvider)
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Selected provider %s for model %s (from %d eligible: %v)", selectedProvider, modelStr, len(allowedProviderConfigs), allowedProviders))
 
-	// For genai integration, model is present in URL path instead of the request body
-	if isGeminiPath {
-		newModelWithRequestSuffix := string(selectedProvider) + "/" + modelStr + genaiRequestSuffix
-		ctx.SetValue("model", newModelWithRequestSuffix)
-	} else if isBedrockPath {
-		// For bedrock integration, model is present in URL path as modelId
-		ctx.SetValue("modelId", string(selectedProvider)+"/"+modelStr)
-	} else {
-		var err error
-		refinedModel := modelStr
-		// Refine the model for the selected provider
-		if p.modelCatalog != nil {
-			refinedModel, err = p.modelCatalog.RefineModelForProvider(selectedProvider, modelStr)
-			if err != nil {
-				return body, err
-			}
+	// The body path uses the provider-native slug; the genai/bedrock path params keep
+	// the incoming model as-is, matching how their pre-callbacks re-parse it.
+	writtenModel := modelStr
+	if !isGeminiPath && !isBedrockPath && p.modelCatalog != nil {
+		refinedModel, err := p.modelCatalog.RefineModelForProvider(selectedProvider, modelStr)
+		if err != nil {
+			return body, err
 		}
-		// Update the model field in the request body
-		body["model"] = string(selectedProvider) + "/" + refinedModel
+		writtenModel = refinedModel
 	}
+	writeModelBack(ctx, body, isGeminiPath, isBedrockPath, selectedProvider, writtenModel, genaiRequestSuffix)
+
 	// Append governance to routing engines used
 	schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineGovernance)
 
-	// Check if fallbacks field is already present
-	_, hasFallbacks := body["fallbacks"]
 	// Use the same candidate set that was used for primary selection
 	fallbackConfigs := weightedConfigs
-	if !hasFallbacks && len(fallbackConfigs) > 1 {
+	if _, hasFallbacks := body["fallbacks"]; !hasFallbacks && len(fallbackConfigs) > 1 {
 		// Sort fallback configs by weight (descending)
 		sort.Slice(fallbackConfigs, func(i, j int) bool {
 			return getWeight(fallbackConfigs[i].Weight) > getWeight(fallbackConfigs[j].Weight)
@@ -937,9 +1022,9 @@ func (p *GovernancePlugin) loadBalanceProvider(ctx *schemas.BifrostContext, req 
 			}
 		}
 
-		// Add fallbacks to request body
-		body["fallbacks"] = fallbacks
-		ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Added %d fallback providers: %v", len(fallbacks), fallbacks))
+		if setFallbacksIfAbsent(body, fallbacks) {
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineGovernance, schemas.LogLevelInfo, fmt.Sprintf("Added %d fallback providers: %v", len(fallbacks), fallbacks))
+		}
 	}
 
 	return body, nil
@@ -1047,35 +1132,17 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 	// If a routing rule matched, apply the decision
 	if decision != nil {
 		p.logger.Debug("[Governance] Routing rule matched: %s", decision.MatchedRuleName)
-
-		// Update model in request body
-		if strings.Contains(req.Path, "/genai") {
-			// For genai, model is in URL path
-			newModel := decision.Model + genaiRequestSuffix
-			// Add provider prefix if present (because there can be other routing rules down stream that can add the provider)
-			if decision.Provider != "" {
-				newModel = decision.Provider + "/" + newModel
-			}
-			ctx.SetValue("model", newModel)
-		} else if isBedrockPath {
-			// For bedrock, model is in URL path as modelId
-			// Set new modelId in context so bedrockPreCallback picks it up via ctx.UserValue("modelId")
-			newModel := decision.Model
-			if decision.Provider != "" {
-				newModel = decision.Provider + "/" + newModel
-			}
-			ctx.SetValue("modelId", newModel)
-		} else {
-			// For regular requests, update in body
-			newModel := decision.Model
-			// Add provider prefix if present (because there can be other routing rules down stream that can add the provider)
-			if decision.Provider != "" {
-				newModel = decision.Provider + "/" + newModel
-			}
-			body["model"] = newModel
-		}
-		// Append routing-rule to routing engines used
 		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
+
+		if decision.IsSemanticRouting() {
+			// Semantic selection is applied by the caller after this returns.
+			// Do not pin provider/model, write rule fallbacks, or pin a key.
+			p.logger.Info("[Governance] 0/handoff: routing rule %q matched semantic_routing == true; handing off to semantic routing", decision.MatchedRuleName)
+			return body, decision, nil
+		}
+
+		// Provider may be empty here: downstream routing stages can still add the prefix.
+		writeModelBack(ctx, body, isGeminiPath, isBedrockPath, schemas.ModelProvider(decision.Provider), decision.Model, genaiRequestSuffix)
 
 		// Add fallbacks if present; fill in the incoming model for fallbacks that omit it
 		if len(decision.Fallbacks) > 0 {
@@ -1101,7 +1168,7 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 			ctx.SetValue(schemas.BifrostContextKeyAPIKeyID, decision.KeyID)
 		}
 
-		p.logger.Debug("[Governance] Applied routing decision: provider=%s, model=%s, keyID=%s, fallbacks=%v", decision.Provider, decision.Model, decision.KeyID, decision.Fallbacks)
+		p.logger.Info("[Governance] Applied routing decision: provider=%s, model=%s, keyID=%s, fallbacks=%v", decision.Provider, decision.Model, decision.KeyID, decision.Fallbacks)
 	}
 
 	return body, decision, nil

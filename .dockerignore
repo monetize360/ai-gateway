@@ -64,6 +64,9 @@ tmp/
 temp/
 .tmp/
 
+# Local Semantic Router native builds (rebuilt for linux inside the image)
+semantic-router/**/target/
+
 # Go workspaces (local only)
 go.work
 go.work.sum

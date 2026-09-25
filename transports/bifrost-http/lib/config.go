@@ -46,6 +46,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
+	"github.com/maximhq/bifrost/plugins/semanticrouter"
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"github.com/valyala/fasthttp"
 	"gorm.io/gorm"
@@ -120,6 +121,7 @@ var builtinPluginNames = []string{
 	governance.PluginName,
 	otel.PluginName,
 	semanticcache.PluginName,
+	semanticrouter.PluginName,
 	compat.PluginName,
 	maxim.PluginName,
 	kafka.PluginName,

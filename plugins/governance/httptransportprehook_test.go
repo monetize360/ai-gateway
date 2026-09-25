@@ -76,7 +76,7 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget(t *testing.T) {
 		Name:          "genai-repro-rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-genai-model" && provider == ""`,
-		
+
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 
@@ -138,7 +138,7 @@ func TestHTTPTransportPreHook_GenAIRoutingRulePreservesTarget_WithStore(t *testi
 		Name:          "genai-repro-rule-with-store",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-genai-model" && provider == ""`,
-		
+
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 
@@ -256,7 +256,7 @@ func TestHTTPTransportPreHook_BedrockRoutingRulePreservesTarget(t *testing.T) {
 		Name:          "bedrock-repro-rule",
 		Enabled:       bifrost.Ptr(true),
 		CelExpression: `model == "probe-bedrock-model" && provider == ""`,
-		
+
 		Provider: bifrost.Ptr("repro-openai-a"),
 		Model:    bifrost.Ptr("error-test"),
 

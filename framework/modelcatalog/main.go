@@ -219,3 +219,69 @@ func NewTestCatalog(baseModelIndex map[string]string) *ModelCatalog {
 		modelParametersData:    make(map[string]json.RawMessage),
 	}
 }
+
+// TestModel describes one model to register in a test catalog.
+type TestModel struct {
+	Provider           schemas.ModelProvider
+	Model              string
+	Mode               string   // datasheet mode, e.g. "chat"
+	ResponseTypes      []string // normalized types, e.g. "chat_completion"
+	SupportedParams    []string
+	MaxInputTokens     *int
+	MaxOutputTokens    *int
+	InputCostPerToken  *float64
+	OutputCostPerToken *float64
+	SupportsVision     *bool
+	SupportsPDFInput   *bool
+	SupportsAudioInput *bool
+	Categories         []string
+	CapabilityTier     CapabilityTier
+	SupportsReasoning  *bool
+	Status             ModelStatus
+}
+
+// SeedForTest registers models in a test catalog so capability, pricing and pool lookups
+// resolve without loading the embedded datasheet. Test-only companion to NewTestCatalog,
+// which leaves the logger nil — pricing resolution logs, so one is required here.
+func (mc *ModelCatalog) SeedForTest(logger schemas.Logger, models []TestModel) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if mc.logger == nil {
+		mc.logger = logger
+	}
+
+	for _, model := range models {
+		mode := model.Mode
+		if mode == "" {
+			mode = "chat"
+		}
+		provider := string(model.Provider)
+		mc.pricingData[makeKey(model.Model, provider, mode)] = configstoreTables.TableModelPricing{
+			Model:              model.Model,
+			Provider:           provider,
+			Mode:               mode,
+			MaxInputTokens:     model.MaxInputTokens,
+			MaxOutputTokens:    model.MaxOutputTokens,
+			InputCostPerToken:  model.InputCostPerToken,
+			OutputCostPerToken: model.OutputCostPerToken,
+			SupportsVision:     model.SupportsVision,
+			SupportsPDFInput:   model.SupportsPDFInput,
+			SupportsAudioInput: model.SupportsAudioInput,
+			Categories:         append([]string(nil), model.Categories...),
+			CapabilityTier:    string(model.CapabilityTier),
+			SupportsReasoning:  model.SupportsReasoning,
+			Status:             string(model.Status),
+		}
+		if len(model.ResponseTypes) > 0 {
+			mc.supportedResponseTypes[model.Model] = model.ResponseTypes
+		}
+		if len(model.SupportedParams) > 0 {
+			mc.supportedParams[model.Model] = model.SupportedParams
+		}
+		if !slices.Contains(mc.modelPool[model.Provider], model.Model) {
+			mc.modelPool[model.Provider] = append(mc.modelPool[model.Provider], model.Model)
+			mc.unfilteredModelPool[model.Provider] = append(mc.unfilteredModelPool[model.Provider], model.Model)
+		}
+	}
+}

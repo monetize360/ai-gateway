@@ -1,0 +1,239 @@
+//go:build !riscv64
+
+package cache
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+	valkeyutil "github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/valkey"
+)
+
+// pendingEntry holds the parsed fields from a pending cache entry search result.
+type pendingEntry struct {
+	docID          string
+	model          string
+	query          string
+	requestBodyStr string
+}
+
+// extractPendingFields extracts a pendingEntry from a Valkey GLIDE doc map (the second element of FT.SEARCH results).
+func extractPendingFields(docMap map[string]interface{}) (*pendingEntry, error) {
+	entry := &pendingEntry{}
+	for docKey, docValue := range docMap {
+		entry.docID = docKey
+
+		fieldsMap, mapOk := docValue.(map[string]interface{})
+		if !mapOk {
+			logging.Warnf("UpdateWithResponse: document fields is not a map, type=%T", docValue)
+			return nil, fmt.Errorf("invalid search result: expected fields map")
+		}
+
+		if v, exists := fieldsMap["model"]; exists {
+			entry.model = fmt.Sprint(v)
+		}
+		if v, exists := fieldsMap["query"]; exists {
+			entry.query = fmt.Sprint(v)
+		}
+		if v, exists := fieldsMap["request_body"]; exists {
+			entry.requestBodyStr = fmt.Sprint(v)
+		}
+
+		break // Only process the first document
+	}
+	return entry, nil
+}
+
+// parsePendingSearchResult extracts a pendingEntry from a Valkey FT.SEARCH result.
+// Returns the entry or an error describing the parse failure.
+func parsePendingSearchResult(results interface{}, requestID string, prefix string) (*pendingEntry, error) {
+	resultsArray, ok := results.([]interface{})
+	if !ok || len(resultsArray) < 1 {
+		logging.Infof("ValkeyCache.UpdateWithResponse: invalid result format for request_id=%s", requestID)
+		return nil, fmt.Errorf("invalid search result format")
+	}
+
+	totalResults, ok := resultsArray[0].(int64)
+	if !ok {
+		logging.Infof("ValkeyCache.UpdateWithResponse: invalid count type for request_id=%s (got %T)", requestID, resultsArray[0])
+		return nil, fmt.Errorf("invalid search result count type")
+	}
+
+	if totalResults == 0 {
+		logging.Infof("ValkeyCache.UpdateWithResponse: no pending entry found with request_id=%s (count=0, may still be indexing)", requestID)
+		return nil, fmt.Errorf("no pending entry found (indexing may still be in progress)")
+	}
+
+	logging.Infof("UpdateWithResponse: found %d result(s) for request_id=%s", totalResults, requestID)
+
+	if len(resultsArray) < 2 {
+		logging.Warnf("UpdateWithResponse: resultsArray only has %d elements", len(resultsArray))
+		return nil, fmt.Errorf("invalid search result: expected at least 2 elements")
+	}
+
+	docMap, ok := resultsArray[1].(map[string]interface{})
+	if !ok {
+		logging.Warnf("UpdateWithResponse: resultsArray[1] is not a map, type=%T", resultsArray[1])
+		return nil, fmt.Errorf("invalid search result: expected map at index 1")
+	}
+
+	entry, err := extractPendingFields(docMap)
+	if err != nil {
+		return nil, err
+	}
+
+	if !strings.HasPrefix(entry.docID, prefix) {
+		logging.Warnf("UpdateWithResponse: docID '%s' doesn't have expected prefix '%s'", entry.docID, prefix)
+	}
+
+	logging.Debugf("UpdateWithResponse: extracted docID='%s', model='%s', query=%s", entry.docID, entry.model, logging.ContentDescriptor(entry.query))
+
+	if entry.model == "" || entry.query == "" {
+		logging.Warnf("UpdateWithResponse: missing required fields (model='%s', query=%s)", entry.model, logging.ContentDescriptor(entry.query))
+		return nil, fmt.Errorf("missing required fields in pending entry")
+	}
+
+	return entry, nil
+}
+
+// searchMatch holds the parsed fields from a vector search result.
+type searchMatch struct {
+	distance     float64
+	query        string
+	responseBody interface{}
+	timestamp    int64
+	ttlSeconds   int64
+}
+
+func extractSearchMatch(fieldsMap map[string]interface{}) (*searchMatch, bool) {
+	distanceVal, exists := fieldsMap["vector_distance"]
+	if !exists {
+		return nil, false
+	}
+
+	distance, err := strconv.ParseFloat(fmt.Sprint(distanceVal), 64)
+	if err != nil || math.IsNaN(distance) || math.IsInf(distance, 0) {
+		logging.Debugf("ValkeyCache.FindSimilarWithThreshold: failed to parse distance value: %v", err)
+		return nil, false
+	}
+
+	var timestamp int64
+	if tsVal, exists := fieldsMap["timestamp"]; exists {
+		var ts int64
+		if _, err := fmt.Sscanf(fmt.Sprint(tsVal), "%d", &ts); err == nil && ts > 0 {
+			timestamp = ts
+		}
+	}
+	var ttlSeconds int64
+	if ttlVal, exists := fieldsMap["ttl_seconds"]; exists {
+		var ttl int64
+		if _, err := fmt.Sscanf(fmt.Sprint(ttlVal), "%d", &ttl); err == nil && ttl > 0 {
+			ttlSeconds = ttl
+		}
+	}
+
+	query, _ := fieldsMap["query"].(string)
+	return &searchMatch{
+		distance:     distance,
+		query:        query,
+		responseBody: fieldsMap["response_body"],
+		timestamp:    timestamp,
+		ttlSeconds:   ttlSeconds,
+	}, true
+}
+
+// parseBestMatch extracts the best-match distance and response body from a Valkey FT.SEARCH vector result.
+// Returns nil when no valid match is found.
+func parseBestMatch(searchResult interface{}) *searchMatch {
+	var best *searchMatch
+	for _, candidate := range parseSearchMatches(searchResult) {
+		if best == nil || candidate.distance < best.distance {
+			best = candidate
+		}
+	}
+	return best
+}
+
+func parseSearchMatches(searchResult interface{}) []*searchMatch {
+	resultsArray, ok := searchResult.([]interface{})
+	if !ok || len(resultsArray) < 2 {
+		return nil
+	}
+
+	totalResults, ok := resultsArray[0].(int64)
+	if !ok || totalResults == 0 {
+		return nil
+	}
+
+	docMap, ok := resultsArray[1].(map[string]interface{})
+	if !ok {
+		logging.Debugf("ValkeyCache.FindSimilarWithThreshold: invalid result format, expected map at index 1, got %T", resultsArray[1])
+		return nil
+	}
+
+	// FT.SEARCH returns results ordered by distance, but Go map iteration
+	// in the valkey-glide response loses that ordering. Iterate all docs and
+	// pick the best one.
+	matches := make([]*searchMatch, 0, len(docMap))
+	for _, docValue := range docMap {
+		fieldsMap, mapOk := docValue.(map[string]interface{})
+		if !mapOk {
+			logging.Debugf("ValkeyCache.FindSimilarWithThreshold: invalid fields format, expected map, got %T", docValue)
+			continue
+		}
+
+		candidate, matchOk := extractSearchMatch(fieldsMap)
+		if matchOk {
+			matches = append(matches, candidate)
+		}
+	}
+
+	return matches
+}
+
+// GLIDE represents results as a map; choose the best eligible candidate rather
+// than assuming iteration order or letting a polarity rejection end the search.
+func selectValkeyPolarityMatch(searchResult interface{}, queryTokens []string, threshold float32, metric string) (*searchMatch, float32) {
+	var best *searchMatch
+	var bestSimilarity, rejectedSimilarity float32
+	hasScore := false
+	for _, candidate := range parseSearchMatches(searchResult) {
+		similarity := float32(valkeyutil.DistanceToSimilarity(metric, candidate.distance))
+		if !hasScore || similarity > rejectedSimilarity {
+			rejectedSimilarity = similarity
+			hasScore = true
+		}
+		body, bodyOK := candidate.responseBody.(string)
+		if similarity < threshold || !bodyOK || body == "" ||
+			!semanticCandidateMatchesPolarity(queryTokens, candidate.query) {
+			continue
+		}
+		_, expiresAt := valkeyTiming(candidate)
+		if !expiresAt.IsZero() && !time.Now().Before(expiresAt) {
+			continue
+		}
+		if best == nil || similarity > bestSimilarity {
+			best, bestSimilarity = candidate, similarity
+		}
+	}
+	if best == nil {
+		return nil, rejectedSimilarity
+	}
+	return best, bestSimilarity
+}
+
+// extractResponseBody returns the response bytes from a search match, or nil if missing/empty.
+func extractResponseBody(match *searchMatch) []byte {
+	if match == nil {
+		return nil
+	}
+	s, ok := match.responseBody.(string)
+	if !ok || s == "" {
+		return nil
+	}
+	return []byte(s)
+}

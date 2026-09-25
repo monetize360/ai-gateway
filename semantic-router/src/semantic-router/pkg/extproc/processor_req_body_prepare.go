@@ -1,0 +1,230 @@
+package extproc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/decision"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/inflight"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/llmprotocol"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/selection"
+)
+
+func (r *OpenAIRouter) extractRequestSignalSnapshot(
+	ctx *RequestContext,
+) (*requestSignalSnapshot, error) {
+	if ctx == nil || ctx.SemanticRequest == nil {
+		return nil, status.Error(codes.InvalidArgument, "neutral inference request is unavailable")
+	}
+	// Resolve retained history before any signal, context estimate, or plugin
+	// consumes the neutral request. Provider dispatch is idempotent and must not
+	// later reintroduce history removed by the selected decision's tool policy.
+	if changed, err := r.materializeResponseObjectContext(ctx.SemanticRequest, ctx); err != nil {
+		return nil, err
+	} else if changed {
+		ctx.SemanticRequest.Generation++
+	}
+	captureOriginalContextHistory(ctx)
+	snapshot := extractSemanticRequestSignals(ctx.SemanticRequest)
+	captureOriginalRequestDemand(ctx, ctx.SemanticRequest, snapshot)
+	if snapshot.Stream {
+		logging.ComponentDebugEvent("extproc", "stream_parameter_detected", map[string]interface{}{
+			"request_id": ctx.RequestID,
+		})
+		ctx.ExpectStreamingResponse = true
+	}
+	return snapshot, nil
+}
+
+func (r *OpenAIRouter) runRequestPreRoutingStages(
+	originalModel string,
+	snapshot *requestSignalSnapshot,
+	ctx *RequestContext,
+) (requestDecisionState, *ext_proc.ProcessingResponse) {
+	if !ctx.Routing.IsResolved() {
+		r.resolveEntrypointForRequest(originalModel, ctx)
+	}
+	populatePinnedSessionFromHeaders(ctx)
+	history := signalConversationHistoryFromSnapshot(snapshot)
+	applyRequestContextEstimate(snapshot, ctx)
+	decisionName, _, reasoningDecision, selectedModel, decisionErr := r.performDecisionEvaluation(
+		originalModel,
+		history,
+		ctx,
+	)
+	if decisionErr == nil {
+		decisionErr = r.benchmarkCallLimitCheck(ctx)
+	}
+	if decisionErr != nil {
+		if errors.Is(decisionErr, errBenchmarkCallLimit) {
+			return requestDecisionState{}, r.createErrorResponse(412, errBenchmarkCallLimit.Error())
+		}
+		if errors.Is(decisionErr, context.Canceled) ||
+			errors.Is(decisionErr, context.DeadlineExceeded) {
+			return requestDecisionState{}, r.createErrorResponse(499, "request canceled")
+		}
+		if errors.Is(decisionErr, errNoContextEligibleDecisionModel) {
+			logging.Warnf("[Request Body] Decision candidates cannot satisfy request context: %v", decisionErr)
+			return requestDecisionState{}, r.createErrorResponse(422, decisionErr.Error())
+		}
+		if errors.Is(decisionErr, selection.ErrNoEligibleCandidates) {
+			logging.Warnf("[Request Body] Selection policy rejected all candidates: %v", decisionErr)
+			return requestDecisionState{}, r.respondSelectionRejected(ctx, originalModel, decisionErr)
+		}
+		if response, handled := r.processBodyRoutingError(decisionErr, ctx); handled {
+			return requestDecisionState{}, response
+		}
+		logging.Errorf("[Request Body] Decision evaluation failed: %v", decisionErr)
+		if errors.Is(decisionErr, decision.ErrDecisionUnresolved) {
+			return requestDecisionState{}, r.respondDecisionUnresolved(ctx, originalModel, decisionErr)
+		}
+		return requestDecisionState{}, r.createErrorResponse(403, decisionErr.Error())
+	}
+	if resp := r.handleFastResponse(ctx, decisionName); resp != nil {
+		r.startRouterReplay(ctx, originalModel, selectedModel, decisionName)
+		r.updateRouterReplayStatus(ctx, 200, false)
+		r.attachRouterReplayResponse(
+			ctx,
+			resp.GetImmediateResponse().GetBody(),
+			true,
+		)
+		addRouterReplayHeaderToImmediateResponse(resp, ctx.RouterReplayID)
+		return requestDecisionState{}, resp
+	}
+	metrics.RecordModelRequest(selectedModel)
+	ctx.InflightToken = inflight.Begin(selectedModel)
+	if resp := r.applyRateLimit(ctx, selectedModel); resp != nil {
+		inflight.End(selectedModel, ctx.InflightToken)
+		ctx.InflightToken = 0
+		return requestDecisionState{}, resp
+	}
+	if resp := r.applyCacheChecks(ctx, selectedModel, decisionName); resp != nil {
+		inflight.End(selectedModel, ctx.InflightToken)
+		ctx.InflightToken = 0
+		return requestDecisionState{}, resp
+	}
+	if ragErr := r.executeRAGPlugin(ctx, decisionName); ragErr != nil {
+		inflight.End(selectedModel, ctx.InflightToken)
+		ctx.InflightToken = 0
+		return requestDecisionState{}, r.createErrorResponse(503, fmt.Sprintf("RAG retrieval failed: %v", ragErr))
+	}
+
+	return requestDecisionState{
+		decisionName:      decisionName,
+		reasoningDecision: reasoningDecision,
+		selectedModel:     selectedModel,
+	}, nil
+}
+
+// respondDecisionUnresolved builds the fail_request 503 and finalizes the
+// replay record as failed, matching the looper-failure path.
+func (r *OpenAIRouter) respondDecisionUnresolved(
+	ctx *RequestContext,
+	originalModel string,
+	decisionErr error,
+) *ext_proc.ProcessingResponse {
+	resp := r.respondRoutingRejected(ctx, originalModel, decisionErr, "decision_unresolved")
+	addImmediateResponseHeader(resp, headers.VSRAppliedUnknownPolicy, appliedUnknownPolicyHeader(ctx))
+	return resp
+}
+
+// respondSelectionRejected preserves an explicit fail-closed selection policy
+// all the way to the client instead of silently routing to a fallback model.
+func (r *OpenAIRouter) respondSelectionRejected(
+	ctx *RequestContext,
+	originalModel string,
+	selectionErr error,
+) *ext_proc.ProcessingResponse {
+	return r.respondRoutingRejected(ctx, originalModel, selectionErr, "selection_rejected")
+}
+
+func (r *OpenAIRouter) respondRoutingRejected(
+	ctx *RequestContext,
+	originalModel string,
+	routingErr error,
+	terminalReason string,
+) *ext_proc.ProcessingResponse {
+	status := 503
+	var budgetError *selection.RequestBudgetError
+	if errors.As(routingErr, &budgetError) {
+		status = 400
+		terminalReason = "request_budget_exceeded"
+		ctx.ImmediateProtocolError = llmprotocol.NewError(llmprotocol.ErrorInvalidRequest, budgetError.Code, budgetError.Message, routingErr)
+	}
+	resp := r.createErrorResponse(status, routingErr.Error())
+	if budgetError != nil {
+		// Retain exactly the client-visible error in Replay, including streams
+		// rejected before the provider has started an SSE response.
+		resp = r.encodeImmediateResponseForClient(resp, ctx)
+	}
+	if ctx.RouterReplayPluginConfig == nil && r.Config != nil {
+		ctx.RouterReplayPluginConfig = r.effectiveReplayConfigForRequest(ctx, nil)
+	}
+	r.startRouterReplay(ctx, originalModel, "", "")
+	r.updateRouterReplayStatus(ctx, status, false)
+	if immediate := resp.GetImmediateResponse(); immediate != nil {
+		r.attachRouterReplayResponse(ctx, immediate.Body, false)
+	}
+	// Failed, not aborted: the router itself rejected the request with a
+	// terminal response; aborted is reserved for streams that end early.
+	r.finalizeRouterReplay(ctx, routerreplay.LifecycleFailed, terminalReason)
+	addRouterReplayHeaderToImmediateResponse(resp, ctx.RouterReplayID)
+	return resp
+}
+
+func applyRequestContextEstimate(snapshot *requestSignalSnapshot, ctx *RequestContext) {
+	if snapshot == nil || ctx == nil {
+		return
+	}
+	ctx.VSRContextTokenCount = snapshot.ContextTokenFloor
+	ctx.VSRContextTextBytes = snapshot.ContextTextBytes
+	ctx.VSRContextEquivalentBytes = snapshot.ContextEquivalentBytes
+	ctx.VSRContextHasNonText = snapshot.ContextHasNonText
+}
+
+func (r *OpenAIRouter) applyCacheChecks(
+	ctx *RequestContext,
+	selectedModel string,
+	decisionName string,
+) *ext_proc.ProcessingResponse {
+	if response, shouldReturn := r.handleCaching(ctx, decisionName, selectedModel); shouldReturn {
+		logging.ComponentDebugEvent("extproc", "cache_short_circuit", map[string]interface{}{
+			"request_id": ctx.RequestID,
+			"decision":   decisionName,
+		})
+		return response
+	}
+	return nil
+}
+
+func (r *OpenAIRouter) prepareRequestForModelRouting(
+	request *llmprotocol.Request,
+	userContent string,
+	ctx *RequestContext,
+) (*llmprotocol.Request, *ext_proc.ProcessingResponse, error) {
+	if request == nil {
+		return nil, nil, status.Error(codes.InvalidArgument, "neutral inference request is unavailable")
+	}
+	populateSessionTransitionFields(ctx)
+	memErr := r.handleMemoryRetrieval(ctx, userContent, request)
+	if memErr != nil {
+		logging.ComponentWarnEvent("extproc", "memory_retrieval_failed", map[string]interface{}{
+			"request_id": ctx.RequestID,
+			"error":      memErr.Error(),
+			"fallback":   "continue_without_memory",
+		})
+	}
+	if compressionErr := r.applyContextTransformationPlan(ctx, request); compressionErr != nil {
+		return nil, r.createErrorResponse(500, "Context compression failed under fail_closed policy"), nil
+	}
+	return request, nil, nil
+}

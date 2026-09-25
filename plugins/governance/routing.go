@@ -25,13 +25,20 @@ type ScopeLevel struct {
 // RoutingDecision is the output of routing rule evaluation
 // Represents which provider/model to route to and fallback chain
 type RoutingDecision struct {
-	Provider        string   // Primary provider (e.g., "openai", "azure")
-	Model           string   // Model to use (or empty to use original)
+	SemanticRouting bool     // true when cel_expression is the reserved semantic_routing == true handoff
+	Provider        string   // Primary provider (e.g., "openai", "azure"); unused for semantic routing
+	Model           string   // Model to use (or empty to use original); unused for semantic routing
 	KeyID           string   // Optional: pin a specific API key by UUID ("" = no pin)
-	Fallbacks       []string // Fallback chain: ["provider/model", ...]
+	Fallbacks       []string // Pin: fallback chain. Semantic: optional preference override.
 	MatchedRuleID   string   // ID of the rule that matched
 	MatchedRuleName string   // Name of the rule that matched
 	Block           bool     // When true, the request should be rejected with 403
+}
+
+// IsSemanticRouting reports whether the matched CEL rule requested semantic
+// selection rather than pinning a provider/model.
+func (d *RoutingDecision) IsSemanticRouting() bool {
+	return d != nil && d.SemanticRouting
 }
 
 // RoutingContext holds all data needed for routing rule evaluation
@@ -79,7 +86,7 @@ func NewRoutingEngine(store GovernanceStore, logger schemas.Logger, chainMaxDept
 }
 
 // EvaluateRoutingRules evaluates routing rules for a given context and returns a routing decision.
-// Implements scope precedence: VirtualKey > Team > Customer > Global (first-match-wins within each iteration).
+// Implements scope precedence: VirtualKey > Org (ancestors) > Global (first-match-wins within each iteration).
 // When a matched rule has chain_rule=true, the resolved provider/model is fed back into the evaluator
 // and the full scope chain is re-evaluated with the updated context. This repeats until:
 //  1. No rule matches the current context
@@ -93,6 +100,11 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 	re.logger.Debug("[RoutingEngine] Starting rule evaluation for provider=%s, model=%s", routingCtx.Provider, routingCtx.Model)
 	re.stampRoutingSourceModelIDsContext(ctx, routingCtx)
+
+	vkID := "none"
+	if routingCtx.VirtualKey != nil {
+		vkID = routingCtx.VirtualKey.ID
+	}
 
 	// Mutable provider/model that advances through the chain; all other context fields are immutable.
 	currentProvider := routingCtx.Provider
@@ -132,6 +144,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 		fmt.Sprintf("Evaluating routing rules for model=%s, provider=%s, requestType=%s", routingCtx.Model, routingCtx.Provider, routingCtx.RequestType))
 	ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Scope chain: %v", scopeChainToStrings(scopeChain)))
+	re.logger.Info("[RoutingEngine] Evaluating vk=%s provider=%s model=%s scopes=%d", vkID, routingCtx.Provider, routingCtx.Model, len(rulesPerScope))
 
 	var finalDecision *RoutingDecision
 
@@ -208,37 +221,16 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 				re.logger.Debug("[RoutingEngine] Rule %s evaluation result: matched=%v", rule.Name, matched)
 
 				if !matched {
+					re.logger.Info("[RoutingEngine] NO MATCH vk=%s rule=%q cel=%q", vkID, rule.Name, rule.CelExpression)
 					ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 						fmt.Sprintf("Rule '%s' [%s] → no match (%s)", rule.Name, rule.CelExpression, buildNoMatchContext(rule.CelExpression, variables)))
 					continue
 				}
 
-				provider := string(currentProvider)
-				if rule.Provider != nil && *rule.Provider != "" {
-					provider = *rule.Provider
-				}
-
-				model := currentModel
-				if rule.Model != nil && *rule.Model != "" {
-					model = *rule.Model
-				}
-
-				keyID := ""
-				if rule.KeyID != nil {
-					keyID = *rule.KeyID
-				}
-
-				stepDecision = &RoutingDecision{
-					Provider:        provider,
-					Model:           model,
-					KeyID:           keyID,
-					Fallbacks:       rule.ParsedFallbacks,
-					MatchedRuleID:   rule.ID,
-					MatchedRuleName: rule.Name,
-					Block:           isCostCeilingExpression(rule.CelExpression),
-				}
+				stepDecision = routingDecisionFromMatchedRule(rule, currentProvider, currentModel)
 				stampRoutingQueryParamContext(ctx, rule.CelExpression, variables)
 				matchedRule = rule
+				re.logger.Info("[RoutingEngine] MATCH vk=%s rule=%q cel=%q semantic=%t", vkID, rule.Name, rule.CelExpression, stepDecision.IsSemanticRouting())
 				break outerLoop
 			}
 		}
@@ -254,14 +246,21 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 		ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingRuleName, stepDecision.MatchedRuleName)
 
 		chainSuffix := ""
-		if matchedRule.ChainRule {
+		if matchedRule.ChainRule && !stepDecision.IsSemanticRouting() {
 			chainSuffix = " [chain_rule=true, continuing]"
 		}
-		re.logger.Debug("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
-		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target: provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
+		if stepDecision.IsSemanticRouting() {
+			re.logger.Info("[RoutingEngine] 0/handoff: rule %q matched cel=%q; handing off to semantic routing%s", matchedRule.Name, matchedRule.CelExpression, chainSuffix)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("0/handoff: Rule '%s' [%s] → matched; handing off to semantic routing%s", matchedRule.Name, matchedRule.CelExpression, chainSuffix))
+		} else {
+			re.logger.Info("[RoutingEngine] Rule matched! Selected target: provider=%s, model=%s, fallbacks=%v%s", stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo, fmt.Sprintf("Rule '%s' [%s] → matched, selected target: provider=%s, model=%s, fallbacks=%v%s", matchedRule.Name, matchedRule.CelExpression, stepDecision.Provider, stepDecision.Model, stepDecision.Fallbacks, chainSuffix))
+		}
 
 		// TERMINATION 2: Rule is terminal (chain_rule=false, the default).
-		if !matchedRule.ChainRule {
+		// Semantic selection is always terminal — the model is chosen after this
+		// function returns, so chaining cannot re-enter CEL with a resolved target.
+		if !matchedRule.ChainRule || stepDecision.IsSemanticRouting() {
 			break
 		}
 
@@ -274,16 +273,22 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	}
 
 	if finalDecision == nil {
-		re.logger.Debug("[RoutingEngine] No routing rule matched, using default routing")
+		re.logger.Info("[RoutingEngine] SUMMARY: no CEL match vk=%s; keeping %s/%s", vkID, routingCtx.Provider, routingCtx.Model)
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 			fmt.Sprintf("SUMMARY: No routing rule matched; using %s/%s", routingCtx.Provider, routingCtx.Model))
+	} else if finalDecision.IsSemanticRouting() {
+		re.logger.Info("[RoutingEngine] SUMMARY: Rule %q matched; moving to semantic routing", finalDecision.MatchedRuleName)
+		ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
+			fmt.Sprintf("SUMMARY: Rule '%s' matched; moving to semantic routing", finalDecision.MatchedRuleName))
 	} else {
 		requested := fmt.Sprintf("%s/%s", routingCtx.Provider, routingCtx.Model)
 		resolved := fmt.Sprintf("%s/%s", finalDecision.Provider, finalDecision.Model)
 		if routingCtx.Model != finalDecision.Model || string(routingCtx.Provider) != finalDecision.Provider {
+			re.logger.Info("[RoutingEngine] SUMMARY: pin via %q → %s (vk=%s, requested %s)", finalDecision.MatchedRuleName, resolved, vkID, requested)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 				fmt.Sprintf("SUMMARY: Requested %s → routed to %s via rule '%s'", requested, resolved, finalDecision.MatchedRuleName))
 		} else {
+			re.logger.Info("[RoutingEngine] SUMMARY: pin via %q kept %s (vk=%s)", finalDecision.MatchedRuleName, resolved, vkID)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, schemas.LogLevelInfo,
 				fmt.Sprintf("SUMMARY: Rule '%s' matched; kept %s", finalDecision.MatchedRuleName, resolved))
 		}
@@ -319,6 +324,36 @@ func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgAncestors
 	return chain
 }
 
+// routingDecisionFromMatchedRule builds the Layer 1 result for a CEL match.
+// The reserved semantic_routing == true expression hands off without applying pin fields.
+func routingDecisionFromMatchedRule(rule *configstoreTables.TableRoutingRule, currentProvider schemas.ModelProvider, currentModel string) *RoutingDecision {
+	isSemanticRouting := configstoreTables.IsSemanticRoutingCELExpression(rule.CelExpression)
+	provider := string(currentProvider)
+	model := currentModel
+	keyID := ""
+	if !isSemanticRouting {
+		if rule.Provider != nil && *rule.Provider != "" {
+			provider = *rule.Provider
+		}
+		if rule.Model != nil && *rule.Model != "" {
+			model = *rule.Model
+		}
+		if rule.KeyID != nil {
+			keyID = *rule.KeyID
+		}
+	}
+	return &RoutingDecision{
+		SemanticRouting: isSemanticRouting,
+		Provider:        provider,
+		Model:           model,
+		KeyID:           keyID,
+		Fallbacks:       rule.ParsedFallbacks,
+		MatchedRuleID:   rule.ID,
+		MatchedRuleName: rule.Name,
+		Block:           isCostCeilingExpression(rule.CelExpression),
+	}
+}
+
 // evaluateCELExpression evaluates a compiled CEL program with given variables
 func evaluateCELExpression(program cel.Program, variables map[string]any) (bool, error) {
 	if program == nil {
@@ -346,30 +381,28 @@ func evaluateCELExpression(program cel.Program, variables map[string]any) (bool,
 
 // extractRoutingVariables builds a map of CEL variables from routing context
 // This map is used to evaluate CEL expressions in routing rules
-func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error) {
+func extractRoutingVariables(ctx *RoutingContext) (map[string]any, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("routing context cannot be nil")
 	}
 
-	variables := make(map[string]interface{})
+	variables := make(map[string]any)
 
 	// Basic request context
 	variables["model"] = ctx.Model
 	variables["provider"] = string(ctx.Provider)
 	variables["request_type"] = ctx.RequestType // Normalized request type (e.g., "chat_completion", "embedding")
 
-	// Headers and params - normalize headers to lowercase keys for case-insensitive CEL matching
-	// This allows CEL expressions like headers["content-type"] to work regardless of how the header was sent
+	// Headers and params - normalize keys to lowercase for case-insensitive CEL matching
+	// (e.g. headers["content-type"] works regardless of how the header was sent).
 	normalizedHeaders := make(map[string]string)
 	if ctx.Headers != nil {
 		for k, v := range ctx.Headers {
-			// Store with lowercase key for case-insensitive matching in CEL
 			normalizedHeaders[strings.ToLower(k)] = v
 		}
 	}
 	variables["headers"] = normalizedHeaders
 
-	// Normalize query params to lowercase keys for case-insensitive CEL matching
 	normalizedParams := make(map[string]string)
 	if ctx.QueryParams != nil {
 		for k, v := range ctx.QueryParams {
@@ -378,18 +411,13 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]interface{}, error
 	}
 	variables["params"] = normalizedParams
 
-	// Extract VirtualKey context if available
 	if ctx.VirtualKey != nil {
 		variables["virtual_key_id"] = ctx.VirtualKey.ID
 		variables["virtual_key_name"] = ctx.VirtualKey.Name
+		variables["org_id"] = ctx.VirtualKey.GovernanceScopeOrgIDString()
 	} else {
 		variables["virtual_key_id"] = ""
 		variables["virtual_key_name"] = ""
-	}
-
-	if ctx.VirtualKey != nil {
-		variables["org_id"] = ctx.VirtualKey.GovernanceScopeOrgIDString()
-	} else {
 		variables["org_id"] = ""
 	}
 	// Deprecated CEL variables kept for backward compatibility with existing rules.

@@ -21,5 +21,42 @@
   "logs_store": {
     "enabled": true,
     "type": "postgres"
-  }
+  },
+  "vector_store": {
+    "enabled": true,
+    "type": "weaviate",
+    "config": {
+      "scheme": "http",
+      "host": "localhost:9000"
+    }
+  },
+  "plugins": [
+    {
+      "name": "semantic-router",
+      "enabled": true,
+      "config": {
+        "recipe_file": "plugins/governance/vllm_sr/config.yaml",
+        "entrypoint": "vllm-sr/auto"
+      }
+    },
+    {
+      "name": "governance",
+      "enabled": true,
+      "config": {
+        "semantic_routing": {
+          "enabled": true,
+          "default_for_all": true,
+          "router": {
+            "mode": "plugin",
+            "timeout_ms": 2000
+          },
+          "task_weight": 1.0,
+          "tier_weight": 1.0,
+          "preference_weight": 0.5,
+          "cost_weight": 0.5,
+          "context_weight": 0.2
+        }
+      }
+    }
+  ]
 }

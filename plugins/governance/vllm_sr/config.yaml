@@ -1,0 +1,512 @@
+version: v0.3
+
+# Preview-only recipe for Bifrost Layer 2.
+#
+# Decisions classify the request and declare the model qualities it needs.
+# They never name models: inventory is the Bifrost model catalog intersected
+# with the virtual key, applied by governance after Preview returns.
+#
+# Signal budget: every bound rule here is heuristic and runs in-process with
+# no model artifacts. Learned complexity/domain/safety heads are omitted so
+# plugin startup does not require Candle artifacts.
+
+providers:
+  defaults:
+    model: bifrost/loopback
+  models:
+    # Minimal registry so the runtime has a default model and warmup succeeds.
+    # Never dispatched: Bifrost performs generation.
+    - name: bifrost/loopback
+      provider_model_id: bifrost/loopback
+      backend_refs:
+        - name: bifrost
+          provider: openai
+          endpoint: 127.0.0.1:8082
+          protocol: http
+
+routing:
+  strategy: priority
+
+  signals:
+    keywords:
+      - name: simple_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - quick answer
+          - answer briefly
+          - one sentence
+          - simple explanation
+          - briefly define
+          - summarize briefly
+          - what is
+          - what's
+          - whats
+          - who is
+          - when was
+          - how many
+          - define
+          - meaning of
+          - capital of
+
+      - name: code_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - \bcode\b
+          - \bfunction\b
+          - \bimplement\b
+          - \bdebug\b
+          - \brefactor\b
+          - \bapi\b
+          - \bsql\b
+          - \bpython\b
+          - \bjava\b
+          - \bgolang\b
+          - \bgo\b
+          - \btypescript\b
+          - \bjavascript\b
+          - \brust\b
+          - \bkubernetes\b
+          - \bdocker\b
+          - \balgorithm\b
+          - \bbug\b
+          - stack trace
+          - unit test
+          - \bsnippet\b
+          - \bclass\b
+          - \bmethod\b
+          - compile error
+
+      - name: deep_reasoning_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - step by step
+          - \bprove\b
+          - \bproof\b
+          - \btheorem\b
+          - \blemma\b
+          - \bderive\b
+          - \brigorous\b
+          - root cause
+          - first principles
+          - compare trade-offs
+          - compare tradeoffs
+          - trade-off
+          - distributed system
+          - system architecture
+          - design a system
+          - \bintegral\b
+          - \bproof by\b
+          - by contradiction
+          - asymptotic
+          - time complexity
+          - \bO\(n
+          - analyze the
+          - evaluate the
+          - why does
+
+      - name: agentic_request
+        operator: OR
+        method: regex
+        case_sensitive: false
+        keywords:
+          - use tools
+          - function call
+          - tool call
+          - \bagent\b
+          - multi-step
+          - \bworkflow\b
+          - \bplan and execute\b
+          - orchestrat
+
+    conversation:
+      - name: has_tools
+        description: Request includes at least one tool definition.
+        feature:
+          type: exists
+          source:
+            type: tool_definition
+
+      - name: multi_turn
+        description: Follow-up conversation with more than one user turn.
+        feature:
+          type: count
+          source:
+            type: message
+            role: user
+        predicate:
+          gte: 2
+
+    structure:
+      - name: many_questions
+        description: Several distinct questions in a single prompt.
+        feature:
+          type: count
+          source:
+            type: regex
+            pattern: \?
+        predicate:
+          gte: 3
+
+      - name: ordered_workflow
+        description: Prompt describes an ordered multi-stage procedure.
+        feature:
+          type: sequence
+          source:
+            type: sequence
+            sequences:
+              - [first, then]
+              - [step 1, step 2]
+              - [begin by, next]
+              - [phase 1, phase 2]
+
+      - name: dense_constraints
+        description: Prompt carries many explicit requirements to satisfy at once.
+        feature:
+          type: count
+          source:
+            type: keyword_set
+            case_sensitive: false
+            keywords:
+              - must
+              - should
+              - ensure
+              - constraint
+              - requirement
+              - do not
+              - avoid
+              - without using
+        predicate:
+          gte: 3
+
+      - name: large_input
+        description: Raw prompt size that warrants a larger context window.
+        feature:
+          type: count
+          source:
+            type: text_bytes
+        predicate:
+          gte: 6000
+
+    language:
+      - name: en
+        threshold: 0.6
+      - name: es
+        threshold: 0.6
+      - name: fr
+        threshold: 0.6
+      - name: de
+        threshold: 0.6
+      - name: ja
+        threshold: 0.6
+      - name: zh
+        threshold: 0.6
+      - name: hi
+        threshold: 0.6
+
+    context:
+      - name: long_context
+        min_tokens: "1500"
+        max_tokens: "1M"
+        description: A large request that needs substantial context headroom.
+
+    input_modality:
+      - name: image_input
+        description: Request contains an image content part.
+        modality: image
+      - name: video_input
+        description: Request contains a video content part.
+        modality: video
+
+  decisions:
+    # ============================================================
+    # DEEP REASONING
+    # ============================================================
+    - name: deep-reasoning
+      description: >
+        Requests requiring deep analysis, rigorous reasoning, mathematical
+        reasoning, architecture analysis, root-cause analysis, or complex
+        trade-off evaluation.
+      priority: 500
+      rules:
+        operator: OR
+        conditions:
+          - type: keyword
+            name: deep_reasoning_request
+          - type: structure
+            name: dense_constraints
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+        prefer:
+          capabilities:
+            reasoning: 0.35
+            analysis: 0.25
+            mathematics: 0.15
+            architecture: 0.15
+            coding: 0.10
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.50
+          quality: 0.35
+          latency: 0.10
+          cost: 0.05
+
+    # ============================================================
+    # CODE
+    # ============================================================
+    - name: code
+      description: >
+        Code generation, debugging, implementation, refactoring, code review,
+        programming questions, API implementation and software engineering.
+      priority: 450
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: code_request
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+        prefer:
+          capabilities:
+            coding: 0.30
+            code_generation: 0.20
+            debugging: 0.20
+            code_review: 0.10
+            reasoning: 0.10
+            software_engineering: 0.10
+        dynamic_features:
+          language: true
+          framework: true
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.50
+          quality: 0.25
+          latency: 0.15
+          cost: 0.10
+
+    # ============================================================
+    # AGENTIC
+    # ============================================================
+    - name: agentic
+      description: >
+        Requests involving tools, function calling, planning, orchestration,
+        multi-step execution or autonomous workflows.
+      priority: 440
+      rules:
+        operator: OR
+        conditions:
+          - type: conversation
+            name: has_tools
+          - type: keyword
+            name: agentic_request
+          - type: structure
+            name: ordered_workflow
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+          conditional:
+            - when:
+                type: conversation
+                name: has_tools
+              require:
+                tool_calling: true
+        prefer:
+          capabilities:
+            agentic: 0.30
+            planning: 0.25
+            reasoning: 0.20
+            tool_use: 0.15
+            instruction_following: 0.10
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.50
+          quality: 0.30
+          latency: 0.10
+          cost: 0.10
+
+    # ============================================================
+    # LONG CONTEXT
+    # ============================================================
+    - name: long-context
+      description: >
+        Requests where the actual prompt/context size requires substantial
+        context-window headroom.
+      priority: 400
+      rules:
+        operator: OR
+        conditions:
+          - type: context
+            name: long_context
+          - type: structure
+            name: large_input
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+        context:
+          min_tokens_from_request: true
+        prefer:
+          capabilities:
+            long_context: 0.50
+            context_understanding: 0.30
+            reasoning: 0.20
+        objectives:
+          capability_fit: 0.40
+          quality: 0.30
+          latency: 0.15
+          cost: 0.15
+
+    # ============================================================
+    # MULTI-PART
+    # ============================================================
+    - name: multi-part
+      description: >
+        Multiple independent questions or tasks within the same request.
+      priority: 350
+      rules:
+        operator: AND
+        conditions:
+          - type: structure
+            name: many_questions
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+        prefer:
+          capabilities:
+            multi_task: 0.30
+            instruction_following: 0.25
+            reasoning: 0.20
+            summarisation: 0.10
+            coding: 0.05
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.40
+          quality: 0.30
+          latency: 0.20
+          cost: 0.10
+
+    # ============================================================
+    # SIMPLE
+    # ============================================================
+    - name: simple
+      description: >
+        Short, low-complexity factual or explanatory requests where a
+        lower-latency model is sufficient.
+      priority: 300
+      rules:
+        operator: AND
+        conditions:
+          - type: keyword
+            name: simple_request
+          - operator: NOT
+            conditions:
+              - type: conversation
+                name: multi_turn
+          - operator: NOT
+            conditions:
+              - type: structure
+                name: many_questions
+          - operator: NOT
+            conditions:
+              - type: keyword
+                name: code_request
+          - operator: NOT
+            conditions:
+              - type: keyword
+                name: deep_reasoning_request
+      capability_profile:
+        require:
+          input_modalities:
+            - text
+        prefer:
+          capabilities:
+            general_knowledge: 0.25
+            instruction_following: 0.20
+            summarisation: 0.15
+            factual_qa: 0.15
+            low_complexity: 0.10
+        objectives:
+          capability_fit: 0.30
+          quality: 0.20
+          latency: 0.35
+          cost: 0.15
+
+    # ============================================================
+    # MULTIMODAL
+    # ============================================================
+    - name: multimodal
+      description: >
+        Requests containing image or video input. Modality compatibility
+        is a hard requirement before capability scoring.
+      priority: 550
+      rules:
+        operator: OR
+        conditions:
+          - type: input_modality
+            name: image_input
+          - type: input_modality
+            name: video_input
+      capability_profile:
+        require:
+          modality_from_request: true
+        prefer:
+          capabilities:
+            visual_reasoning: 0.35
+            multimodal_reasoning: 0.30
+            image_understanding: 0.20
+            video_understanding: 0.15
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.55
+          quality: 0.30
+          latency: 0.10
+          cost: 0.05
+
+    # ============================================================
+    # GENERAL FALLBACK
+    # ============================================================
+    - name: general
+      description: >
+        Default profile for requests not matching a more specific decision.
+      priority: 100
+      rules:
+        operator: AND
+        conditions: []
+      capability_profile:
+        require: {}
+        prefer:
+          capabilities:
+            general_knowledge: 0.25
+            instruction_following: 0.25
+            reasoning: 0.20
+            conversation: 0.15
+            summarisation: 0.15
+        context:
+          min_tokens_from_request: true
+        objectives:
+          capability_fit: 0.40
+          quality: 0.30
+          latency: 0.20
+          cost: 0.10
+
+global:
+  router:
+    auto_model_names: [vllm-sr/auto]
+    model_selection:
+      enabled: true

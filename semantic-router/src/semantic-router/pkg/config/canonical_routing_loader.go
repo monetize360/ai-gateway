@@ -1,0 +1,87 @@
+package config
+
+import (
+	"fmt"
+	"reflect"
+
+	"gopkg.in/yaml.v2"
+)
+
+type routingFragmentDocument struct {
+	Routing CanonicalRouting `yaml:"routing"`
+}
+
+// ParseRoutingYAMLBytes parses a routing-only YAML fragment containing the DSL-owned
+// canonical surface under `routing:`. This intentionally skips provider/global
+// cross-reference checks so DSL compile/decompile flows can round-trip fragments.
+func ParseRoutingYAMLBytes(data []byte) (*RouterConfig, error) {
+	raw, err := parseRawConfigMap(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse routing fragment: %w", err)
+	}
+	if rejectErr := rejectRemovedStructureFields(raw); rejectErr != nil {
+		return nil, rejectErr
+	}
+
+	// Fragment decoding omits infrastructure validation. Validate policy
+	// fields independently of those broader checks.
+	routing := nestedStringMap(raw["routing"])
+	for field, target := range map[string]reflect.Type{
+		"candidate_requirements": reflect.TypeOf(CandidateRequirements{}),
+		"data_policy":            reflect.TypeOf(RoutingDataPolicy{}),
+	} {
+		if err := validateKnownFields(nestedStringMap(routing[field]), target); err != nil {
+			return nil, fmt.Errorf("routing.%s: %w", field, err)
+		}
+	}
+
+	doc := &routingFragmentDocument{}
+	if err := yaml.Unmarshal(data, doc); err != nil {
+		return nil, fmt.Errorf("failed to parse routing fragment: %w", err)
+	}
+
+	if err := doc.Routing.CandidateRequirements.Validate(); err != nil {
+		return nil, err
+	}
+	cfg := DefaultGlobalConfig()
+	cfg.RoutingFragmentOnly = true
+	cfg.CandidateRequirements = doc.Routing.CandidateRequirements.Clone()
+	cfg.DataPolicy = doc.Routing.DataPolicy.Clone()
+	cfg.Decisions = copyDecisions(doc.Routing.Decisions)
+	ensureModelRefDefaults(cfg.Decisions)
+	cfg.Signals = normalizeSignals(doc.Routing.Signals, cfg.Decisions)
+	cfg.Projections = normalizeProjections(doc.Routing.Projections)
+	cfg.ModelConfig = make(map[string]ModelParams)
+
+	for _, model := range canonicalRoutingModels(doc.Routing) {
+		cfg.ModelConfig[model.Name] = ModelParams{
+			ParamSize:         model.ParamSize,
+			ContextWindowSize: model.ContextWindowSize,
+			MaxOutputTokens:   model.MaxOutputTokens,
+			Description:       model.Description,
+			Capabilities:      append([]string(nil), model.Capabilities...),
+			LoRAs:             copyLoRAAdapters(model.LoRAs),
+			Tags:              append([]string(nil), model.Tags...),
+			Modality:          model.Modality,
+		}
+	}
+
+	if cfg.VectorStore != nil {
+		cfg.VectorStore.ApplyDefaults()
+	}
+
+	if err := validateDomainContracts(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateProjectionContracts(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateDecisionContracts(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateModalityContracts(&cfg); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}

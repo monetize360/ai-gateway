@@ -1,10 +1,15 @@
-# Makefile for Monetize360 AI Gateway
+# Makefile for Bifrost
 
 # Variables
 HOST ?= localhost
 PORT ?= 8080
 APP_DIR ?=
 PROMETHEUS_LABELS ?=
+
+# air joins the binary's argv into one string and re-parses it through `sh -c`,
+# so values that may contain spaces must arrive already shell-quoted.
+AIR_APP_DIR_ARG = $(if $(APP_DIR),-app-dir "'$(abspath $(APP_DIR))'")
+AIR_PROMETHEUS_LABELS_ARG = $(if $(PROMETHEUS_LABELS),-prometheus-labels "'$(PROMETHEUS_LABELS)'")
 LOG_STYLE ?= json
 LOG_LEVEL ?= info
 TEST_REPORTS_DIR ?= test-reports
@@ -13,6 +18,7 @@ FLOW ?=
 VERSION ?= dev-build
 LOCAL ?=
 DEBUG ?=
+SEMANTIC_ROUTER_DIR ?= ./semantic-router
 
 # Colors for output
 RED=\033[0;31m
@@ -66,7 +72,7 @@ define EXPOSE_ENV
 	fi
 endef
 
-.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner
+.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner build-semantic-router-native
 
 all: help
 
@@ -77,7 +83,7 @@ include recipes/local-k8s.mk
 
 # Default target
 help: ## Show this help message
-	@$(ECHO) "$(BLUE)AI Gateway Development - Available Commands:$(NC)"
+	@$(ECHO) "$(BLUE)Bifrost Development - Available Commands:$(NC)"
 	@$(ECHO) ""
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-15s$(NC) %s\n", $$1, $$2}'
 	@$(ECHO) ""
@@ -98,11 +104,27 @@ help: ## Show this help message
 	@$(ECHO) "  PATTERN           Substring pattern to filter tests (alternative to TESTCASE)"
 	@$(ECHO) "  FLOW              E2E test flow to run: providers|virtual-keys (default: all)"
 
-cleanup-enterprise: ## No-op (web UI removed)
-	@$(ECHO) "$(YELLOW)cleanup-enterprise: UI removed; nothing to clean$(NC)"
+cleanup-enterprise: ## Clean up enterprise directories if present
+	@$(ECHO) "$(GREEN)Cleaning up enterprise...$(NC)"
+	@if [ -d "ui/app/enterprise" ]; then rm -rf ui/app/enterprise; fi
+	@$(ECHO) "$(GREEN)Enterprise cleaned up$(NC)"
 
-install-ui: ## No-op (web UI removed)
-	@$(ECHO) "$(YELLOW)install-ui: UI removed; skipping$(NC)"
+install-ui: cleanup-enterprise
+	@if [ ! -f "ui/package.json" ]; then \
+		$(ECHO) "$(YELLOW)UI package.json not present (API-only checkout); skipping npm install$(NC)"; \
+	else \
+		$(USE_NODE); \
+		which node > /dev/null || ($(ECHO) "$(RED)Error: Node.js is not installed. Please install Node.js first.$(NC)" && exit 1); \
+		which npm > /dev/null || ($(ECHO) "$(RED)Error: npm is not installed. Please install npm first.$(NC)" && exit 1); \
+		$(ECHO) "$(GREEN)Node.js $$(node -v) and npm $$(npm -v) are installed$(NC)"; \
+		if [ ! -d "ui/node_modules" ] || [ "ui/package.json" -nt "ui/node_modules/.package-lock.json" ] || [ "ui/package-lock.json" -nt "ui/node_modules/.package-lock.json" ]; then \
+			$(ECHO) "$(YELLOW)Dependencies changed, running npm ci...$(NC)"; \
+			cd ui && npm ci; \
+		else \
+			$(ECHO) "$(GREEN)UI dependencies up to date, skipping install$(NC)"; \
+		fi; \
+		$(ECHO) "$(GREEN)UI deps are in sync$(NC)"; \
+	fi
 
 install-air: ## Install air for hot reloading (if not already installed)
 	@which air > /dev/null || ($(ECHO) "$(YELLOW)Installing air for hot reloading...$(NC)" && go install github.com/air-verse/air@latest)
@@ -115,6 +137,12 @@ install-pulse: ## Install pulse for hot reloading (if not already installed)
 install-delve: ## Install delve for debugging (if not already installed)
 	@which dlv > /dev/null || ($(ECHO) "$(YELLOW)Installing delve for debugging...$(NC)" && go install github.com/go-delve/delve/cmd/dlv@latest)
 	@$(ECHO) "$(GREEN)Delve is ready$(NC)"
+
+build-semantic-router-native: ## Build CPU Semantic Router native libraries (same flags as transports/Dockerfile.local)
+	@cd "$(SEMANTIC_ROUTER_DIR)/candle-binding" && env -u CARGO_TARGET_DIR cargo build --release --no-default-features
+	@cd "$(SEMANTIC_ROUTER_DIR)/ml-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@cd "$(SEMANTIC_ROUTER_DIR)/nlp-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@cd "$(SEMANTIC_ROUTER_DIR)/onnx-binding" && env -u CARGO_TARGET_DIR cargo build --release --lib --locked --no-default-features --features dynamic
 
 install-gotestsum: ## Install gotestsum for test reporting (if not already installed)
 	@which gotestsum > /dev/null || ($(ECHO) "$(YELLOW)Installing gotestsum for test reporting...$(NC)" && go install gotest.tools/gotestsum@latest)
@@ -139,22 +167,31 @@ install-junit-viewer: ## Install junit-viewer for HTML report generation (if not
 		$(ECHO) "$(YELLOW)CI environment detected, skipping junit-viewer installation$(NC)"; \
 	fi
 
-dev: install-air setup-workspace $(if $(DEBUG),install-delve) ## Start API development server (hot reload)
+dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Start complete development environment (UI + API with proxy; API-only if ui/package.json missing)
 	@$(EXPOSE_ENV); \
 	set +m; \
+	ui_pid=""; \
 	api_pid=""; \
+	has_ui=0; \
+	if [ -f "ui/package.json" ]; then has_ui=1; fi; \
 	cleanup() { \
-		$(ECHO) "$(YELLOW)[make dev] cleanup started; api_pid=$$api_pid$(NC)"; \
+		$(ECHO) "$(YELLOW)[make dev] cleanup started; ui_pid=$$ui_pid api_pid=$$api_pid$(NC)"; \
 		trap - EXIT INT TERM HUP; \
-		if [ -n "$$api_pid" ]; then \
-			children="$$(pgrep -P "$$api_pid" 2>/dev/null || true)"; \
-			$(ECHO) "$(YELLOW)[make dev] sending TERM to pid $$api_pid and children: $${children:-none}$(NC)"; \
-			kill -TERM $$children "$$api_pid" 2>/dev/null || true; \
-			sleep 1; \
-			children="$$(pgrep -P "$$api_pid" 2>/dev/null || true)"; \
-			$(ECHO) "$(YELLOW)[make dev] sending KILL to pid $$api_pid and remaining children: $${children:-none}$(NC)"; \
-			kill -KILL $$children "$$api_pid" 2>/dev/null || true; \
-		fi; \
+		for pid in "$$ui_pid" "$$api_pid"; do \
+			if [ -n "$$pid" ]; then \
+				children="$$(pgrep -P "$$pid" 2>/dev/null || true)"; \
+				$(ECHO) "$(YELLOW)[make dev] sending TERM to pid $$pid and children: $${children:-none}$(NC)"; \
+				kill -TERM $$children "$$pid" 2>/dev/null || true; \
+			fi; \
+		done; \
+		sleep 1; \
+		for pid in "$$ui_pid" "$$api_pid"; do \
+			if [ -n "$$pid" ]; then \
+				children="$$(pgrep -P "$$pid" 2>/dev/null || true)"; \
+				$(ECHO) "$(YELLOW)[make dev] sending KILL to pid $$pid and remaining children: $${children:-none}$(NC)"; \
+				kill -KILL $$children "$$pid" 2>/dev/null || true; \
+			fi; \
+		done; \
 		$(ECHO) "$(YELLOW)[make dev] waiting for background jobs to exit...$(NC)"; \
 		wait 2>/dev/null || true; \
 		$(ECHO) "$(GREEN)[make dev] cleanup completed.$(NC)"; \
@@ -166,52 +203,80 @@ dev: install-air setup-workspace $(if $(DEBUG),install-delve) ## Start API devel
 	}; \
 	trap cleanup EXIT; \
 	trap stop_dev INT TERM HUP; \
-	$(ECHO) "$(GREEN)Starting AI gateway development server...$(NC)"; \
-	$(ECHO) "$(CYAN)API: http://localhost:$(PORT)$(NC)"; \
-	if [ -n "$(DEBUG)" ]; then \
-		$(ECHO) "$(CYAN)Debugger (delve) listening on port 2345$(NC)"; \
+	$(ECHO) "$(GREEN)Starting Bifrost development environment...$(NC)"; \
+	if [ "$$has_ui" = "1" ]; then \
+		$(ECHO) "$(YELLOW)This will start:$(NC)"; \
+		$(ECHO) "  1. UI development server (localhost:3002)"; \
+		$(ECHO) "  2. API server with UI proxy (localhost:$(PORT))"; \
+		$(ECHO) "$(CYAN)Access everything at: http://localhost:$(PORT)$(NC)"; \
+	else \
+		$(ECHO) "$(YELLOW)UI package.json not found — starting API only$(NC)"; \
+		$(ECHO) "  API server (localhost:$(PORT))"; \
+		$(ECHO) "$(CYAN)Access API at: http://localhost:$(PORT)$(NC)"; \
 	fi; \
-	mkdir -p transports/bifrost-http/ui; \
-	if [ ! -f "transports/bifrost-http/ui/.gitkeep" ] && [ ! -f "transports/bifrost-http/ui/.tmp" ]; then \
-		touch transports/bifrost-http/ui/.gitkeep; \
+	if [ -n "$(DEBUG)" ]; then \
+		$(ECHO) "$(CYAN)  Debugger (delve) listening on port 2345$(NC)"; \
+	fi; \
+	if [ ! -d "transports/bifrost-http/ui" ]; then \
+		$(ECHO) "$(YELLOW)Creating transports/bifrost-http/ui directory...$(NC)"; \
+		mkdir -p transports/bifrost-http/ui; \
+		touch transports/bifrost-http/ui/.tmp; \
 	fi; \
 	$(ECHO) ""; \
+	if [ "$$has_ui" = "1" ]; then \
+		$(ECHO) "$(YELLOW)Starting UI development server...$(NC)"; \
+		$(USE_NODE); if [ -n "$(DISABLE_PROFILER)" ]; then \
+			$(ECHO) "$(CYAN)DevProfiler disabled for testing$(NC)"; \
+			(cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev) & \
+		else \
+			(cd ui && npm run dev) & \
+		fi; \
+		ui_pid="$$!"; \
+		$(ECHO) "$(YELLOW)[make dev] UI dev server started with pid $$ui_pid$(NC)"; \
+		sleep 3; \
+	fi; \
 	$(ECHO) "$(YELLOW)Starting API server...$(NC)"; \
 	$(MAKE) setup-workspace >/dev/null; \
+	ui_dev_env=""; \
+	if [ "$$has_ui" = "1" ]; then ui_dev_env="BIFROST_UI_DEV=true"; fi; \
 	if [ -n "$(DEBUG)" ]; then \
 		$(ECHO) "$(CYAN)Starting with air + delve debugger on port 2345...$(NC)"; \
 		$(ECHO) "$(YELLOW)Attach your debugger to localhost:2345$(NC)"; \
-		(cd transports/bifrost-http && air -c .air.debug.toml -- \
+		(cd transports/bifrost-http && env $$ui_dev_env air -c .air.debug.toml -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \
 			-log-level "$(LOG_LEVEL)" \
-			$(if $(PROMETHEUS_LABELS),-prometheus-labels "$(PROMETHEUS_LABELS)") \
-			$(if $(APP_DIR),-app-dir "$(abspath $(APP_DIR))")) & \
+			$(AIR_PROMETHEUS_LABELS_ARG) \
+			$(AIR_APP_DIR_ARG)) & \
 	else \
-		(cd transports/bifrost-http && air -c .air.toml -- \
+		(cd transports/bifrost-http && env $$ui_dev_env air -c .air.toml -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \
 			-log-level "$(LOG_LEVEL)" \
-			$(if $(PROMETHEUS_LABELS),-prometheus-labels "$(PROMETHEUS_LABELS)") \
-			$(if $(APP_DIR),-app-dir "$(abspath $(APP_DIR))")) & \
+			$(AIR_PROMETHEUS_LABELS_ARG) \
+			$(AIR_APP_DIR_ARG)) & \
 	fi; \
 	api_pid="$$!"; \
 	$(ECHO) "$(YELLOW)[make dev] API dev server started with pid $$api_pid$(NC)"; \
-	wait "$$api_pid"; \
-	$(ECHO) "$(YELLOW)[make dev] API process exited; running cleanup...$(NC)"; \
+	if [ "$$has_ui" = "1" ]; then \
+		while kill -0 "$$ui_pid" 2>/dev/null && kill -0 "$$api_pid" 2>/dev/null; do sleep 1; done; \
+	else \
+		while kill -0 "$$api_pid" 2>/dev/null; do sleep 1; done; \
+	fi; \
+	$(ECHO) "$(YELLOW)[make dev] one of the dev processes exited; running cleanup...$(NC)"; \
 	cleanup; \
 	exit 1
 
-dev-pulse: install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start API development server using pulse for hot reloading
+dev-pulse: install-ui install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start complete development environment using pulse for hot reloading
 	@$(EXPOSE_ENV); \
 	set -m; \
 	cleanup() { \
 		trap - EXIT INT TERM HUP; \
-		kill %1 2>/dev/null || true; \
+		kill %1 %2 2>/dev/null || true; \
 		sleep 1; \
-		kill -KILL %1 2>/dev/null || true; \
+		kill -KILL %1 %2 2>/dev/null || true; \
 		wait 2>/dev/null || true; \
 	}; \
 	stop_dev() { \
@@ -220,22 +285,34 @@ dev-pulse: install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start A
 	}; \
 	trap cleanup EXIT; \
 	trap stop_dev INT TERM HUP; \
-	$(ECHO) "$(GREEN)Starting AI gateway development server (pulse)...$(NC)"; \
-	$(ECHO) "$(CYAN)API: http://localhost:$(PORT)$(NC)"; \
+	$(ECHO) "$(GREEN)Starting Bifrost complete development environment (pulse)...$(NC)"; \
+	$(ECHO) "$(YELLOW)This will start:$(NC)"; \
+	$(ECHO) "  1. UI development server (localhost:3002)"; \
+	$(ECHO) "  2. API server with UI proxy (localhost:$(PORT))"; \
+	$(ECHO) "$(CYAN)Access everything at: http://localhost:$(PORT)$(NC)"; \
 	if [ -n "$(DEBUG)" ]; then \
-		$(ECHO) "$(CYAN)Debugger (delve) listening on port 2345$(NC)"; \
+		$(ECHO) "$(CYAN)  3. Debugger (delve) listening on port 2345$(NC)"; \
 	fi; \
-	mkdir -p transports/bifrost-http/ui; \
-	if [ ! -f "transports/bifrost-http/ui/.gitkeep" ] && [ ! -f "transports/bifrost-http/ui/.tmp" ]; then \
-		touch transports/bifrost-http/ui/.gitkeep; \
+	if [ ! -d "transports/bifrost-http/ui" ]; then \
+		$(ECHO) "$(YELLOW)Creating transports/bifrost-http/ui directory...$(NC)"; \
+		mkdir -p transports/bifrost-http/ui; \
+		touch transports/bifrost-http/ui/.tmp; \
 	fi; \
 	$(ECHO) ""; \
-	$(ECHO) "$(YELLOW)Starting API server...$(NC)"; \
+	$(ECHO) "$(YELLOW)Starting UI development server...$(NC)"; \
+	$(USE_NODE); if [ -n "$(DISABLE_PROFILER)" ]; then \
+		$(ECHO) "$(CYAN)DevProfiler disabled for testing$(NC)"; \
+		(cd ui && BIFROST_DISABLE_PROFILER=1 npm run dev) & \
+	else \
+		(cd ui && npm run dev) & \
+	fi; \
+	sleep 3; \
+	$(ECHO) "$(YELLOW)Starting API server with UI proxy...$(NC)"; \
 	$(MAKE) setup-workspace >/dev/null; \
 	if [ -n "$(DEBUG)" ]; then \
 		$(ECHO) "$(CYAN)Starting with pulse + delve debugger on port 2345...$(NC)"; \
 		$(ECHO) "$(YELLOW)Attach your debugger to localhost:2345$(NC)"; \
-		PORT="$(PORT)" pulse -- \
+		PORT="$(PORT)" BIFROST_UI_DEV=true pulse -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \
@@ -243,7 +320,7 @@ dev-pulse: install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start A
 			$(if $(PROMETHEUS_LABELS),-prometheus-labels "$(PROMETHEUS_LABELS)") \
 			$(if $(APP_DIR),-app-dir "$(abspath $(APP_DIR))") & \
 	else \
-		PORT="$(PORT)" pulse -- \
+		PORT="$(PORT)" BIFROST_UI_DEV=true pulse -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \
@@ -251,14 +328,22 @@ dev-pulse: install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start A
 			$(if $(PROMETHEUS_LABELS),-prometheus-labels "$(PROMETHEUS_LABELS)") \
 			$(if $(APP_DIR),-app-dir "$(abspath $(APP_DIR))") & \
 	fi; \
-	wait; \
+	while [ "$$(jobs -r | wc -l | tr -d ' ')" -eq 2 ]; do sleep 1; done; \
 	cleanup; \
 	exit 1
 
-build-ui: ## No-op (web UI removed)
-	@$(ECHO) "$(YELLOW)build-ui: UI removed; skipping$(NC)"
+build-ui: install-ui ## Build ui (skipped when ui/package.json is absent)
+	@if [ ! -f "ui/package.json" ]; then \
+		$(ECHO) "$(YELLOW)UI package.json not present; ensuring embed stub and skipping UI build$(NC)"; \
+		mkdir -p transports/bifrost-http/ui; \
+		touch transports/bifrost-http/ui/.gitkeep; \
+	else \
+		$(ECHO) "$(GREEN)Building ui...$(NC)"; \
+		rm -rf ui/.next; \
+		$(USE_NODE); cd ui && npm run build && npm run copy-build; \
+	fi
 
-build: ## Build bifrost-http binary
+build: build-ui ## Build bifrost-http binary
 	@if [ -n "$(LOCAL)" ]; then \
 		$(ECHO) "$(GREEN)╔═══════════════════════════════════════════════╗$(NC)"; \
 		$(ECHO) "$(GREEN)║  Building bifrost-http with local go.work...  ║$(NC)"; \
@@ -372,7 +457,7 @@ _build-with-docker: # Internal target for Docker-based cross-compilation
 		exit 1; \
 	fi
 
-docker-image: ## Build Docker image (LOCAL=1 to use Dockerfile.local)
+docker-image: build-ui ## Build Docker image (LOCAL=1 to use Dockerfile.local)
 	@$(ECHO) "$(GREEN)Building Docker image...$(NC)"
 	$(eval GIT_SHA=$(shell git rev-parse --short HEAD))
 	$(eval DOCKERFILE=$(if $(LOCAL),transports/Dockerfile.local,transports/Dockerfile))
@@ -392,8 +477,11 @@ docker-run: ## Run Docker container (Usage: make docker-run [CONFIG=path/to/conf
 	fi; \
 	docker run -e APP_PORT=$(PORT) -e APP_HOST=0.0.0.0 -p $(PORT):$(PORT) -e LOG_LEVEL=$(LOG_LEVEL) -e LOG_STYLE=$(LOG_STYLE) -v $(shell pwd):/app/data $$CONFIG_MOUNT bifrost
 
-docs: ## No-op (upstream Mintlify docs removed)
-	@$(ECHO) "$(YELLOW)docs: documentation tree removed; skipping$(NC)"
+docs: ## Prepare local docs (bundles OpenAPI spec then starts Mintlify dev server)
+	@$(ECHO) "$(GREEN)Bundling OpenAPI spec...$(NC)"
+	@cd docs/openapi && python3 bundle.py
+	@$(ECHO) "$(GREEN)Preparing local docs...$(NC)"
+	@cd docs && npx --yes mintlify@latest dev
 
 run: build ## Build and run bifrost-http (no hot reload)
 	@$(ECHO) "$(GREEN)Running bifrost-http...$(NC)"
@@ -1492,15 +1580,29 @@ fmt: ## Format Go code
 	@gofmt -s -w .
 	@goimports -w .
 
-format: ## Format Go code (UI formatting removed)
-	@$(ECHO) "$(GREEN)Formatting Go code...$(NC)"
-	@gofmt -s -w .
-	@goimports -w . 2>/dev/null || true
+format: ## Format code (Usage: make format ui)
+ifeq (ui,$(filter ui,$(MAKECMDGOALS)))
+	@$(ECHO) "$(GREEN)Formatting UI code...$(NC)"
+	@cd ui && $(USE_NODE); npm run format
+else
+	@$(ECHO) "$(YELLOW)Usage: make format ui$(NC)"
+endif
 
-ui: ## No-op (web UI removed)
-	@$(ECHO) "$(YELLOW)ui target: web UI removed$(NC)"
+ui:
+	@:
 
 # Workspace helpers
+
+# plugins/semanticrouter requires these via path-only replace directives, which
+# `go work sync` does not resolve. They must be workspace modules instead.
+SEMANTIC_ROUTER_ROOT ?= ./semantic-router
+SEMANTIC_ROUTER_MODULES := \
+	$(SEMANTIC_ROUTER_ROOT)/candle-binding \
+	$(SEMANTIC_ROUTER_ROOT)/ml-binding \
+	$(SEMANTIC_ROUTER_ROOT)/nlp-binding \
+	$(SEMANTIC_ROUTER_ROOT)/onnx-binding \
+	$(SEMANTIC_ROUTER_ROOT)/src/semantic-router
+
 setup-workspace: ## Set up Go workspace with all local modules for development
 	@$(ECHO) "$(GREEN)Setting up Go workspace for local development...$(NC)"
 	@$(ECHO) "$(YELLOW)Cleaning existing workspace...$(NC)"
@@ -1514,15 +1616,24 @@ setup-workspace: ## Set up Go workspace with all local modules for development
 			go work use "$$plugin_dir"; \
 		fi; \
 	done
+	@$(ECHO) "$(YELLOW)Adding sibling semantic-router modules...$(NC)"
+	@for sr_dir in $(SEMANTIC_ROUTER_MODULES); do \
+		if [ -f "$$sr_dir/go.mod" ]; then \
+			$(ECHO) "  Adding semantic-router module: $$sr_dir"; \
+			go work use "$$sr_dir"; \
+		else \
+			$(ECHO) "$(YELLOW)  Skipping missing module: $$sr_dir$(NC)"; \
+		fi; \
+	done
 	@$(ECHO) "$(YELLOW)Syncing workspace...$(NC)"
 	@go work sync
 	@$(ECHO) "$(GREEN)✓ Go workspace ready with all local modules$(NC)"
 	@$(ECHO) ""
 	@$(ECHO) "$(CYAN)Local modules in workspace:$(NC)"
-	@go list -m all | grep "github.com/maximhq/bifrost" | grep -v " v" | sed 's/^/  ✓ /'
+	@go list -m all | grep "github.com/maximhq/bifrost" | grep -v " v" | sed 's/^/  ✓ /' || true
 	@$(ECHO) ""
 	@$(ECHO) "$(CYAN)Remote modules (no local version):$(NC)"
-	@go list -m all | grep "github.com/maximhq/bifrost" | grep " v" | sed 's/^/  → /'
+	@go list -m all | grep "github.com/maximhq/bifrost" | grep " v" | sed 's/^/  → /' || true
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Note: go.work files are not committed to version control$(NC)"
 

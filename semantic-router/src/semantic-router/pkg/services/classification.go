@@ -1,0 +1,294 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/decision"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/embedding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/native"
+)
+
+// Global classification service instance
+var (
+	globalClassificationService *ClassificationService
+	globalClassificationMu      sync.RWMutex
+)
+
+// ClassificationService provides classification functionality
+type ClassificationService struct {
+	classifier        *classification.Classifier
+	recipeClassifiers *classification.RecipeClassifiers
+	unifiedClassifier *classification.UnifiedClassifier // New unified classifier
+	config            *config.RouterConfig
+	configMutex       sync.RWMutex // Protects config access
+	// Router generations already lease this service. These locks additionally
+	// drain model calls for standalone compatibility-service replacement.
+	runtimeMutex     sync.RWMutex
+	reloadMutex      sync.Mutex
+	runtimeOwner     io.Closer // nil when classifiers are borrowed from the router
+	modelPool        *binding.Pool
+	globalEmbeddings *embedding.Set
+	closed           bool
+	evalSelector     EvalModelSelector
+}
+
+func (s *ClassificationService) SetEvalModelSelector(selector EvalModelSelector) {
+	if s == nil {
+		return
+	}
+	s.configMutex.Lock()
+	s.evalSelector = selector
+	s.configMutex.Unlock()
+}
+
+func (s *ClassificationService) evalModelSelectorSnapshot() EvalModelSelector {
+	if s == nil {
+		return nil
+	}
+	s.configMutex.RLock()
+	defer s.configMutex.RUnlock()
+	return s.evalSelector
+}
+
+// NewRecipeClassificationService creates a model-aware service backed by
+// isolated recipe classifiers. The default classifier remains available for
+// callers that do not provide a routing model.
+func NewRecipeClassificationService(classifiers *classification.RecipeClassifiers, routerConfig *config.RouterConfig) *ClassificationService {
+	var defaultClassifier *classification.Classifier
+	if classifiers != nil {
+		defaultClassifier = classifiers.Default()
+	}
+	return &ClassificationService{
+		classifier:        defaultClassifier,
+		unifiedClassifier: classification.NewUnifiedClassifierFromRecipe(defaultClassifier),
+		recipeClassifiers: classifiers,
+		config:            routerConfig,
+	}
+}
+
+// NewClassificationService creates a new classification service
+func NewClassificationService(classifier *classification.Classifier, config *config.RouterConfig) *ClassificationService {
+	return &ClassificationService{
+		classifier:        classifier,
+		unifiedClassifier: classification.NewUnifiedClassifierFromRecipe(classifier),
+		config:            config,
+	}
+}
+
+// NewUnifiedClassificationService creates a new service with unified classifier
+func NewUnifiedClassificationService(unifiedClassifier *classification.UnifiedClassifier, legacyClassifier *classification.Classifier, config *config.RouterConfig) *ClassificationService {
+	if unifiedClassifier == nil {
+		unifiedClassifier = classification.NewUnifiedClassifierFromRecipe(legacyClassifier)
+	}
+	return &ClassificationService{
+		classifier:        legacyClassifier,
+		unifiedClassifier: unifiedClassifier,
+		config:            config,
+	}
+}
+
+// SetGlobalClassificationService publishes the compatibility global service used
+// by legacy API-server startup paths that do not yet receive a runtime registry.
+func SetGlobalClassificationService(service *ClassificationService) {
+	globalClassificationMu.Lock()
+	globalClassificationService = service
+	globalClassificationMu.Unlock()
+}
+
+// NewClassificationServiceFromConfig owns a canonical recipe graph and a pool
+// from its first generation, so reload reuses compatible physical resources.
+func NewClassificationServiceFromConfig(cfg *config.RouterConfig) (*ClassificationService, error) {
+	pool := binding.NewPool()
+	service := &ClassificationService{modelPool: pool}
+	if err := service.refreshRecipeClassifiers(cfg, nil, classification.RecipeRuntimeOptions{Runtime: native.New(pool)}); err != nil {
+		return nil, err
+	}
+	return service, nil
+}
+
+// NewClassificationServiceWithAutoDiscovery is retained for source compatibility.
+//
+// Deprecated: use NewClassificationServiceFromConfig. Model discovery is never
+// a substitute for the declared canonical configuration.
+func NewClassificationServiceWithAutoDiscovery(cfg *config.RouterConfig) (*ClassificationService, error) {
+	return NewClassificationServiceFromConfig(cfg)
+}
+
+// GetGlobalClassificationService returns the global classification service instance
+func GetGlobalClassificationService() *ClassificationService {
+	globalClassificationMu.RLock()
+	defer globalClassificationMu.RUnlock()
+	return globalClassificationService
+}
+
+// HasClassifier returns true if the service has a real classifier (not placeholder)
+func (s *ClassificationService) HasClassifier() bool {
+	return s.classifierSnapshot() != nil
+}
+
+func (s *ClassificationService) classifierSnapshot() *classification.Classifier {
+	classifier, _ := s.runtimeSnapshot()
+	return classifier
+}
+
+func (s *ClassificationService) runtimeSnapshot() (
+	*classification.Classifier,
+	*config.RouterConfig,
+) {
+	s.configMutex.RLock()
+	defer s.configMutex.RUnlock()
+	return s.classifier, s.config
+}
+
+// NewPlaceholderClassificationService creates a placeholder service for API-only mode
+func NewPlaceholderClassificationService() *ClassificationService {
+	return &ClassificationService{
+		classifier: nil, // No classifier - will return placeholder responses
+		config:     nil,
+	}
+}
+
+// ClassifyIntent performs intent classification using signal-driven architecture
+func (s *ClassificationService) ClassifyIntent(ctx context.Context, req IntentRequest) (*IntentResponse, error) {
+	s.runtimeMutex.RLock()
+	defer s.runtimeMutex.RUnlock()
+	start := time.Now()
+
+	input, err := req.resolveSignalInput()
+	if err != nil {
+		return nil, err
+	}
+	classifier, runtimeConfig, err := s.runtimeSnapshotForRequestModel(
+		req.Model,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Check if classifier is available
+	if classifier == nil {
+		// Return placeholder response
+		processingTime := time.Since(start).Milliseconds()
+		return &IntentResponse{
+			Classification: Classification{
+				Category:            "general",
+				ConfidenceAvailable: confidenceAvailability(false),
+				ProcessingTimeMs:    processingTime,
+			},
+			RecommendedModel: "general-model",
+			RoutingDecision:  "placeholder_response",
+		}, nil
+	}
+
+	input.requestFacts.Context = ctx
+	signals := classifier.EvaluateAllSignalsWithRequestFacts(
+		input.evaluationText,
+		input.contextText,
+		input.currentUserText,
+		input.priorUserMessages,
+		input.nonUserMessages,
+		input.hasAssistantReply,
+		false,
+		"",
+		nil,
+		input.conversationFacts,
+		input.imageURL,
+		input.requestFacts,
+	)
+
+	// Evaluate decision with engine (if decisions are configured)
+	// Pass pre-computed signals to avoid re-evaluation
+	var decisionResult *decision.DecisionResult
+	if classifier.Config != nil && len(classifier.Config.Decisions) > 0 {
+		decisionResult, err = classifier.EvaluateDecisionWithEngine(signals)
+		if err != nil {
+			if !strings.Contains(err.Error(), "no decisions configured") {
+				return nil, err
+			}
+		}
+	}
+
+	category := resolveIntentCategory(
+		ctx,
+		classifier,
+		decisionResult,
+		signals,
+		input.evaluationText,
+	)
+
+	category.ProcessingTimeMs = time.Since(start).Milliseconds()
+
+	// Build response from signals and decision
+	response := s.buildIntentResponseFromSignals(
+		signals,
+		decisionResult,
+		category,
+		req,
+		classifier,
+		runtimeConfig,
+	)
+
+	return response, nil
+}
+
+func (s *ClassificationService) runtimeSnapshotForRequestModel(
+	modelName string,
+) (*classification.Classifier, *config.RouterConfig, error) {
+	s.configMutex.RLock()
+	defer s.configMutex.RUnlock()
+	classifier, err := s.classifierForRequestModel(modelName)
+	return classifier, s.config, err
+}
+
+func (s *ClassificationService) classifierForRequestModel(modelName string) (*classification.Classifier, error) {
+	if s == nil || s.recipeClassifiers == nil || s.config == nil {
+		if s == nil {
+			return nil, nil
+		}
+		return s.classifier, nil
+	}
+	trimmed := strings.TrimSpace(modelName)
+	if trimmed == "" {
+		trimmed = config.DefaultVSRAutoModelName
+	}
+	recipe, ok := s.config.RecipeForRoutingModel(trimmed)
+	if !ok {
+		return nil, fmt.Errorf("%w %q", ErrUnknownRoutingModel, trimmed)
+	}
+	classifier, ok := s.recipeClassifiers.ForRecipe(recipe.Name)
+	if !ok {
+		return nil, fmt.Errorf("classifier for routing recipe %q is unavailable", recipe.Name)
+	}
+	return classifier, nil
+}
+
+// NOTE: ClassifyIntentUnified removed - ClassifyIntent now always uses signal-driven architecture
+// For batch operations, use ClassifyBatchUnifiedWithOptions()
+
+// GetClassifier returns the classifier instance (for signal-driven methods)
+func (s *ClassificationService) GetClassifier() *classification.Classifier {
+	return s.classifierSnapshot()
+}
+
+// GetConfig returns the current configuration
+func (s *ClassificationService) GetConfig() *config.RouterConfig {
+	s.configMutex.RLock()
+	defer s.configMutex.RUnlock()
+	return s.config
+}
+
+// UpdateConfig updates the configuration
+func (s *ClassificationService) UpdateConfig(newConfig *config.RouterConfig) {
+	s.configMutex.Lock()
+	defer s.configMutex.Unlock()
+	s.config = newConfig
+	// Update the global config as well
+	config.Replace(newConfig)
+}

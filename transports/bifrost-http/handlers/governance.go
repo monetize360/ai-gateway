@@ -3324,9 +3324,20 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := validateRoutingOutput(req.ProviderID, req.Provider, req.KeyID); err != nil {
+	chainRule := false // DB default
+	if req.ChainRule != nil {
+		chainRule = *req.ChainRule
+	}
+	if err := configstoreTables.ValidateSemanticRouting(req.CelExpression, chainRule); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
+	}
+	isSemantic := configstoreTables.IsSemanticRoutingCELExpression(req.CelExpression)
+	if !isSemantic {
+		if err := validateRoutingOutput(req.ProviderID, req.Provider, req.KeyID); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
 	}
 	if err := validateRoutingFallbacks(req.Fallbacks); err != nil {
 		SendError(ctx, 400, err.Error())
@@ -3345,10 +3356,6 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 	enabled := req.Enabled
 	if enabled == nil {
 		enabled = bifrost.Ptr(true)
-	}
-	chainRule := false // DB default
-	if req.ChainRule != nil {
-		chainRule = *req.ChainRule
 	}
 	rule := &configstoreTables.TableRoutingRule{
 		ID:              ruleID,
@@ -3464,7 +3471,12 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 			rule.KeyID = req.KeyID
 		}
 	}
-	if req.ProviderID != nil || req.ModelID != nil || req.Provider != nil || req.Model != nil || req.KeyID != nil {
+	if err := configstoreTables.ValidateSemanticRouting(rule.CelExpression, rule.ChainRule); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if !configstoreTables.IsSemanticRoutingCELExpression(rule.CelExpression) &&
+		(req.ProviderID != nil || req.ModelID != nil || req.Provider != nil || req.Model != nil || req.KeyID != nil) {
 		if err := validateRoutingOutput(rule.ProviderID, rule.Provider, rule.KeyID); err != nil {
 			SendError(ctx, 400, err.Error())
 			return

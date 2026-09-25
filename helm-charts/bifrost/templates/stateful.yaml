@@ -272,6 +272,12 @@ spec:
               mountPath: {{ .Values.bifrost.appDir }}/config.json
               subPath: config.json
               readOnly: true
+            {{- if (.Values.bifrost.plugins.semanticRouter | default dict).enabled }}
+            - name: semantic-router-recipe
+              mountPath: {{ .Values.bifrost.appDir }}/semantic-router/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            {{- end }}
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -284,6 +290,11 @@ spec:
           configMap:
             name: {{ include "bifrost.fullname" . }}-config
           {{- end }}
+        {{- if (.Values.bifrost.plugins.semanticRouter | default dict).enabled }}
+        - name: semantic-router-recipe
+          configMap:
+            name: {{ include "bifrost.fullname" . }}-semantic-router-recipe
+        {{- end }}
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
