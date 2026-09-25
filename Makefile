@@ -72,7 +72,7 @@ define EXPOSE_ENV
 	fi
 endef
 
-.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner build-semantic-router-native
+.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner build-semantic-router-native ensure-semantic-router-native
 
 all: help
 
@@ -96,6 +96,7 @@ help: ## Show this help message
 	@$(ECHO) "  APP_DIR           App data directory inside container (default: /app/data)"
 	@$(ECHO) "  LOCAL             Use local go.work for builds (e.g., make build LOCAL=1)"
 	@$(ECHO) "  DEBUG             Enable delve debugger on port 2345 (e.g., make dev DEBUG=1, make test-core DEBUG=1, make test-governance DEBUG=1)"
+	@$(ECHO) "  SEMANTIC_ROUTER_DIR  Nested Semantic Router tree (default: ./semantic-router)"
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Test Configuration:$(NC)"
 	@$(ECHO) "  TEST_REPORTS_DIR  Directory for HTML test reports (default: test-reports)"
@@ -138,11 +139,40 @@ install-delve: ## Install delve for debugging (if not already installed)
 	@which dlv > /dev/null || ($(ECHO) "$(YELLOW)Installing delve for debugging...$(NC)" && go install github.com/go-delve/delve/cmd/dlv@latest)
 	@$(ECHO) "$(GREEN)Delve is ready$(NC)"
 
+# Marker libs used by ensure-semantic-router-native (macOS .dylib / Linux .so / static .a).
+SR_NATIVE_MARKERS := \
+	$(SEMANTIC_ROUTER_DIR)/candle-binding/target/release/libcandle_semantic_router.a \
+	$(SEMANTIC_ROUTER_DIR)/ml-binding/target/release/libml_semantic_router.a \
+	$(SEMANTIC_ROUTER_DIR)/nlp-binding/target/release/libnlp_binding.a \
+	$(SEMANTIC_ROUTER_DIR)/onnx-binding/target/release/libonnx_semantic_router.a
+
 build-semantic-router-native: ## Build CPU Semantic Router native libraries (same flags as transports/Dockerfile.local)
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		$(ECHO) "$(RED)Error: cargo/Rust not found. Install from https://rustup.rs then re-run.$(NC)"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(SEMANTIC_ROUTER_DIR)/candle-binding" ]; then \
+		$(ECHO) "$(RED)Error: $(SEMANTIC_ROUTER_DIR) is missing. Expected nested semantic-router sources.$(NC)"; \
+		exit 1; \
+	fi
+	@$(ECHO) "$(GREEN)Building Semantic Router native libraries under $(SEMANTIC_ROUTER_DIR)...$(NC)"
 	@cd "$(SEMANTIC_ROUTER_DIR)/candle-binding" && env -u CARGO_TARGET_DIR cargo build --release --no-default-features
 	@cd "$(SEMANTIC_ROUTER_DIR)/ml-binding" && env -u CARGO_TARGET_DIR cargo build --release
 	@cd "$(SEMANTIC_ROUTER_DIR)/nlp-binding" && env -u CARGO_TARGET_DIR cargo build --release
 	@cd "$(SEMANTIC_ROUTER_DIR)/onnx-binding" && env -u CARGO_TARGET_DIR cargo build --release --lib --locked --no-default-features --features dynamic
+	@$(ECHO) "$(GREEN)Semantic Router natives ready (gitignored under */target/release)$(NC)"
+
+ensure-semantic-router-native: ## Build Semantic Router natives only when missing (safe for fresh clones)
+	@missing=0; \
+	for f in $(SR_NATIVE_MARKERS); do \
+		if [ ! -f "$$f" ]; then missing=1; break; fi; \
+	done; \
+	if [ "$$missing" = "1" ]; then \
+		$(ECHO) "$(YELLOW)Semantic Router native libs missing — building once (requires Rust/cargo)...$(NC)"; \
+		$(MAKE) build-semantic-router-native; \
+	else \
+		$(ECHO) "$(GREEN)Semantic Router native libs already present$(NC)"; \
+	fi
 
 install-gotestsum: ## Install gotestsum for test reporting (if not already installed)
 	@which gotestsum > /dev/null || ($(ECHO) "$(YELLOW)Installing gotestsum for test reporting...$(NC)" && go install gotest.tools/gotestsum@latest)
@@ -167,8 +197,18 @@ install-junit-viewer: ## Install junit-viewer for HTML report generation (if not
 		$(ECHO) "$(YELLOW)CI environment detected, skipping junit-viewer installation$(NC)"; \
 	fi
 
-dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Start complete development environment (UI + API with proxy; API-only if ui/package.json missing)
+# Runtime search path for Semantic Router shared libs (macOS + Linux).
+define EXPORT_SR_NATIVE_PATH
+	SR_ROOT="$(abspath $(SEMANTIC_ROUTER_DIR))"; \
+	SR_LIB_PATH="$$SR_ROOT/candle-binding/target/release:$$SR_ROOT/ml-binding/target/release:$$SR_ROOT/nlp-binding/target/release:$$SR_ROOT/onnx-binding/target/release"; \
+	export DYLD_LIBRARY_PATH="$$SR_LIB_PATH$${DYLD_LIBRARY_PATH:+:$$DYLD_LIBRARY_PATH}"; \
+	export LD_LIBRARY_PATH="$$SR_LIB_PATH$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"; \
+	export CGO_ENABLED=$${CGO_ENABLED:-1}
+endef
+
+dev: install-ui install-air setup-workspace ensure-semantic-router-native $(if $(DEBUG),install-delve) ## Start complete development environment (UI + API with proxy; API-only if ui/package.json missing)
 	@$(EXPOSE_ENV); \
+	$(EXPORT_SR_NATIVE_PATH); \
 	set +m; \
 	ui_pid=""; \
 	api_pid=""; \
@@ -269,8 +309,9 @@ dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Star
 	cleanup; \
 	exit 1
 
-dev-pulse: install-ui install-pulse setup-workspace $(if $(DEBUG),install-delve) ## Start complete development environment using pulse for hot reloading
+dev-pulse: install-ui install-pulse setup-workspace ensure-semantic-router-native $(if $(DEBUG),install-delve) ## Start complete development environment using pulse for hot reloading
 	@$(EXPOSE_ENV); \
+	$(EXPORT_SR_NATIVE_PATH); \
 	set -m; \
 	cleanup() { \
 		trap - EXIT INT TERM HUP; \
@@ -343,7 +384,7 @@ build-ui: install-ui ## Build ui (skipped when ui/package.json is absent)
 		$(USE_NODE); cd ui && npm run build && npm run copy-build; \
 	fi
 
-build: build-ui ## Build bifrost-http binary
+build: build-ui ensure-semantic-router-native ## Build bifrost-http binary
 	@if [ -n "$(LOCAL)" ]; then \
 		$(ECHO) "$(GREEN)╔═══════════════════════════════════════════════╗$(NC)"; \
 		$(ECHO) "$(GREEN)║  Building bifrost-http with local go.work...  ║$(NC)"; \
@@ -352,8 +393,7 @@ build: build-ui ## Build bifrost-http binary
 		$(ECHO) "$(GREEN)╔═══════════════════════════════════════╗$(NC)"; \
 		$(ECHO) "$(GREEN)║  Building bifrost-http...             ║$(NC)"; \
 		$(ECHO) "$(GREEN)╚═══════════════════════════════════════╝$(NC)"; \
-	fi
-	@if [ -n "$(DYNAMIC)" ]; then \
+	fi	@if [ -n "$(DYNAMIC)" ]; then \
 		$(ECHO) "$(YELLOW)Note: This will create a dynamically linked build.$(NC)"; \
 	else \
 		$(ECHO) "$(YELLOW)Note: This will create a statically linked build.$(NC)"; \
