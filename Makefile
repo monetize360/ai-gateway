@@ -20,6 +20,10 @@ LOCAL ?=
 DEBUG ?=
 SEMANTIC_ROUTER_DIR ?= ./semantic-router
 
+# A rustup install is not on PATH until the shell profile is reloaded, so recipes
+# that call cargo add its bin directory themselves.
+CARGO_ENV = export PATH="$$HOME/.cargo/bin:$$PATH"
+
 # Colors for output
 RED=\033[0;31m
 GREEN=\033[0;32m
@@ -72,7 +76,7 @@ define EXPOSE_ENV
 	fi
 endef
 
-.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner build-semantic-router-native ensure-semantic-router-native
+.PHONY: all help dev dev-pulse build-ui build build-cli run run-cli install-air install-pulse clean test test-cli install-ui setup-workspace work-init work-clean docs docker-image docker-run cleanup-enterprise mod-tidy test-integrations-py test-integrations-ts install-playwright run-e2e run-e2e-ui run-e2e-headed run-e2e-api format ui install-newman run-provider-harness-test run-cli-harness-test test-semantic-cache test-semantic-cache-complete _test-semantic-cache-complete-inner build-semantic-router-native ensure-semantic-router-native ensure-native-toolchain
 
 all: help
 
@@ -97,6 +101,7 @@ help: ## Show this help message
 	@$(ECHO) "  LOCAL             Use local go.work for builds (e.g., make build LOCAL=1)"
 	@$(ECHO) "  DEBUG             Enable delve debugger on port 2345 (e.g., make dev DEBUG=1, make test-core DEBUG=1, make test-governance DEBUG=1)"
 	@$(ECHO) "  SEMANTIC_ROUTER_DIR  Nested Semantic Router tree (default: ./semantic-router)"
+	@$(ECHO) "  TOOLCHAIN_AUTO_INSTALL  Set to 0 to report missing native build tools instead of installing them"
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Test Configuration:$(NC)"
 	@$(ECHO) "  TEST_REPORTS_DIR  Directory for HTML test reports (default: test-reports)"
@@ -146,20 +151,19 @@ SR_NATIVE_MARKERS := \
 	$(SEMANTIC_ROUTER_DIR)/nlp-binding/target/release/libnlp_binding.a \
 	$(SEMANTIC_ROUTER_DIR)/onnx-binding/target/release/libonnx_semantic_router.a
 
-build-semantic-router-native: ## Build CPU Semantic Router native libraries (same flags as transports/Dockerfile.local)
-	@if ! command -v cargo >/dev/null 2>&1; then \
-		$(ECHO) "$(RED)Error: cargo/Rust not found. Install from https://rustup.rs then re-run.$(NC)"; \
-		exit 1; \
-	fi
+ensure-native-toolchain: ## Install missing native build prerequisites (C compiler, cmake, Rust)
+	@bash scripts/ensure-native-toolchain.sh
+
+build-semantic-router-native: ensure-native-toolchain ## Build CPU Semantic Router native libraries (same flags as transports/Dockerfile.local)
 	@if [ ! -d "$(SEMANTIC_ROUTER_DIR)/candle-binding" ]; then \
 		$(ECHO) "$(RED)Error: $(SEMANTIC_ROUTER_DIR) is missing. Expected nested semantic-router sources.$(NC)"; \
 		exit 1; \
 	fi
 	@$(ECHO) "$(GREEN)Building Semantic Router native libraries under $(SEMANTIC_ROUTER_DIR)...$(NC)"
-	@cd "$(SEMANTIC_ROUTER_DIR)/candle-binding" && env -u CARGO_TARGET_DIR cargo build --release --no-default-features
-	@cd "$(SEMANTIC_ROUTER_DIR)/ml-binding" && env -u CARGO_TARGET_DIR cargo build --release
-	@cd "$(SEMANTIC_ROUTER_DIR)/nlp-binding" && env -u CARGO_TARGET_DIR cargo build --release
-	@cd "$(SEMANTIC_ROUTER_DIR)/onnx-binding" && env -u CARGO_TARGET_DIR cargo build --release --lib --locked --no-default-features --features dynamic
+	@$(CARGO_ENV); cd "$(SEMANTIC_ROUTER_DIR)/candle-binding" && env -u CARGO_TARGET_DIR cargo build --release --no-default-features
+	@$(CARGO_ENV); cd "$(SEMANTIC_ROUTER_DIR)/ml-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@$(CARGO_ENV); cd "$(SEMANTIC_ROUTER_DIR)/nlp-binding" && env -u CARGO_TARGET_DIR cargo build --release
+	@$(CARGO_ENV); cd "$(SEMANTIC_ROUTER_DIR)/onnx-binding" && env -u CARGO_TARGET_DIR cargo build --release --lib --locked --no-default-features --features dynamic
 	@$(ECHO) "$(GREEN)Semantic Router natives ready (gitignored under */target/release)$(NC)"
 
 ensure-semantic-router-native: ## Build Semantic Router natives only when missing (safe for fresh clones)

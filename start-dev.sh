@@ -16,8 +16,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-# Go + dev tools (air, etc.) — extend if your install paths differ
-export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${PATH}"
+# Go + dev tools (air, etc.) — extend if your install paths differ.
+# ~/.cargo/bin covers a rustup install that has not been picked up by the shell
+# profile yet, so the first run after installing Rust still finds cargo.
+export PATH="${HOME}/go-install/go/bin:${HOME}/go/bin:${HOME}/.cargo/bin:${PATH}"
 
 # Embedded Semantic Router native runtimes (Candle/NLP/ML/ONNX). Built libs are
 # gitignored under */target/release — ensure-semantic-router-native builds them
@@ -43,7 +45,7 @@ if [[ -f "${ROOT}/.env" ]]; then
 fi
 
 if ! command -v go >/dev/null 2>&1; then
-	echo "error: go not found on PATH. Install Go or set PATH to include go-install/go/bin" >&2
+	echo "error: go not found on PATH. Install Go 1.26.2+ from https://go.dev/dl/" >&2
 	exit 1
 fi
 
@@ -52,7 +54,9 @@ if ! command -v make >/dev/null 2>&1; then
 	exit 1
 fi
 
-# Build natives if missing (requires Rust/cargo on first run only).
+# Install the C compiler / cmake / Rust toolchain when missing, then build the
+# native libraries. Both steps are no-ops once everything is in place.
+# Set TOOLCHAIN_AUTO_INSTALL=0 to only report missing tools.
 echo "Ensuring Semantic Router native libraries..."
 make ensure-semantic-router-native
 
