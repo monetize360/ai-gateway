@@ -2106,6 +2106,15 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		"model":        model,
 		"provider":     string(provider),
 	}
+	if cachedInputTokens > 0 {
+		dimensions["cached_input_token"] = strconv.Itoa(cachedInputTokens)
+	}
+	if cacheCreationTokens > 0 {
+		dimensions["cache_creation_token"] = strconv.Itoa(cacheCreationTokens)
+	}
+	if reasoningTokens > 0 {
+		dimensions["reasoning_token"] = strconv.Itoa(reasoningTokens)
+	}
 	if ttftMs > 0 {
 		dimensions["ttft_ms"] = strconv.FormatInt(ttftMs, 10)
 	}
