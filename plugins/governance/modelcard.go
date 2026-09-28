@@ -4,48 +4,55 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/plugins/semanticrouter"
+	"gorm.io/gorm"
 )
 
 const (
-	modelCardTable = "model_card"
+	catalogListingTable = "catalog_listings"
+	picklistItemTable   = "picklist_item"
 
-	// modelCardToolCapability is the card capability that satisfies a
-	// conditional tool_calling requirement from the capability profile.
-	modelCardToolCapability = "tool_calling"
+	// longContextTokenFloor is the context_length that counts as long_context
+	// even when the category tag does not say so.
+	longContextTokenFloor = 32768
 )
 
-// modelCard is the routing view of one tenant model_card row.
+// modelCard is the routing view of one published catalog listing.
 type modelCard struct {
-	Name             string
-	Provider         string
-	ExternalID       string
-	InputModalities  []string
-	OutputModalities []string
-	ContextWindow    int
-	Capabilities     []string
-	QualityIndex     float64 // 0..10; 0 when unknown
-	TTFTP50Ms        float64 // 0 when unknown
+	Name                string
+	Provider            string
+	ExternalID          string
+	InputModalities     []string
+	OutputModalities    []string
+	ContextWindow       int
+	Capabilities        []string
+	QualityIndex        float64 // 0..10; 0 when unknown
+	TTFTP50Ms           float64 // 0 when unknown
+	ThroughputTokensSec float64 // 0 when unknown; breaks score ties
+	benchmarked         bool
 }
 
-type modelCardRow struct {
-	Name             string
-	ExternalID       *string
-	InputModalities  *string
-	OutputModalities *string
-	ContextWindow    *float64
-	Capabilities     *string
-	RawMetadata      *string
-	ProviderName     *string
+type catalogRouteRow struct {
+	ProviderName   *string
+	ModelName      *string
+	GatewayModelID *string
+	ContextLength  *float64
+	QualityIndex   *float64
+	LatencyS       *float64
+	Category       *string
+	ListingStatus  *string
+	InfraStatus    *string
+	TTFTMs         *float64
+	Throughput     *float64
 }
 
-// loadModelCards replaces the tenant's model card index from model_card.
-// Tenants without the table get an empty index.
+// loadModelCards replaces the tenant's routing index from published catalog
+// listings joined to infra capabilities and the latest benchmark.
+// Tenants without catalog_listings get an empty index.
 // ponytail: full reload on every governance sync (~10s); fine for hundreds of
 // rows. Switch to an updated_at watermark if the table grows large.
 func (gs *LocalGovernanceStore) loadModelCards(ctx context.Context) {
@@ -57,65 +64,250 @@ func (gs *LocalGovernanceStore) loadModelCards(ctx context.Context) {
 		return
 	}
 	db = db.WithContext(ctx)
-	if !db.Migrator().HasTable(modelCardTable) {
+	if !db.Migrator().HasTable(catalogListingTable) {
 		gs.modelCards.Store(&map[string]*modelCard{})
 		return
 	}
 
-	var rows []modelCardRow
+	names, filterStatus := loadPicklistNames(gs, db)
+	var rows []catalogRouteRow
 	err := db.Raw(`
-		SELECT mc.name, mc.external_id, mc.input_modalities::text AS input_modalities,
-		       mc.output_modalities::text AS output_modalities, mc.context_window::float8 AS context_window,
-		       mc.capabilities::text AS capabilities, mc.raw_metadata::text AS raw_metadata,
-		       cp.name AS provider_name
-		FROM model_card mc
-		LEFT JOIN config_providers cp ON cp.id = mc.created_by_provider_id
-		WHERE COALESCE(mc.deleted, false) = false`).Scan(&rows).Error
+		SELECT cp.name AS provider_name, cm.name AS model_name, ic.gateway_model_id,
+		       ic.context_length::float8 AS context_length, ic.quality_index::float8 AS quality_index,
+		       ic.latency_s::float8 AS latency_s, ic.category::text AS category,
+		       cl.status::text AS listing_status, ic.status::text AS infra_status,
+		       b.ttft_ms::float8 AS ttft_ms, b.throughput_tokens_sec::float8 AS throughput
+		FROM catalog_listings cl
+		JOIN config_models cm ON cm.id = cl.config_model_id
+		JOIN config_providers cp ON cp.id = cl.config_provider_id
+		JOIN infra_capabilities ic ON ic.id = cl.infra_capability_id
+		LEFT JOIN LATERAL (
+			SELECT ttft_ms, throughput_tokens_sec
+			FROM capability_benchmarks
+			WHERE capability_id = ic.id AND COALESCE(deleted, false) = false
+			ORDER BY bench_date DESC NULLS LAST, updated_at DESC
+			LIMIT 1
+		) b ON true
+		WHERE COALESCE(cl.deleted, false) = false
+		  AND COALESCE(ic.deleted, false) = false
+		  AND ic.gateway_model_id = cm.name`).Scan(&rows).Error
 	if err != nil {
-		gs.logger.Warn("governance: failed to load model cards: %v", err)
+		gs.logger.Warn("governance: failed to load catalog listings: %v", err)
 		return
 	}
 
 	index := make(map[string]*modelCard, len(rows)*2)
 	for _, row := range rows {
-		card := row.toCard()
-		if card.ExternalID == "" {
+		if filterStatus {
+			if !strings.EqualFold(picklistName(row.ListingStatus, names), "Active") {
+				continue
+			}
+			if !strings.EqualFold(picklistName(row.InfraStatus, names), "Available") {
+				continue
+			}
+		}
+		card := row.toCard(names)
+		if card == nil {
 			continue
 		}
-		key := strings.ToLower(card.ExternalID)
-		if card.Provider != "" {
-			index[strings.ToLower(card.Provider)+"/"+key] = card
-		}
-		if _, taken := index[key]; !taken {
-			index[key] = card
-		}
+		indexCatalogCard(index, card)
 	}
 	gs.modelCards.Store(&index)
 }
 
-func (r modelCardRow) toCard() *modelCard {
+func loadPicklistNames(gs *LocalGovernanceStore, db *gorm.DB) (map[string]string, bool) {
+	if db == nil || !db.Migrator().HasTable(picklistItemTable) {
+		gs.logger.Warn("governance: picklist_item missing; catalog status filter skipped")
+		return nil, false
+	}
+	var rows []struct {
+		ID   string
+		Name string
+	}
+	err := db.Raw(`SELECT id::text AS id, name FROM picklist_item WHERE COALESCE(deleted, false) = false`).Scan(&rows).Error
+	if err != nil {
+		gs.logger.Warn("governance: failed to load picklist names: %v", err)
+		return nil, false
+	}
+	names := make(map[string]string, len(rows))
+	for _, row := range rows {
+		names[strings.ToLower(strings.TrimSpace(row.ID))] = row.Name
+	}
+	return names, true
+}
+
+func (r catalogRouteRow) toCard(names map[string]string) *modelCard {
+	modelName := strings.TrimSpace(deref(r.ModelName))
+	gatewayID := strings.TrimSpace(deref(r.GatewayModelID))
+	if modelName == "" || gatewayID != modelName {
+		return nil
+	}
 	card := &modelCard{
-		Name:             r.Name,
-		ExternalID:       strings.TrimSpace(deref(r.ExternalID)),
-		Provider:         strings.TrimSpace(deref(r.ProviderName)),
-		InputModalities:  jsonStrings(r.InputModalities),
-		OutputModalities: jsonStrings(r.OutputModalities),
-		Capabilities:     jsonStrings(r.Capabilities),
+		Name:       modelName,
+		ExternalID: modelName,
+		Provider:   strings.TrimSpace(deref(r.ProviderName)),
 	}
-	if r.ContextWindow != nil {
-		card.ContextWindow = int(*r.ContextWindow)
+	if r.ContextLength != nil {
+		card.ContextWindow = int(*r.ContextLength)
 	}
-	if r.RawMetadata != nil {
-		var meta struct {
-			QualityIndex float64 `json:"quality_index"`
-			TTFTP50Ms    float64 `json:"ttft_p50_ms"`
-		}
-		if json.Unmarshal([]byte(*r.RawMetadata), &meta) == nil {
-			card.QualityIndex = meta.QualityIndex
-			card.TTFTP50Ms = meta.TTFTP50Ms
-		}
+	if r.QualityIndex != nil {
+		card.QualityIndex = *r.QualityIndex
 	}
+	if r.TTFTMs != nil && *r.TTFTMs > 0 {
+		card.TTFTP50Ms = *r.TTFTMs
+		card.benchmarked = true
+	} else if r.LatencyS != nil && *r.LatencyS > 0 {
+		card.TTFTP50Ms = *r.LatencyS * 1000
+	}
+	if r.Throughput != nil {
+		card.ThroughputTokensSec = *r.Throughput
+	}
+	card.Capabilities, card.InputModalities, card.OutputModalities = catalogSkills(categoryTokens(deref(r.Category), names), card.ContextWindow)
 	return card
+}
+
+func indexCatalogCard(index map[string]*modelCard, card *modelCard) {
+	key := strings.ToLower(card.ExternalID)
+	keys := []string{key}
+	if card.Provider != "" {
+		keys = append([]string{strings.ToLower(card.Provider) + "/" + key}, keys...)
+	}
+	for _, k := range keys {
+		index[k] = preferCatalogCard(index[k], card)
+	}
+}
+
+// preferCatalogCard keeps the listing that has a measured benchmark, then the
+// higher throughput. The first row wins when those are equal.
+func preferCatalogCard(current, next *modelCard) *modelCard {
+	if current == nil {
+		return next
+	}
+	if next == nil {
+		return current
+	}
+	if next.benchmarked != current.benchmarked {
+		if next.benchmarked {
+			return next
+		}
+		return current
+	}
+	if next.ThroughputTokensSec > current.ThroughputTokensSec {
+		return next
+	}
+	return current
+}
+
+func picklistName(raw *string, names map[string]string) string {
+	value := strings.Trim(strings.TrimSpace(deref(raw)), `"`)
+	if value == "" {
+		return ""
+	}
+	if name, ok := names[strings.ToLower(value)]; ok {
+		return name
+	}
+	return value
+}
+
+// categoryTokens resolves a picklist id, JSON array, or postgres uuid array
+// to display names, then splits each name on commas.
+func categoryTokens(raw string, names map[string]string) []string {
+	var tokens []string
+	for _, part := range categoryParts(raw) {
+		label := strings.TrimSpace(part)
+		if name, ok := names[strings.ToLower(label)]; ok {
+			label = name
+		}
+		for _, token := range strings.Split(label, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens
+}
+
+func categoryParts(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "[") {
+		var arr []string
+		if json.Unmarshal([]byte(raw), &arr) == nil {
+			return arr
+		}
+	}
+	if strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}") {
+		inner := strings.Trim(raw, "{}")
+		if inner == "" {
+			return nil
+		}
+		return splitTrim(inner)
+	}
+	return []string{raw}
+}
+
+func splitTrim(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(strings.TrimSpace(part), `"`)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// catalogSkills maps infra category tokens onto the capability names decisions
+// score, plus the input and output modalities those tokens imply.
+func catalogSkills(tokens []string, contextLength int) (caps, inputs, outputs []string) {
+	inputs = []string{"text"}
+	outputs = []string{"text"}
+	seen := make(map[string]struct{})
+	add := func(names ...string) {
+		for _, name := range names {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			caps = append(caps, name)
+		}
+	}
+	image := false
+	dropText := false
+	for _, raw := range tokens {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "reasoning", "flagship", "distilled", "reference precision", "efficient reasoning":
+			add("reasoning", "analysis", "mathematics", "architecture", "coding", "code_generation", "debugging", "code_review", "software_engineering")
+		case "long context":
+			add("long_context", "context_understanding")
+		case "general purpose", "workhorse", "cost optimised":
+			add("general_knowledge", "instruction_following", "conversation", "summarisation", "factual_qa")
+		case "small", "high throughput", "low latency":
+			add("low_complexity", "summarisation")
+		case "multimodal":
+			add("visual_reasoning", "multimodal_reasoning", "image_understanding", "video_understanding")
+			image = true
+		case "document understanding":
+			add("analysis", "context_understanding", "image_understanding")
+			image = true
+		case "embeddings", "fine-tuned classifier":
+			dropText = true
+		}
+	}
+	if contextLength >= longContextTokenFloor {
+		add("long_context", "context_understanding")
+	}
+	if image {
+		inputs = append(inputs, "image")
+	}
+	if dropText {
+		outputs = []string{"embeddings"}
+	}
+	return caps, inputs, outputs
 }
 
 // ModelCard returns the tenant card for provider/model, or nil.
@@ -165,7 +357,7 @@ func (p *GovernancePlugin) rankByModelCards(ctx *schemas.BifrostContext, comp *t
 			rejections["no model card"] = append(rejections["no model card"], candidate.qualified())
 			continue
 		}
-		fit, reason := cardMatchesProfile(card, route.Profile, route.Signals, reqProfile, required)
+		fit, reason := cardMatchesProfile(card, route.Profile, reqProfile, required)
 		if reason != "" {
 			rejections[reason] = append(rejections[reason], candidate.qualified())
 			continue
@@ -181,14 +373,19 @@ func (p *GovernancePlugin) rankByModelCards(ctx *schemas.BifrostContext, comp *t
 	}
 
 	scoreByObjectives(matched, route.Profile)
-	sort.SliceStable(matched, func(i, j int) bool { return matched[i].score > matched[j].score })
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].score != matched[j].score {
+			return matched[i].score > matched[j].score
+		}
+		return matched[i].card.ThroughputTokensSec > matched[j].card.ThroughputTokensSec
+	})
 	p.logSemantic(ctx, schemas.LogLevelInfo, "2/cards: ranked %s", describeCardRanking(matched))
 	return matched
 }
 
 // cardMatchesProfile applies the profile's hard requirements to a card and
 // returns its capability fit (0..1). A non-empty reason means rejected.
-func cardMatchesProfile(card *modelCard, profile *semanticrouter.CapabilityProfile, signals *semanticrouter.MatchedSignals, reqProfile *RequestProfile, required []string) (float64, string) {
+func cardMatchesProfile(card *modelCard, profile *semanticrouter.CapabilityProfile, reqProfile *RequestProfile, required []string) (float64, string) {
 	// Semantic routing only rewrites text-generating requests.
 	if len(card.OutputModalities) > 0 && !containsFold(card.OutputModalities, "text") {
 		return 0, "no text output"
@@ -201,16 +398,6 @@ func cardMatchesProfile(card *modelCard, profile *semanticrouter.CapabilityProfi
 		if !containsFold(inputs, modality) {
 			return 0, "no " + modality + " input"
 		}
-	}
-
-	needsTools := reqProfile.HasTools
-	for _, cond := range profile.Require.Conditional {
-		if cond.Require.ToolCalling != nil && *cond.Require.ToolCalling && signalMatched(signals, cond.When.Type, cond.When.Name) {
-			needsTools = true
-		}
-	}
-	if needsTools && !containsFold(card.Capabilities, modelCardToolCapability) {
-		return 0, "no tool calling"
 	}
 
 	if profile.Context.MinTokensFromRequest || reqProfile.EstInputTokens > unknownLimitTokenCeiling {
@@ -255,32 +442,6 @@ func requiredInputModalities(profile *semanticrouter.CapabilityProfile, reqProfi
 		}
 	}
 	return out
-}
-
-func signalMatched(signals *semanticrouter.MatchedSignals, kind, name string) bool {
-	if signals == nil {
-		return false
-	}
-	var names []string
-	switch strings.ToLower(kind) {
-	case "keyword":
-		names = signals.Keywords
-	case "structure":
-		names = signals.Structure
-	case "conversation":
-		names = signals.Conversation
-	case "context":
-		names = signals.Context
-	case "language":
-		names = signals.Language
-	case "input_modality":
-		names = signals.InputModality
-	case "domain":
-		names = signals.Domains
-	case "complexity":
-		names = signals.Complexity
-	}
-	return slices.Contains(names, name)
 }
 
 // scoreByObjectives sets score = fit·w_fit + quality·w_q + latency·w_l + cost·w_c.
@@ -332,9 +493,6 @@ func cardSatisfiesRequest(card *modelCard, reqProfile *RequestProfile) (bool, st
 	if reqProfile.HasAudio && !containsFold(inputs, "audio") {
 		return false, "no audio input support"
 	}
-	if reqProfile.HasTools && !containsFold(card.Capabilities, modelCardToolCapability) {
-		return false, "no tool calling support"
-	}
 	return true, ""
 }
 
@@ -359,15 +517,6 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func jsonStrings(raw *string) []string {
-	if raw == nil || *raw == "" {
-		return nil
-	}
-	var out []string
-	_ = json.Unmarshal([]byte(*raw), &out)
-	return out
 }
 
 func deref(s *string) string {

@@ -40,7 +40,7 @@ type LocalGovernanceStore struct {
 	providers     sync.Map // string -> *Provider (Provider name -> Provider with preloaded relationships)
 	routingRules  sync.Map // string -> []*TableRoutingRule (key: "scope:scopeID" -> rules, scopeID="" for global)
 
-	// modelCards indexes tenant model_card rows by "provider/model" and "model".
+	// modelCards indexes published catalog listings by "provider/model" and "model".
 	modelCards atomic.Pointer[map[string]*modelCard]
 
 	// Last DB usages for budgets and rate limits

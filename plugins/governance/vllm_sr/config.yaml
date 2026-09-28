@@ -246,11 +246,11 @@ routing:
             - text
         prefer:
           capabilities:
-            reasoning: 0.35
-            analysis: 0.25
+            reasoning: 0.30
+            analysis: 0.20
             mathematics: 0.15
-            architecture: 0.15
-            coding: 0.10
+            architecture: 0.20
+            coding: 0.15
         context:
           min_tokens_from_request: true
         objectives:
@@ -278,12 +278,14 @@ routing:
             - text
         prefer:
           capabilities:
-            coding: 0.30
-            code_generation: 0.20
-            debugging: 0.20
+            coding: 0.20
+            code_generation: 0.15
+            debugging: 0.10
             code_review: 0.10
-            reasoning: 0.10
             software_engineering: 0.10
+            reasoning: 0.15
+            general_knowledge: 0.10
+            instruction_following: 0.10
         dynamic_features:
           language: true
           framework: true
@@ -316,19 +318,14 @@ routing:
         require:
           input_modalities:
             - text
-          conditional:
-            - when:
-                type: conversation
-                name: has_tools
-              require:
-                tool_calling: true
         prefer:
           capabilities:
-            agentic: 0.30
-            planning: 0.25
-            reasoning: 0.20
+            agentic: 0.20
+            planning: 0.15
             tool_use: 0.15
-            instruction_following: 0.10
+            reasoning: 0.20
+            instruction_following: 0.15
+            general_knowledge: 0.15
         context:
           min_tokens_from_request: true
         objectives:
@@ -387,11 +384,12 @@ routing:
             - text
         prefer:
           capabilities:
-            multi_task: 0.30
+            multi_task: 0.25
             instruction_following: 0.25
-            reasoning: 0.20
+            reasoning: 0.15
+            general_knowledge: 0.15
             summarisation: 0.10
-            coding: 0.05
+            coding: 0.10
         context:
           min_tokens_from_request: true
         objectives:
@@ -440,6 +438,8 @@ routing:
             summarisation: 0.15
             factual_qa: 0.15
             low_complexity: 0.10
+        context:
+          min_tokens_from_request: true
         objectives:
           capability_fit: 0.30
           quality: 0.20
@@ -466,10 +466,10 @@ routing:
           modality_from_request: true
         prefer:
           capabilities:
-            visual_reasoning: 0.35
-            multimodal_reasoning: 0.30
-            image_understanding: 0.20
-            video_understanding: 0.15
+            visual_reasoning: 0.30
+            multimodal_reasoning: 0.25
+            image_understanding: 0.25
+            video_understanding: 0.20
         context:
           min_tokens_from_request: true
         objectives:
