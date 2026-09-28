@@ -137,35 +137,36 @@ var textParamsKnownFields = map[string]bool{
 
 // Known fields for CompletionRequest
 var chatParamsKnownFields = map[string]bool{
-	"model":                 true,
-	"messages":              true,
-	"fallbacks":             true,
-	"stream":                true,
-	"frequency_penalty":     true,
-	"logit_bias":            true,
-	"logprobs":              true,
-	"max_completion_tokens": true,
-	"metadata":              true,
-	"modalities":            true,
-	"parallel_tool_calls":   true,
-	"presence_penalty":      true,
-	"prompt_cache_key":      true,
-	"reasoning":             true,
-	"reasoning_effort":      true,
-	"reasoning_max_tokens":  true,
-	"response_format":       true,
-	"safety_identifier":     true,
-	"service_tier":          true,
-	"stream_options":        true,
-	"store":                 true,
-	"temperature":           true,
-	"tool_choice":           true,
-	"tools":                 true,
-	"truncation":            true,
-	"user":                  true,
-	"verbosity":             true,
-}
 
+	"model":                   true,
+	"messages":                true,
+	"fallbacks":               true,
+	"stream":                  true,
+	"frequency_penalty":       true,
+	"logit_bias":              true,
+	"logprobs":                true,
+	"max_completion_tokens":   true,
+	"metadata":                true,
+	"modalities":              true,
+	"parallel_tool_calls":     true,
+	"presence_penalty":        true,
+	"prompt_cache_key":        true,
+	"reasoning":               true,
+	"reasoning_effort":        true,
+	"reasoning_max_tokens":    true,
+	"response_format":         true,
+	"safety_identifier":       true,
+	"service_tier":            true,
+	"stream_options":          true,
+	"store":                   true,
+	"temperature":             true,
+	"tool_choice":             true,
+	"tools":                   true,
+	"truncation":              true,
+	"user":                    true,
+	"verbosity":               true,
+	"external_id":             true,
+}
 var responsesParamsKnownFields = map[string]bool{
 	"model":                true,
 	"input":                true,
@@ -390,6 +391,10 @@ type TextRequest struct {
 
 type ChatRequest struct {
 	Messages []schemas.ChatMessage `json:"messages"`
+	// ExternalID is an optional client-supplied billing/correlation id from body
+	// field "external_id". When set, it becomes Bifrost request-id and
+	// InferenceUsage.externalTransactionId; otherwise x-request-id / UUID fallback.
+	ExternalID string `json:"external_id,omitempty"`
 	BifrostParams
 	*schemas.ChatParameters
 }
@@ -406,14 +411,16 @@ func (cr *ChatRequest) UnmarshalJSON(data []byte) error {
 	}
 	cr.BifrostParams = BifrostParams(bp)
 
-	// Unmarshal messages
+	// Unmarshal messages + optional external_id
 	var msgStruct struct {
-		Messages []schemas.ChatMessage `json:"messages"`
+		Messages   []schemas.ChatMessage `json:"messages"`
+		ExternalID string                `json:"external_id"`
 	}
 	if err := sonic.Unmarshal(data, &msgStruct); err != nil {
 		return err
 	}
 	cr.Messages = msgStruct.Messages
+	cr.ExternalID = strings.TrimSpace(msgStruct.ExternalID)
 
 	// Unmarshal ChatParameters (which has its own custom unmarshaller)
 	if cr.ChatParameters == nil {
@@ -985,6 +992,20 @@ func prepareChatCompletionRequest(ctx *fasthttp.RequestCtx, config *lib.Config) 
 	}, nil
 }
 
+// applyChatExternalID overrides Bifrost request-id when the chat body supplied
+// an external id. That value is published as InferenceUsage.externalTransactionId.
+// When blank, existing fallback remains: x-request-id header, else a generated UUID.
+func applyChatExternalID(bifrostCtx *schemas.BifrostContext, externalID string) {
+	if bifrostCtx == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(externalID)
+	if trimmed == "" {
+		return
+	}
+	bifrostCtx.SetValue(schemas.BifrostContextKeyRequestID, trimmed)
+}
+
 // chatCompletion handles POST /v1/chat/completions - Process chat completion requests
 func (h *CompletionHandler) chatCompletion(ctx *fasthttp.RequestCtx) {
 	req, bifrostChatReq, err := prepareChatCompletionRequest(ctx, h.config)
@@ -999,6 +1020,7 @@ func (h *CompletionHandler) chatCompletion(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "Failed to convert context")
 		return
 	}
+	applyChatExternalID(bifrostCtx, req.ExternalID)
 	if effectiveStream(req.Stream) {
 		h.handleStreamingChatCompletion(ctx, bifrostChatReq, bifrostCtx, cancel)
 		return
