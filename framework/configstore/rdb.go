@@ -28,10 +28,10 @@ import (
 // The runtime *gorm.DB is held behind an atomic.Pointer so RefreshConnectionPool
 // can swap it out without tearing callers down.
 type RDBConfigStore struct {
-	db            atomic.Pointer[gorm.DB]
-	logger        schemas.Logger
+	db               atomic.Pointer[gorm.DB]
+	logger           schemas.Logger
 	migrateOnFreshFn func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error
-	refreshPoolFn func(ctx context.Context) error
+	refreshPoolFn    func(ctx context.Context) error
 }
 
 // getWeight safely dereferences a *float64 weight pointer, returning 1.0 as default if nil.
@@ -678,7 +678,7 @@ func (s *RDBConfigStore) UpdateProvidersConfig(ctx context.Context, providers ma
 			// Handle Azure config
 			if key.AzureKeyConfig != nil {
 				dbKey.AzureEndpoint = &key.AzureKeyConfig.Endpoint
-				}
+			}
 
 			// Handle Vertex config
 			if key.VertexKeyConfig != nil {
@@ -2693,12 +2693,48 @@ func (s *RDBConfigStore) GetAllowedModelConfigs(ctx context.Context, virtualKeyI
 func (s *RDBConfigStore) GetOrgAllowedModelConfigs(ctx context.Context, orgIDs []string) ([]tables.TableAllowedModelConfig, error) {
 	var configs []tables.TableAllowedModelConfig
 	q := GovernanceActive(s.DB().WithContext(ctx)).
-		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL").
+		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NULL").
 		Preload("ConfigProvider").
 		Preload("AllowedModel").
 		Preload("BlacklistedModel")
 	if len(orgIDs) > 0 {
 		q = q.Where("scope_org_id IN ?", orgIDs)
+	}
+	if err := q.Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	return AggregateAllowedModelConfigs(configs), nil
+}
+
+// GetOrgUnitAllowedModelConfigs returns allowed model configs scoped to specific org units.
+// When orgUnitIDs is nil or empty all org-unit-level configs are returned.
+func (s *RDBConfigStore) GetOrgUnitAllowedModelConfigs(ctx context.Context, orgUnitIDs []string) ([]tables.TableAllowedModelConfig, error) {
+	var configs []tables.TableAllowedModelConfig
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NOT NULL AND scope_user_id IS NULL").
+		Preload("ConfigProvider").
+		Preload("AllowedModel").
+		Preload("BlacklistedModel")
+	if len(orgUnitIDs) > 0 {
+		q = q.Where("scope_org_unit_id IN ?", orgUnitIDs)
+	}
+	if err := q.Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	return AggregateAllowedModelConfigs(configs), nil
+}
+
+// GetUserAllowedModelConfigs returns allowed model configs scoped to specific users.
+// When userIDs is nil or empty all user-level configs are returned.
+func (s *RDBConfigStore) GetUserAllowedModelConfigs(ctx context.Context, userIDs []string) ([]tables.TableAllowedModelConfig, error) {
+	var configs []tables.TableAllowedModelConfig
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NOT NULL").
+		Preload("ConfigProvider").
+		Preload("AllowedModel").
+		Preload("BlacklistedModel")
+	if len(userIDs) > 0 {
+		q = q.Where("scope_user_id IN ?", userIDs)
 	}
 	if err := q.Find(&configs).Error; err != nil {
 		return nil, err
@@ -2730,13 +2766,63 @@ func (s *RDBConfigStore) GetProviderAccessByScopeOrgID(ctx context.Context, orgI
 	return rows, nil
 }
 
+func (s *RDBConfigStore) GetProviderAccessByScopeOrgUnitID(ctx context.Context, orgUnitID string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	if err := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("scope_org_unit_id = ?", orgUnitID).
+		Preload("ConfigProvider").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetProviderAccessByScopeUserID(ctx context.Context, userID string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	if err := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("scope_user_id = ?", userID).
+		Preload("ConfigProvider").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (s *RDBConfigStore) GetOrgProviderAccess(ctx context.Context, orgIDs []string) ([]tables.TableProviderAccess, error) {
 	var rows []tables.TableProviderAccess
 	q := GovernanceActive(s.DB().WithContext(ctx)).
-		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL").
+		Where("virtual_key_id IS NULL AND scope_org_id IS NOT NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NULL").
 		Preload("ConfigProvider")
 	if len(orgIDs) > 0 {
 		q = q.Where("scope_org_id IN ?", orgIDs)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetOrgUnitProviderAccess(ctx context.Context, orgUnitIDs []string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NOT NULL AND scope_user_id IS NULL").
+		Preload("ConfigProvider")
+	if len(orgUnitIDs) > 0 {
+		q = q.Where("scope_org_unit_id IN ?", orgUnitIDs)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetUserProviderAccess(ctx context.Context, userIDs []string) ([]tables.TableProviderAccess, error) {
+	var rows []tables.TableProviderAccess
+	q := GovernanceActive(s.DB().WithContext(ctx)).
+		Where("virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NOT NULL").
+		Preload("ConfigProvider")
+	if len(userIDs) > 0 {
+		q = q.Where("scope_user_id IN ?", userIDs)
 	}
 	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
@@ -2757,6 +2843,8 @@ func (s *RDBConfigStore) ReplaceProviderAccessForVirtualKey(ctx context.Context,
 	for i := range rows {
 		rows[i].VirtualKeyID = &vkID
 		rows[i].ScopeOrgID = nil
+		rows[i].ScopeOrgUnitID = nil
+		rows[i].ScopeUserID = nil
 		EnsureGovernanceRowID(&rows[i].ID)
 		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
 		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
@@ -2781,6 +2869,60 @@ func (s *RDBConfigStore) ReplaceProviderAccessForScopeOrg(ctx context.Context, o
 	for i := range rows {
 		rows[i].ScopeOrgID = &orgID
 		rows[i].VirtualKeyID = nil
+		rows[i].ScopeOrgUnitID = nil
+		rows[i].ScopeUserID = nil
+		EnsureGovernanceRowID(&rows[i].ID)
+		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
+		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
+			return err
+		}
+		if err := txDB.WithContext(ctx).Create(&rows[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceProviderAccessForScopeOrgUnit replaces all provider access rows for an org-unit scope.
+func (s *RDBConfigStore) ReplaceProviderAccessForScopeOrgUnit(ctx context.Context, orgUnitID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error {
+	txDB := s.DB()
+	if len(tx) > 0 {
+		txDB = tx[0]
+	}
+	if err := MarkDeleted(ctx, txDB, &tables.TableProviderAccess{}, "scope_org_unit_id = ?", orgUnitID); err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].ScopeOrgUnitID = &orgUnitID
+		rows[i].VirtualKeyID = nil
+		rows[i].ScopeOrgID = nil
+		rows[i].ScopeUserID = nil
+		EnsureGovernanceRowID(&rows[i].ID)
+		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
+		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
+			return err
+		}
+		if err := txDB.WithContext(ctx).Create(&rows[i]).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceProviderAccessForScopeUser replaces all provider access rows for a user scope.
+func (s *RDBConfigStore) ReplaceProviderAccessForScopeUser(ctx context.Context, userID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error {
+	txDB := s.DB()
+	if len(tx) > 0 {
+		txDB = tx[0]
+	}
+	if err := MarkDeleted(ctx, txDB, &tables.TableProviderAccess{}, "scope_user_id = ?", userID); err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].ScopeUserID = &userID
+		rows[i].VirtualKeyID = nil
+		rows[i].ScopeOrgID = nil
+		rows[i].ScopeOrgUnitID = nil
 		EnsureGovernanceRowID(&rows[i].ID)
 		ApplyAuditOnCreate(ctx, &rows[i].SystemColumns)
 		if err := s.resolveProviderAccessProviderID(ctx, txDB, &rows[i]); err != nil {
@@ -2967,10 +3109,12 @@ func (s *RDBConfigStore) createModelRefRows(
 ) error {
 	newRow := func(modelID string, allow bool) tables.TableAllowedModelConfig {
 		row := tables.TableAllowedModelConfig{
-			VirtualKeyID: header.VirtualKeyID,
-			ScopeOrgID:   header.ScopeOrgID,
-			ProviderID:   header.ProviderID,
-			AllowAllKeys: true,
+			VirtualKeyID:   header.VirtualKeyID,
+			ScopeOrgID:     header.ScopeOrgID,
+			ScopeOrgUnitID: header.ScopeOrgUnitID,
+			ScopeUserID:    header.ScopeUserID,
+			ProviderID:     header.ProviderID,
+			AllowAllKeys:   true,
 		}
 		EnsureGovernanceRowID(&row.ID)
 		ApplyAuditOnCreate(ctx, &row.SystemColumns)
@@ -3014,7 +3158,7 @@ func (s *RDBConfigStore) createModelRefRows(
 }
 
 // deleteModelRefRows soft-deletes all model-specific rows (AllowedModelID or BlacklistedModelID
-// non-null) for the given (VirtualKeyID|ScopeOrgID, ProviderID) scope inside txDB.
+// non-null) for the given (VirtualKeyID|ScopeOrgID|ScopeOrgUnitID|ScopeUserID, ProviderID) scope inside txDB.
 func (s *RDBConfigStore) deleteModelRefRows(ctx context.Context, txDB *gorm.DB, header *tables.TableAllowedModelConfig) error {
 	q := GovernanceActive(txDB.WithContext(ctx)).
 		Model(&tables.TableAllowedModelConfig{}).
@@ -3024,6 +3168,10 @@ func (s *RDBConfigStore) deleteModelRefRows(ctx context.Context, txDB *gorm.DB, 
 		q = q.Where("virtual_key_id = ?", *header.VirtualKeyID)
 	} else if header.ScopeOrgID != nil {
 		q = q.Where("scope_org_id = ?", *header.ScopeOrgID)
+	} else if header.ScopeOrgUnitID != nil {
+		q = q.Where("scope_org_unit_id = ?", *header.ScopeOrgUnitID)
+	} else if header.ScopeUserID != nil {
+		q = q.Where("scope_user_id = ?", *header.ScopeUserID)
 	}
 
 	if err := q.Update("deleted", true).Error; err != nil {
@@ -3088,6 +3236,56 @@ func (s *RDBConfigStore) ReplaceAllowedModelConfigRows(ctx context.Context, pc *
 	}
 	// Re-insert model-ref rows.
 	return s.createModelRefRows(ctx, txDB, pc)
+}
+
+// ReplaceAllowedModelConfigsForScopeOrgUnit replaces all provider/model access rows
+// for an org-unit scope.
+func (s *RDBConfigStore) ReplaceAllowedModelConfigsForScopeOrgUnit(ctx context.Context, orgUnitID string, configs []tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
+	if len(tx) == 0 {
+		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+			return s.ReplaceAllowedModelConfigsForScopeOrgUnit(ctx, orgUnitID, configs, transaction)
+		})
+	}
+	txDB := tx[0]
+	if err := MarkDeleted(ctx, txDB, &tables.TableAllowedModelConfig{}, "scope_org_unit_id = ?", orgUnitID); err != nil {
+		return err
+	}
+	for i := range configs {
+		configs[i].VirtualKeyID = nil
+		configs[i].ScopeOrgID = nil
+		configs[i].ScopeOrgUnitID = &orgUnitID
+		configs[i].ScopeUserID = nil
+		configs[i].AllowAllKeys = true
+		if err := s.CreateAllowedModelConfigExpanded(ctx, &configs[i], txDB); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceAllowedModelConfigsForScopeUser replaces all provider/model access rows
+// for a user scope.
+func (s *RDBConfigStore) ReplaceAllowedModelConfigsForScopeUser(ctx context.Context, userID string, configs []tables.TableAllowedModelConfig, tx ...*gorm.DB) error {
+	if len(tx) == 0 {
+		return s.DB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+			return s.ReplaceAllowedModelConfigsForScopeUser(ctx, userID, configs, transaction)
+		})
+	}
+	txDB := tx[0]
+	if err := MarkDeleted(ctx, txDB, &tables.TableAllowedModelConfig{}, "scope_user_id = ?", userID); err != nil {
+		return err
+	}
+	for i := range configs {
+		configs[i].VirtualKeyID = nil
+		configs[i].ScopeOrgID = nil
+		configs[i].ScopeOrgUnitID = nil
+		configs[i].ScopeUserID = &userID
+		configs[i].AllowAllKeys = true
+		if err := s.CreateAllowedModelConfigExpanded(ctx, &configs[i], txDB); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteAllowedModelConfig soft-deletes a virtual key provider config from the database.
@@ -4238,13 +4436,13 @@ func (s *RDBConfigStore) GetGovernanceConfig(ctx context.Context) (*GovernanceCo
 	AttachGovernanceFromReverseFK(budgets, rateLimits, providers, modelConfigs, virtualKeys)
 
 	return &GovernanceConfig{
-		VirtualKeys:      virtualKeys,
-		Teams:            teams,
-		Customers:        customers,
-		Budgets:          budgets,
-		RateLimits:       rateLimits,
-		ModelConfigs:     modelConfigs,
-		Providers:        providers,
+		VirtualKeys:  virtualKeys,
+		Teams:        teams,
+		Customers:    customers,
+		Budgets:      budgets,
+		RateLimits:   rateLimits,
+		ModelConfigs: modelConfigs,
+		Providers:    providers,
 		RoutingRules: routingRules,
 		AuthConfig:   authConfig,
 	}, nil

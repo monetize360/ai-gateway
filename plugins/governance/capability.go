@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -194,7 +195,7 @@ func (p *GovernancePlugin) enumerateCandidates(ctx *schemas.BifrostContext, comp
 			if isModelBlockedByList(config.BlacklistedModels, model) {
 				continue
 			}
-			if comp.resolver != nil && !comp.resolver.isProviderAndModelAccessible(virtualKey, provider, model) {
+			if comp.resolver != nil && !comp.resolver.isProviderAndModelAccessibleForContext(ctx, virtualKey, provider, model) {
 				accessSkipped++
 				continue
 			}
@@ -515,12 +516,16 @@ func contextScore(limit int, profile *RequestProfile) float64 {
 }
 
 func (p *GovernancePlugin) validateCandidate(comp *tenantGovernanceComponents, virtualKey *configstoreTables.TableVirtualKey, candidate routeCandidate) (string, bool) {
+	return p.validateCandidateForContext(context.Background(), comp, virtualKey, candidate)
+}
+
+func (p *GovernancePlugin) validateCandidateForContext(ctx context.Context, comp *tenantGovernanceComponents, virtualKey *configstoreTables.TableVirtualKey, candidate routeCandidate) (string, bool) {
 	if p.modelCatalog == nil || p.inMemoryStore == nil {
 		return "", false
 	}
 
 	if comp != nil && comp.resolver != nil && virtualKey != nil {
-		if !comp.resolver.isProviderAndModelAccessible(virtualKey, candidate.Provider, candidate.Model) {
+		if !comp.resolver.isProviderAndModelAccessibleForContext(ctx, virtualKey, candidate.Provider, candidate.Model) {
 			return "", false
 		}
 	}
@@ -725,7 +730,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 			logSemanticTotal(false)
 			return body, false
 		}
-		refined, valid := p.validateCandidate(comp, virtualKey, eligible[i])
+		refined, valid := p.validateCandidateForContext(ctx, comp, virtualKey, eligible[i])
 		if !valid {
 			continue
 		}
@@ -751,7 +756,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 	fallbacks := runnersUp
 	if originalProvider, originalModel := schemas.ParseModelString(resolved.Model, ""); originalProvider != "" &&
 		!(originalProvider == winner.Provider && strings.EqualFold(originalModel, winnerModel)) &&
-		(comp.resolver == nil || comp.resolver.isProviderAndModelAccessible(virtualKey, originalProvider, originalModel)) {
+		(comp.resolver == nil || comp.resolver.isProviderAndModelAccessibleForContext(ctx, virtualKey, originalProvider, originalModel)) {
 		fallbacks = append([]string{string(originalProvider) + "/" + originalModel}, runnersUp...)
 	}
 	if setFallbacksIfAbsent(body, fallbacks) {

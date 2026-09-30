@@ -154,6 +154,10 @@ type ConfigStore interface {
 	// When orgIDs is nil or empty all org-level configs are returned (full reload path).
 	// Pass specific org IDs for targeted lookup.
 	GetOrgAllowedModelConfigs(ctx context.Context, orgIDs []string) ([]tables.TableAllowedModelConfig, error)
+	// GetOrgUnitAllowedModelConfigs returns configs scoped to org units.
+	GetOrgUnitAllowedModelConfigs(ctx context.Context, orgUnitIDs []string) ([]tables.TableAllowedModelConfig, error)
+	// GetUserAllowedModelConfigs returns configs scoped to users.
+	GetUserAllowedModelConfigs(ctx context.Context, userIDs []string) ([]tables.TableAllowedModelConfig, error)
 	CreateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 	UpdateAllowedModelConfig(ctx context.Context, allowedModelConfig *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 	DeleteAllowedModelConfig(ctx context.Context, id string, tx ...*gorm.DB) error
@@ -161,15 +165,25 @@ type ConfigStore interface {
 	CreateAllowedModelConfigExpanded(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 	// ReplaceAllowedModelConfigRows updates the header row and replaces all model-ref rows for its scope.
 	ReplaceAllowedModelConfigRows(ctx context.Context, pc *tables.TableAllowedModelConfig, tx ...*gorm.DB) error
+	// ReplaceAllowedModelConfigsForScopeOrgUnit replaces all provider/model rows for an org unit.
+	ReplaceAllowedModelConfigsForScopeOrgUnit(ctx context.Context, orgUnitID string, configs []tables.TableAllowedModelConfig, tx ...*gorm.DB) error
+	// ReplaceAllowedModelConfigsForScopeUser replaces all provider/model rows for a user.
+	ReplaceAllowedModelConfigsForScopeUser(ctx context.Context, userID string, configs []tables.TableAllowedModelConfig, tx ...*gorm.DB) error
 
 	// Provider access CRUD (scope-level provider allow/block rules)
 	GetProviderAccessByVirtualKeyID(ctx context.Context, vkID string) ([]tables.TableProviderAccess, error)
 	GetProviderAccessByScopeOrgID(ctx context.Context, orgID string) ([]tables.TableProviderAccess, error)
+	GetProviderAccessByScopeOrgUnitID(ctx context.Context, orgUnitID string) ([]tables.TableProviderAccess, error)
+	GetProviderAccessByScopeUserID(ctx context.Context, userID string) ([]tables.TableProviderAccess, error)
 	// GetOrgProviderAccess returns provider access rows scoped to orgs (scope_org_id set, virtual_key_id null).
 	// When orgIDs is nil or empty all org-level rows are returned (full reload path).
 	GetOrgProviderAccess(ctx context.Context, orgIDs []string) ([]tables.TableProviderAccess, error)
+	GetOrgUnitProviderAccess(ctx context.Context, orgUnitIDs []string) ([]tables.TableProviderAccess, error)
+	GetUserProviderAccess(ctx context.Context, userIDs []string) ([]tables.TableProviderAccess, error)
 	ReplaceProviderAccessForVirtualKey(ctx context.Context, vkID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
 	ReplaceProviderAccessForScopeOrg(ctx context.Context, orgID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
+	ReplaceProviderAccessForScopeOrgUnit(ctx context.Context, orgUnitID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
+	ReplaceProviderAccessForScopeUser(ctx context.Context, userID string, rows []tables.TableProviderAccess, tx ...*gorm.DB) error
 	DeleteProviderAccess(ctx context.Context, id string, tx ...*gorm.DB) error
 
 	// Virtual key MCP config CRUD
