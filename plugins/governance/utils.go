@@ -252,7 +252,7 @@ func (p *GovernancePlugin) filterModelsForVirtualKey(
 	filteredModels := make([]schemas.Model, 0, len(models))
 	for _, model := range models {
 		provider, modelName := schemas.ParseModelString(model.ID, "")
-		if comp.resolver.isModelAllowed(vk, provider, modelName) {
+		if comp.resolver.isProviderAndModelAccessibleForContext(ctx, vk, provider, modelName) {
 			filteredModels = append(filteredModels, model)
 		}
 	}

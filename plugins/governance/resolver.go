@@ -48,6 +48,22 @@ type EvaluationRequest struct {
 	BillingUserID string                `json:"billing_user_id,omitempty"` // Body user_id for budgetusage__m.user_id checks
 }
 
+type scopedAccessStore interface {
+	ResolveOrgUnitHierarchyIDs(userIDs ...string) []string
+	GetOrgUnitAllowedModelConfigs(orgUnitIDs []string) []configstoreTables.TableAllowedModelConfig
+	GetOrgUnitProviderAccessPolicy(orgUnitIDs []string) *configstoreTables.ProviderAccessPolicyRT
+	ResolveGovernanceUserID(userIDs ...string) string
+	GetUserAllowedModelConfigs(userID string) []configstoreTables.TableAllowedModelConfig
+	GetUserProviderAccessPolicy(userID string) *configstoreTables.ProviderAccessPolicyRT
+}
+
+type scopedAccessPolicies struct {
+	orgUnitModelConfigs   []configstoreTables.TableAllowedModelConfig
+	orgUnitProviderPolicy *configstoreTables.ProviderAccessPolicyRT
+	userModelConfigs      []configstoreTables.TableAllowedModelConfig
+	userProviderPolicy    *configstoreTables.ProviderAccessPolicyRT
+}
+
 // EvaluationResult contains the complete result of governance evaluation
 type EvaluationResult struct {
 	Decision      Decision                           `json:"decision"`
@@ -325,9 +341,11 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 			Reason:   "Virtual key is inactive",
 		}
 	}
-	// 2a. Check provider access policy (org-level then VK-level allow/block rules)
+	// 2a. Check provider access policy (org → org-unit → user → VK)
+	var scopedPolicies scopedAccessPolicies
 	if requestType != schemas.MCPToolExecutionRequest {
-		if allowed, reason := isProviderAllowedByAccessPolicy(vk, provider); !allowed {
+		scopedPolicies = r.resolveScopedAccess(ctx, vk)
+		if allowed, reason := isProviderAllowedByAccessPolicy(vk, provider, scopedPolicies.orgUnitProviderPolicy, scopedPolicies.userProviderPolicy); !allowed {
 			return &EvaluationResult{
 				Decision:   DecisionProviderBlocked,
 				Reason:     reason,
@@ -344,7 +362,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 		}
 	}
 	// 3. Check model filtering
-	if r.isModelRequired(requestType) && !r.isModelAllowed(vk, provider, model) {
+	if r.isModelRequired(requestType) && !r.isModelAllowedWithScopedConfigs(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs) {
 		return &EvaluationResult{
 			Decision:   DecisionModelBlocked,
 			Reason:     fmt.Sprintf("Model '%s' is not allowed for this virtual key", model),
@@ -365,11 +383,12 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 		}
 	}
 
-	// Find the provider config that matches the request's provider and apply key filtering
+	// Find the provider config that matches the request's provider and apply key filtering.
+	// A model allow/block row does not name keys. Only an explicit key list narrows which
+	// provider keys may be used; an empty list leaves every key for that provider available.
 	for _, pc := range vk.AllowedModelConfigs {
 		if schemas.ModelProvider(pc.Provider) == provider {
-			if !pc.AllowAllKeys {
-				// Restrict to specific keys (empty slice = no keys allowed)
+			if !pc.AllowAllKeys && len(pc.Keys) > 0 {
 				includeOnlyKeys := make([]string, 0, len(pc.Keys))
 				for _, dbKey := range pc.Keys {
 					includeOnlyKeys = append(includeOnlyKeys, dbKey.KeyID)
@@ -393,16 +412,21 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 // provider allowlist, and org+VK model allow/block). Budgets and rate limits are not
 // considered — callers that need spend gates use the dedicated helper methods.
 func (r *BudgetResolver) isProviderAndModelAccessible(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
+	return r.isProviderAndModelAccessibleForContext(context.Background(), vk, provider, model)
+}
+
+func (r *BudgetResolver) isProviderAndModelAccessibleForContext(ctx context.Context, vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
 	if r == nil || vk == nil {
 		return false
 	}
-	if allowed, _ := isProviderAllowedByAccessPolicy(vk, provider); !allowed {
+	scopedPolicies := r.resolveScopedAccess(ctx, vk)
+	if allowed, _ := isProviderAllowedByAccessPolicy(vk, provider, scopedPolicies.orgUnitProviderPolicy, scopedPolicies.userProviderPolicy); !allowed {
 		return false
 	}
 	if !r.isProviderAllowed(vk, provider) {
 		return false
 	}
-	return r.isModelAllowed(vk, provider, model)
+	return r.isModelAllowedWithScopedConfigs(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs)
 }
 
 // isModelAllowed checks if the requested model is allowed for this VK.
@@ -418,6 +442,10 @@ func (r *BudgetResolver) isProviderAndModelAccessible(vk *configstoreTables.Tabl
 //   - Same blacklist-wins, then allowlist logic as before.
 //   - Empty VK configs means no VK-level restriction (allow all from this layer).
 func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
+	return r.isModelAllowedWithScopedConfigs(vk, provider, model, nil, nil)
+}
+
+func (r *BudgetResolver) isModelAllowedWithScopedConfigs(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) bool {
 	// --- Layer 1: Org-level restrictions ---
 	if len(vk.OrgAllowedModelConfigs) > 0 {
 		orgHasConfigForProvider := false
@@ -437,17 +465,7 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 				if pc.Provider != string(provider) {
 					continue
 				}
-				if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
-					providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
-					providerConfigPtr := &providerConfig
-					if !ok {
-						providerConfigPtr = nil
-					}
-					if r.modelCatalog.IsModelAllowedForProvider(provider, model, providerConfigPtr, pc.AllowedModels) {
-						orgAllows = true
-						break
-					}
-				} else if pc.AllowedModels.IsAllowed(model) {
+				if r.isModelInAllowedList(provider, model, pc.AllowedModels) {
 					orgAllows = true
 					break
 				}
@@ -458,7 +476,17 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 		}
 	}
 
-	// --- Layer 2: VK-level restrictions ---
+	// --- Layer 2: Org-unit restrictions ---
+	if !r.isModelAllowedByOrgUnitConfigs(orgUnitConfigs, provider, model) {
+		return false
+	}
+
+	// --- Layer 3: User restrictions ---
+	if !r.isModelAllowedByUserConfigs(userConfigs, provider, model) {
+		return false
+	}
+
+	// --- Layer 4: VK-level restrictions ---
 	// Empty VK configs means no VK-level restriction.
 	if len(vk.AllowedModelConfigs) == 0 {
 		return true
@@ -473,22 +501,124 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 
 	// Pass 2: allowlist check — model is allowed if any matching VK config permits it.
 	for _, pc := range vk.AllowedModelConfigs {
-		if pc.Provider == string(provider) {
-			if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
-				providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
-				providerConfigPtr := &providerConfig
-				if !ok {
-					providerConfigPtr = nil
-				}
-				if r.modelCatalog.IsModelAllowedForProvider(provider, model, providerConfigPtr, pc.AllowedModels) {
-					return true
-				}
-			} else if pc.AllowedModels.IsAllowed(model) {
-				return true
-			}
+		if pc.Provider == string(provider) && r.isModelInAllowedList(provider, model, pc.AllowedModels) {
+			return true
 		}
 	}
 
+	return false
+}
+
+func (r *BudgetResolver) isModelAllowedByOrgUnitConfigs(configs []configstoreTables.TableAllowedModelConfig, provider schemas.ModelProvider, model string) bool {
+	if len(configs) == 0 {
+		return true
+	}
+
+	byOrgUnit := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	for _, config := range configs {
+		if config.ScopeOrgUnitID == nil || strings.TrimSpace(*config.ScopeOrgUnitID) == "" {
+			continue
+		}
+		byOrgUnit[*config.ScopeOrgUnitID] = append(byOrgUnit[*config.ScopeOrgUnitID], config)
+	}
+
+	for _, unitConfigs := range byOrgUnit {
+		hasProviderConfig := false
+		for _, config := range unitConfigs {
+			if config.Provider != string(provider) {
+				continue
+			}
+			hasProviderConfig = true
+			if isModelBlockedByList(config.BlacklistedModels, model) {
+				return false
+			}
+		}
+		if !hasProviderConfig {
+			return false
+		}
+
+		allowed := false
+		for _, config := range unitConfigs {
+			if config.Provider == string(provider) && r.isModelInAllowedList(provider, model, config.AllowedModels) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *BudgetResolver) isModelInAllowedList(provider schemas.ModelProvider, model string, allowedModels schemas.WhiteList) bool {
+	// ["*"] is a policy wildcard: the request is already routed to this provider, so the
+	// pricing catalog must not veto models it does not list (custom and self-hosted providers).
+	if allowedModels.IsUnrestricted() {
+		return true
+	}
+	if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
+		providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
+		if !ok {
+			return r.modelCatalog.IsModelAllowedForProvider(provider, model, nil, allowedModels)
+		}
+		return r.modelCatalog.IsModelAllowedForProvider(provider, model, &providerConfig, allowedModels)
+	}
+	return allowedModels.IsAllowed(model)
+}
+
+func (r *BudgetResolver) resolveScopedAccess(ctx context.Context, vk *configstoreTables.TableVirtualKey) scopedAccessPolicies {
+	var policies scopedAccessPolicies
+	store, ok := r.store.(scopedAccessStore)
+	if !ok || vk == nil {
+		return policies
+	}
+
+	virtualKeyUserID := ""
+	if vk.UserID != nil {
+		virtualKeyUserID = strings.TrimSpace(*vk.UserID)
+	}
+	requestUserID, _ := ctx.Value(schemas.BifrostContextKeyUserID).(string)
+	billingUserID, _ := ctx.Value(schemas.BifrostContextKeyBillingUserID).(string)
+
+	orgUnitIDs := store.ResolveOrgUnitHierarchyIDs(virtualKeyUserID, requestUserID, billingUserID)
+	if len(orgUnitIDs) > 0 {
+		policies.orgUnitModelConfigs = store.GetOrgUnitAllowedModelConfigs(orgUnitIDs)
+		policies.orgUnitProviderPolicy = store.GetOrgUnitProviderAccessPolicy(orgUnitIDs)
+	}
+
+	userID := store.ResolveGovernanceUserID(virtualKeyUserID, requestUserID, billingUserID)
+	if userID != "" {
+		policies.userModelConfigs = store.GetUserAllowedModelConfigs(userID)
+		policies.userProviderPolicy = store.GetUserProviderAccessPolicy(userID)
+	}
+	return policies
+}
+
+func (r *BudgetResolver) isModelAllowedByUserConfigs(configs []configstoreTables.TableAllowedModelConfig, provider schemas.ModelProvider, model string) bool {
+	if len(configs) == 0 {
+		return true
+	}
+
+	hasProviderConfig := false
+	for _, config := range configs {
+		if config.Provider != string(provider) {
+			continue
+		}
+		hasProviderConfig = true
+		if isModelBlockedByList(config.BlacklistedModels, model) {
+			return false
+		}
+	}
+	if !hasProviderConfig {
+		return false
+	}
+
+	for _, config := range configs {
+		if config.Provider == string(provider) && r.isModelInAllowedList(provider, model, config.AllowedModels) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -499,7 +629,7 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 // VK-level, with blacklist-wins semantics.
 //
 // Returns (true, "") when the provider is permitted, or (false, reason) when blocked.
-func isProviderAllowedByAccessPolicy(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) (bool, string) {
+func isProviderAllowedByAccessPolicy(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, orgUnitPolicy *configstoreTables.ProviderAccessPolicyRT, userPolicy *configstoreTables.ProviderAccessPolicyRT) (bool, string) {
 	providerName := string(provider)
 
 	// Layer 1: org-level provider access policy
@@ -508,18 +638,38 @@ func isProviderAllowedByAccessPolicy(vk *configstoreTables.TableVirtualKey, prov
 		if p.BlacklistedProviders.IsBlocked(providerName) {
 			return false, fmt.Sprintf("Provider '%s' is blocked by organization policy", provider)
 		}
-		if len(p.AllowedProviders) > 0 && !p.AllowedProviders.IsAllowed(providerName) {
+		if (p.HasAllowRestriction || len(p.AllowedProviders) > 0) && !p.AllowedProviders.IsAllowed(providerName) {
 			return false, fmt.Sprintf("Provider '%s' is not in the organization allow list", provider)
 		}
 	}
 
-	// Layer 2: VK-level provider access policy
+	// Layer 2: org-unit-level provider access policy
+	if orgUnitPolicy != nil && !orgUnitPolicy.IsEmpty() {
+		if orgUnitPolicy.BlacklistedProviders.IsBlocked(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is blocked by organizational unit policy", provider)
+		}
+		if (orgUnitPolicy.HasAllowRestriction || len(orgUnitPolicy.AllowedProviders) > 0) && !orgUnitPolicy.AllowedProviders.IsAllowed(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is not in the organizational unit allow list", provider)
+		}
+	}
+
+	// Layer 3: user-level provider access policy
+	if userPolicy != nil && !userPolicy.IsEmpty() {
+		if userPolicy.BlacklistedProviders.IsBlocked(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is blocked by user policy", provider)
+		}
+		if (userPolicy.HasAllowRestriction || len(userPolicy.AllowedProviders) > 0) && !userPolicy.AllowedProviders.IsAllowed(providerName) {
+			return false, fmt.Sprintf("Provider '%s' is not in the user allow list", provider)
+		}
+	}
+
+	// Layer 4: VK-level provider access policy
 	if vk.ProviderAccessPolicy != nil && !vk.ProviderAccessPolicy.IsEmpty() {
 		p := vk.ProviderAccessPolicy
 		if p.BlacklistedProviders.IsBlocked(providerName) {
 			return false, fmt.Sprintf("Provider '%s' is blocked for this virtual key", provider)
 		}
-		if len(p.AllowedProviders) > 0 && !p.AllowedProviders.IsAllowed(providerName) {
+		if (p.HasAllowRestriction || len(p.AllowedProviders) > 0) && !p.AllowedProviders.IsAllowed(providerName) {
 			return false, fmt.Sprintf("Provider '%s' is not in the virtual key allow list", provider)
 		}
 	}

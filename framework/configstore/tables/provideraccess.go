@@ -13,11 +13,14 @@ import (
 type ProviderAccessPolicyRT struct {
 	AllowedProviders     schemas.WhiteList `json:"allowed_providers"`
 	BlacklistedProviders schemas.BlackList `json:"blacklisted_providers"`
+	// HasAllowRestriction preserves a deny-all result when restrictive allowlists
+	// intersect to an empty set.
+	HasAllowRestriction bool `json:"-"`
 }
 
 // IsEmpty returns true when the policy imposes no restrictions.
 func (p *ProviderAccessPolicyRT) IsEmpty() bool {
-	return p == nil || (len(p.AllowedProviders) == 0 && len(p.BlacklistedProviders) == 0)
+	return p == nil || (!p.HasAllowRestriction && len(p.AllowedProviders) == 0 && len(p.BlacklistedProviders) == 0)
 }
 
 // TableProviderAccess is a scope-level provider allow/block rule.
@@ -27,6 +30,8 @@ func (p *ProviderAccessPolicyRT) IsEmpty() bool {
 // Rows are scoped to exactly one of:
 //   - VirtualKeyID (VK-level policy)
 //   - ScopeOrgID   (org-level policy)
+//   - ScopeOrgUnitID (org-unit-level policy)
+//   - ScopeUserID (user-level policy)
 //
 // Multiple rows per scope are aggregated by AggregateProviderAccess
 // into ProviderAccessPolicy (AllowedProviders / BlacklistedProviders).
@@ -34,9 +39,11 @@ func (p *ProviderAccessPolicyRT) IsEmpty() bool {
 // AccessType stores the MPilot picklist item UUID (see provider_access_type.json).
 // AccessTypeCode is the logical name ("allowed"|"blocked") for API/UI JSON.
 type TableProviderAccess struct {
-	ID           string  `gorm:"primaryKey;type:uuid" json:"id"`
-	VirtualKeyID *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
-	ScopeOrgID   *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
+	ID             string  `gorm:"primaryKey;type:uuid" json:"id"`
+	VirtualKeyID   *string `gorm:"type:uuid;index" json:"virtual_key_id,omitempty"`
+	ScopeOrgID     *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
+	ScopeOrgUnitID *string `gorm:"type:uuid;index" json:"scope_org_unit_id,omitempty"`
+	ScopeUserID    *string `gorm:"type:uuid;index" json:"scope_user_id,omitempty"`
 
 	ProviderID     *string        `gorm:"type:uuid" json:"provider_id,omitempty"`
 	ConfigProvider *TableProvider `gorm:"foreignKey:ProviderID;references:ID" json:"-"`
@@ -57,11 +64,16 @@ func (TableProviderAccess) TableName() string {
 func (pa *TableProviderAccess) BeforeSave(tx *gorm.DB) error {
 	vkSet := isNonEmptyString(pa.VirtualKeyID)
 	orgSet := isNonEmptyString(pa.ScopeOrgID)
-	if vkSet && orgSet {
-		return fmt.Errorf("virtual_key_id and scope_org_id are mutually exclusive")
+	orgUnitSet := isNonEmptyString(pa.ScopeOrgUnitID)
+	userSet := isNonEmptyString(pa.ScopeUserID)
+	scopeCount := 0
+	for _, set := range []bool{vkSet, orgSet, orgUnitSet, userSet} {
+		if set {
+			scopeCount++
+		}
 	}
-	if !vkSet && !orgSet {
-		return fmt.Errorf("either virtual_key_id or scope_org_id must be set")
+	if scopeCount != 1 {
+		return fmt.Errorf("exactly one of virtual_key_id, scope_org_id, scope_org_unit_id, or scope_user_id must be set")
 	}
 	if pa.IsWildcard && pa.ProviderID != nil && *pa.ProviderID != "" {
 		return fmt.Errorf("provider_id must be NULL when is_wildcard is true")

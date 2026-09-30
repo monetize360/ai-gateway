@@ -76,6 +76,18 @@ type LocalGovernanceStore struct {
 	orgProviderAccessMu      sync.RWMutex
 	orgProviderAccessByOrgID map[string][]configstoreTables.TableProviderAccess
 
+	// Org-unit-level model and provider policies indexed by scope_org_unit_id.
+	orgUnitConfigsMu                 sync.RWMutex
+	orgUnitConfigsByOrgUnitID        map[string][]configstoreTables.TableAllowedModelConfig
+	orgUnitProviderAccessMu          sync.RWMutex
+	orgUnitProviderAccessByOrgUnitID map[string][]configstoreTables.TableProviderAccess
+
+	// User-level model and provider policies indexed by scope_user_id.
+	userConfigsMu              sync.RWMutex
+	userConfigsByUserID        map[string][]configstoreTables.TableAllowedModelConfig
+	userProviderAccessMu       sync.RWMutex
+	userProviderAccessByUserID map[string][]configstoreTables.TableProviderAccess
+
 	// Billing accounts indexed by their customer organization. A well-formed tenant has at
 	// most one account per organization; extra rows are kept so PreLLM can reject the
 	// ambiguity instead of silently picking one.
@@ -1594,6 +1606,74 @@ func (gs *LocalGovernanceStore) ResolveLeafOrgUnitID(userIDs ...string) string {
 	return ""
 }
 
+// ResolveOrgUnitHierarchyIDs resolves the first available user org unit and returns
+// its leaf-to-root hierarchy.
+func (gs *LocalGovernanceStore) ResolveOrgUnitHierarchyIDs(userIDs ...string) []string {
+	return gs.orgUnitHierarchyIDs(gs.ResolveLeafOrgUnitID(userIDs...))
+}
+
+// GetOrgUnitAllowedModelConfigs returns model policies for the supplied org-unit chain.
+func (gs *LocalGovernanceStore) GetOrgUnitAllowedModelConfigs(orgUnitIDs []string) []configstoreTables.TableAllowedModelConfig {
+	gs.orgUnitConfigsMu.RLock()
+	defer gs.orgUnitConfigsMu.RUnlock()
+
+	var configs []configstoreTables.TableAllowedModelConfig
+	for _, orgUnitID := range orgUnitIDs {
+		configs = append(configs, gs.orgUnitConfigsByOrgUnitID[orgUnitID]...)
+	}
+	return configs
+}
+
+// GetOrgUnitProviderAccessPolicy merges provider policies for the supplied org-unit
+// chain using most-restrictive-wins semantics.
+func (gs *LocalGovernanceStore) GetOrgUnitProviderAccessPolicy(orgUnitIDs []string) *configstoreTables.ProviderAccessPolicyRT {
+	gs.orgUnitProviderAccessMu.RLock()
+	defer gs.orgUnitProviderAccessMu.RUnlock()
+
+	var policies []*configstore.ProviderAccessPolicy
+	for _, orgUnitID := range orgUnitIDs {
+		rows := gs.orgUnitProviderAccessByOrgUnitID[orgUnitID]
+		if len(rows) == 0 {
+			continue
+		}
+		if policy := configstore.AggregateProviderAccess(rows); policy != nil {
+			policies = append(policies, policy)
+		}
+	}
+	return configstore.MergeProviderAccessPolicies(policies...)
+}
+
+// ResolveGovernanceUserID returns the first non-empty user ID from the candidates.
+func (gs *LocalGovernanceStore) ResolveGovernanceUserID(userIDs ...string) string {
+	ids := uniqueNonEmptyStrings(userIDs...)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// GetUserAllowedModelConfigs returns model policies for a single user.
+func (gs *LocalGovernanceStore) GetUserAllowedModelConfigs(userID string) []configstoreTables.TableAllowedModelConfig {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	gs.userConfigsMu.RLock()
+	defer gs.userConfigsMu.RUnlock()
+	return append([]configstoreTables.TableAllowedModelConfig(nil), gs.userConfigsByUserID[userID]...)
+}
+
+// GetUserProviderAccessPolicy returns the aggregated provider policy for a user.
+func (gs *LocalGovernanceStore) GetUserProviderAccessPolicy(userID string) *configstoreTables.ProviderAccessPolicyRT {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	gs.userProviderAccessMu.RLock()
+	defer gs.userProviderAccessMu.RUnlock()
+	return configstore.AggregateProviderAccess(gs.userProviderAccessByUserID[userID])
+}
+
 // CheckAccountHierarchyBudgetUsage checks account-scoped BudgetUsage rows for the account
 // owned by orgID and each of its ancestors. Organizations without an account skip the check.
 func (gs *LocalGovernanceStore) CheckAccountHierarchyBudgetUsage(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error) {
@@ -2483,8 +2563,28 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load org provider access: %w", err)
 	}
 
+	orgUnitAllowedModelConfigs, err := gs.configStore.GetOrgUnitAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load org-unit allowed model configs: %w", err)
+	}
+
+	orgUnitProviderAccess, err := gs.configStore.GetOrgUnitProviderAccess(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load org-unit provider access: %w", err)
+	}
+
+	userAllowedModelConfigs, err := gs.configStore.GetUserAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load user allowed model configs: %w", err)
+	}
+
+	userProviderAccess, err := gs.configStore.GetUserProviderAccess(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load user provider access: %w", err)
+	}
+
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess, orgUnitAllowedModelConfigs, orgUnitProviderAccess, userAllowedModelConfigs, userProviderAccess)
 	gs.loadModelCards(ctx)
 
 	gs.refreshMu.Lock()
@@ -2638,6 +2738,30 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			gs.logger.Warn("governance refresh: failed to reload org provider access: %v", err)
 		}
 	}
+
+	if delta.ReloadOrgUnitAllowedModelConfigs {
+		if err := gs.reloadOrgUnitAllowedModelConfigs(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload org-unit allowed model configs: %v", err)
+		}
+	}
+
+	if delta.ReloadOrgUnitProviderAccess {
+		if err := gs.reloadOrgUnitProviderAccess(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload org-unit provider access: %v", err)
+		}
+	}
+
+	if delta.ReloadUserAllowedModelConfigs {
+		if err := gs.reloadUserAllowedModelConfigs(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload user allowed model configs: %v", err)
+		}
+	}
+
+	if delta.ReloadUserProviderAccess {
+		if err := gs.reloadUserProviderAccess(ctx); err != nil {
+			gs.logger.Warn("governance refresh: failed to reload user provider access: %v", err)
+		}
+	}
 }
 
 // loadFromConfigMemory loads all governance data from the config's memory into store's memory
@@ -2660,13 +2784,13 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	// Rebuild in-memory structures (lock-free).
 	// Org-level allowed model configs and provider access are not available from config.json — pass nil.
 	// BudgetUsage and accounts are DB-backed (budgetusage__m / account__m); config.json path has none.
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, nil, nil, nil, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, nil, nil, nil, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil, nil, nil, nil, nil)
 
 	return nil
 }
 
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess) {
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess, orgUnitAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgUnitProviderAccessRows []configstoreTables.TableProviderAccess, userAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, userProviderAccessRows []configstoreTables.TableProviderAccess) {
 	// Clear existing data by creating new sync.Maps
 	gs.virtualKeys = sync.Map{}
 	gs.organizations = sync.Map{}
@@ -2754,6 +2878,22 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	gs.orgProviderAccessMu.Lock()
 	gs.orgProviderAccessByOrgID = orgPAByOrgID
 	gs.orgProviderAccessMu.Unlock()
+
+	gs.orgUnitConfigsMu.Lock()
+	gs.orgUnitConfigsByOrgUnitID = buildOrgUnitConfigsByOrgUnitID(orgUnitAllowedModelConfigs)
+	gs.orgUnitConfigsMu.Unlock()
+
+	gs.orgUnitProviderAccessMu.Lock()
+	gs.orgUnitProviderAccessByOrgUnitID = buildOrgUnitProviderAccessByOrgUnitID(orgUnitProviderAccessRows)
+	gs.orgUnitProviderAccessMu.Unlock()
+
+	gs.userConfigsMu.Lock()
+	gs.userConfigsByUserID = buildUserConfigsByUserID(userAllowedModelConfigs)
+	gs.userConfigsMu.Unlock()
+
+	gs.userProviderAccessMu.Lock()
+	gs.userProviderAccessByUserID = buildUserProviderAccessByUserID(userProviderAccessRows)
+	gs.userProviderAccessMu.Unlock()
 
 	// Build virtual keys map and track active VKs.
 	// For each VK, collect org-level configs from its governance scope org and all ancestors.
@@ -3194,6 +3334,114 @@ func (gs *LocalGovernanceStore) reloadOrgProviderAccess(ctx context.Context) err
 		gs.virtualKeys.Store(vk.ID, &clone)
 		return true
 	})
+	return nil
+}
+
+func buildOrgUnitConfigsByOrgUnitID(configs []configstoreTables.TableAllowedModelConfig) map[string][]configstoreTables.TableAllowedModelConfig {
+	index := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	for i := range configs {
+		config := &configs[i]
+		if config.ScopeOrgUnitID == nil || strings.TrimSpace(*config.ScopeOrgUnitID) == "" {
+			continue
+		}
+		index[*config.ScopeOrgUnitID] = append(index[*config.ScopeOrgUnitID], *config)
+	}
+	return index
+}
+
+func buildOrgUnitProviderAccessByOrgUnitID(rows []configstoreTables.TableProviderAccess) map[string][]configstoreTables.TableProviderAccess {
+	index := make(map[string][]configstoreTables.TableProviderAccess)
+	for i := range rows {
+		row := &rows[i]
+		if row.ScopeOrgUnitID == nil || strings.TrimSpace(*row.ScopeOrgUnitID) == "" {
+			continue
+		}
+		index[*row.ScopeOrgUnitID] = append(index[*row.ScopeOrgUnitID], *row)
+	}
+	return index
+}
+
+func (gs *LocalGovernanceStore) reloadOrgUnitAllowedModelConfigs(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	configs, err := gs.configStore.GetOrgUnitAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return err
+	}
+	index := buildOrgUnitConfigsByOrgUnitID(configs)
+	gs.orgUnitConfigsMu.Lock()
+	gs.orgUnitConfigsByOrgUnitID = index
+	gs.orgUnitConfigsMu.Unlock()
+	return nil
+}
+
+func (gs *LocalGovernanceStore) reloadOrgUnitProviderAccess(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	rows, err := gs.configStore.GetOrgUnitProviderAccess(ctx, nil)
+	if err != nil {
+		return err
+	}
+	index := buildOrgUnitProviderAccessByOrgUnitID(rows)
+	gs.orgUnitProviderAccessMu.Lock()
+	gs.orgUnitProviderAccessByOrgUnitID = index
+	gs.orgUnitProviderAccessMu.Unlock()
+	return nil
+}
+
+func buildUserConfigsByUserID(configs []configstoreTables.TableAllowedModelConfig) map[string][]configstoreTables.TableAllowedModelConfig {
+	index := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	for i := range configs {
+		config := &configs[i]
+		if config.ScopeUserID == nil || strings.TrimSpace(*config.ScopeUserID) == "" {
+			continue
+		}
+		index[*config.ScopeUserID] = append(index[*config.ScopeUserID], *config)
+	}
+	return index
+}
+
+func buildUserProviderAccessByUserID(rows []configstoreTables.TableProviderAccess) map[string][]configstoreTables.TableProviderAccess {
+	index := make(map[string][]configstoreTables.TableProviderAccess)
+	for i := range rows {
+		row := &rows[i]
+		if row.ScopeUserID == nil || strings.TrimSpace(*row.ScopeUserID) == "" {
+			continue
+		}
+		index[*row.ScopeUserID] = append(index[*row.ScopeUserID], *row)
+	}
+	return index
+}
+
+func (gs *LocalGovernanceStore) reloadUserAllowedModelConfigs(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	configs, err := gs.configStore.GetUserAllowedModelConfigs(ctx, nil)
+	if err != nil {
+		return err
+	}
+	index := buildUserConfigsByUserID(configs)
+	gs.userConfigsMu.Lock()
+	gs.userConfigsByUserID = index
+	gs.userConfigsMu.Unlock()
+	return nil
+}
+
+func (gs *LocalGovernanceStore) reloadUserProviderAccess(ctx context.Context) error {
+	if gs.configStore == nil {
+		return fmt.Errorf("config store is not configured")
+	}
+	rows, err := gs.configStore.GetUserProviderAccess(ctx, nil)
+	if err != nil {
+		return err
+	}
+	index := buildUserProviderAccessByUserID(rows)
+	gs.userProviderAccessMu.Lock()
+	gs.userProviderAccessByUserID = index
+	gs.userProviderAccessMu.Unlock()
 	return nil
 }
 

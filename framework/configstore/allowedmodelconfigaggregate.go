@@ -7,9 +7,11 @@ import (
 
 // scopeKey is the grouping key for aggregation.
 type scopeKey struct {
-	virtualKeyID string
-	scopeOrgID   string
-	providerID   string
+	virtualKeyID   string
+	scopeOrgID     string
+	scopeOrgUnitID string
+	scopeUserID    string
+	providerID     string
 }
 
 func makeScopeKey(row tables.TableAllowedModelConfig) scopeKey {
@@ -21,10 +23,18 @@ func makeScopeKey(row tables.TableAllowedModelConfig) scopeKey {
 	if row.ScopeOrgID != nil {
 		orgID = *row.ScopeOrgID
 	}
-	return scopeKey{virtualKeyID: vkID, scopeOrgID: orgID, providerID: row.ProviderID}
+	orgUnitID := ""
+	if row.ScopeOrgUnitID != nil {
+		orgUnitID = *row.ScopeOrgUnitID
+	}
+	userID := ""
+	if row.ScopeUserID != nil {
+		userID = *row.ScopeUserID
+	}
+	return scopeKey{virtualKeyID: vkID, scopeOrgID: orgID, scopeOrgUnitID: orgUnitID, scopeUserID: userID, providerID: row.ProviderID}
 }
 
-// AggregateAllowedModelConfigs groups raw DB rows by (VirtualKeyID|ScopeOrgID, ProviderID)
+// AggregateAllowedModelConfigs groups raw DB rows by (VirtualKeyID|ScopeOrgID|ScopeOrgUnitID|ScopeUserID, ProviderID)
 // and returns one synthetic TableAllowedModelConfig per group with:
 //
 //   - AllowedModels populated from all non-nil AllowedModel names in the group.
@@ -102,14 +112,18 @@ func AggregateAllowedModelConfigs(rows []tables.TableAllowedModelConfig) []table
 					synthetic.ID = r.ID
 					synthetic.VirtualKeyID = r.VirtualKeyID
 					synthetic.ScopeOrgID = r.ScopeOrgID
+					synthetic.ScopeOrgUnitID = r.ScopeOrgUnitID
+					synthetic.ScopeUserID = r.ScopeUserID
 					synthetic.ProviderID = r.ProviderID
 					synthetic.Provider = r.Provider
 					synthetic.ConfigProvider = r.ConfigProvider
-					synthetic.AllowAllKeys = r.AllowAllKeys
 					synthetic.SystemColumns = r.SystemColumns
 					break
 				}
 			}
+			// Key allow/deny is stored on the header row only. A group made of
+			// model allow/block rows has no key restriction.
+			synthetic.AllowAllKeys = true
 		}
 
 		// Clear the persisted single-model FK fields on the synthetic record.

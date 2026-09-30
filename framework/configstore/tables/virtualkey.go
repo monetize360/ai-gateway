@@ -26,35 +26,37 @@ func (TableAllowedModelConfigKey) TableName() string {
 }
 
 // TableAllowedModelConfig is a granular per-provider access rule scoped to a virtual key
-// (VirtualKeyID set) or an organisation (ScopeOrgID set).
+// (VirtualKeyID set), an organisation (ScopeOrgID set), an org unit
+// (ScopeOrgUnitID set), or a user (ScopeUserID set).
 //
 // Each row carries at most one model reference:
 //   - AllowedModelID non-nil  → the named model is explicitly allowed.
 //   - BlacklistedModelID non-nil → the named model is explicitly blocked.
 //   - Both nil                → "header" row carrying weight / keys / budget / rate-limit.
 //
-// Multiple rows sharing the same (VirtualKeyID|ScopeOrgID, ProviderID) scope are
+// Multiple rows sharing the same (VirtualKeyID|ScopeOrgID|ScopeOrgUnitID|ScopeUserID, ProviderID) scope are
 // aggregated by AggregateAllowedModelConfigs into a single synthetic entry with
 // AllowedModels / BlacklistedModels virtual lists ready for the governance resolver.
 type TableAllowedModelConfig struct {
-	ID           string  `gorm:"primaryKey;type:uuid" json:"id"`
-	VirtualKeyID *string `gorm:"type:uuid" json:"virtual_key_id,omitempty"`
-	ScopeOrgID   *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
+	ID             string  `gorm:"primaryKey;type:uuid" json:"id"`
+	VirtualKeyID   *string `gorm:"type:uuid" json:"virtual_key_id,omitempty"`
+	ScopeOrgID     *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
+	ScopeOrgUnitID *string `gorm:"type:uuid;index" json:"scope_org_unit_id,omitempty"`
+	ScopeUserID    *string `gorm:"type:uuid;index" json:"scope_user_id,omitempty"`
 
 	// ProviderID is the FK to config_providers; populated automatically by
 	// CreateAllowedModelConfig / UpdateAllowedModelConfig from the Provider name.
-	ProviderID     string         `gorm:"type:uuid;not null;column:provider_id" json:"provider_id"`
-	// Provider is a virtual runtime field (not stored); populated from ConfigProvider.Name by AfterFind.
+	ProviderID string `gorm:"type:uuid;not null;column:provider_id" json:"provider_id"` // Provider is a virtual runtime field (not stored); populated from ConfigProvider.Name by AfterFind.
 	// Set this before calling Create/Update when ProviderID is unknown.
 	Provider       string         `gorm:"-" json:"provider"`
 	ConfigProvider *TableProvider `gorm:"foreignKey:ProviderID;references:ID" json:"-"`
 
 	// AllowedModelID is the FK to config_models for an explicit allow rule (nullable).
-	AllowedModelID     *string    `gorm:"type:uuid;column:allowed_model_id" json:"allowed_model_id,omitempty"`
-	AllowedModel       *TableModel `gorm:"foreignKey:AllowedModelID;references:ID" json:"-"`
+	AllowedModelID *string     `gorm:"type:uuid;column:allowed_model_id" json:"allowed_model_id,omitempty"`
+	AllowedModel   *TableModel `gorm:"foreignKey:AllowedModelID;references:ID" json:"-"`
 
 	// BlacklistedModelID is the FK to config_models for an explicit block rule (nullable).
-	BlacklistedModelID *string    `gorm:"type:uuid;column:blacklisted_model_id" json:"blacklisted_model_id,omitempty"`
+	BlacklistedModelID *string     `gorm:"type:uuid;column:blacklisted_model_id" json:"blacklisted_model_id,omitempty"`
 	BlacklistedModel   *TableModel `gorm:"foreignKey:BlacklistedModelID;references:ID" json:"-"`
 
 	// AllowedModels and BlacklistedModels are virtual runtime lists, NOT stored in DB.
@@ -130,11 +132,16 @@ func (pc *TableAllowedModelConfig) UnmarshalJSON(data []byte) error {
 func (pc *TableAllowedModelConfig) BeforeSave(tx *gorm.DB) error {
 	vkSet := isNonEmptyString(pc.VirtualKeyID)
 	orgSet := isNonEmptyString(pc.ScopeOrgID)
-	if vkSet && orgSet {
-		return fmt.Errorf("virtual_key_id and scope_org_id are mutually exclusive")
+	orgUnitSet := isNonEmptyString(pc.ScopeOrgUnitID)
+	userSet := isNonEmptyString(pc.ScopeUserID)
+	scopeCount := 0
+	for _, set := range []bool{vkSet, orgSet, orgUnitSet, userSet} {
+		if set {
+			scopeCount++
+		}
 	}
-	if !vkSet && !orgSet {
-		return fmt.Errorf("either virtual_key_id or scope_org_id must be set")
+	if scopeCount != 1 {
+		return fmt.Errorf("exactly one of virtual_key_id, scope_org_id, scope_org_unit_id, or scope_user_id must be set")
 	}
 	if pc.ProviderID == "" {
 		return fmt.Errorf("provider_id must be set (resolve via Provider name before saving)")
@@ -272,21 +279,21 @@ func (mc *TableVirtualKeyMCPConfig) UnmarshalJSON(data []byte) error {
 
 // TableVirtualKey represents a virtual key with budget, rate limits, and org association
 type TableVirtualKey struct {
-	ID              string                          `gorm:"primaryKey;type:uuid" json:"id"`
-	Name            string                          `gorm:"uniqueIndex:idx_virtual_key_name;type:varchar(255);not null" json:"name"`
-	Description     string                          `gorm:"type:text" json:"description,omitempty"`
-	Value           string                          `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`           // The virtual key value
-	IsActive             *bool                       `gorm:"default:true" json:"is_active,omitempty"`                                          // Nil means true (DB default); false means inactive
-	AllowedModelConfigs  []TableAllowedModelConfig   `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"allowed_model_configs"` // VK-scoped; empty means all providers/models allowed
-	OrgAllowedModelConfigs []TableAllowedModelConfig `gorm:"-" json:"-"`                                                                       // Org-scoped configs resolved at runtime by the governance store
-	MCPConfigs           []TableVirtualKeyMCPConfig  `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
+	ID                     string                     `gorm:"primaryKey;type:uuid" json:"id"`
+	Name                   string                     `gorm:"uniqueIndex:idx_virtual_key_name;type:varchar(255);not null" json:"name"`
+	Description            string                     `gorm:"type:text" json:"description,omitempty"`
+	Value                  string                     `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`                // The virtual key value
+	IsActive               *bool                      `gorm:"default:true" json:"is_active,omitempty"`                                          // Nil means true (DB default); false means inactive
+	AllowedModelConfigs    []TableAllowedModelConfig  `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"allowed_model_configs"` // VK-scoped; empty means all providers/models allowed
+	OrgAllowedModelConfigs []TableAllowedModelConfig  `gorm:"-" json:"-"`                                                                       // Org-scoped configs resolved at runtime by the governance store
+	MCPConfigs             []TableVirtualKeyMCPConfig `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"mcp_configs"`
 
 	// Provider access rules (VK-scoped allow/block rows from governance_provider_access)
-	ProviderAccess       []TableProviderAccess       `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_access,omitempty"`
+	ProviderAccess []TableProviderAccess `gorm:"foreignKey:VirtualKeyID;constraint:OnDelete:CASCADE" json:"provider_access,omitempty"`
 	// ProviderAccessPolicy is the aggregated VK-level provider allow/block policy (runtime only).
-	ProviderAccessPolicy *ProviderAccessPolicyRT     `gorm:"-" json:"provider_access_policy,omitempty"`
+	ProviderAccessPolicy *ProviderAccessPolicyRT `gorm:"-" json:"provider_access_policy,omitempty"`
 	// OrgProviderAccessPolicy is the merged org-level provider allow/block policy (runtime only).
-	OrgProviderAccessPolicy *ProviderAccessPolicyRT  `gorm:"-" json:"-"`
+	OrgProviderAccessPolicy *ProviderAccessPolicyRT `gorm:"-" json:"-"`
 
 	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`

@@ -39,6 +39,7 @@ func AggregateProviderAccess(rows []tables.TableProviderAccess) *ProviderAccessP
 		switch {
 		case tables.IsAllowedAccessType(row.AccessType):
 			policy.AllowedProviders = append(policy.AllowedProviders, name)
+			policy.HasAllowRestriction = true
 		case tables.IsBlockedAccessType(row.AccessType):
 			policy.BlacklistedProviders = append(policy.BlacklistedProviders, name)
 		}
@@ -103,8 +104,10 @@ func MergeProviderAccessPolicies(policies ...*ProviderAccessPolicy) *ProviderAcc
 		// No restrictive allowlists — no allow restriction
 	case 1:
 		merged.AllowedProviders = restrictiveSets[0]
+		merged.HasAllowRestriction = true
 	default:
 		merged.AllowedProviders = intersectWhiteLists(restrictiveSets)
+		merged.HasAllowRestriction = true
 	}
 
 	return merged
@@ -143,4 +146,3 @@ func intersectWhiteLists(sets []schemas.WhiteList) schemas.WhiteList {
 	}
 	return result
 }
-

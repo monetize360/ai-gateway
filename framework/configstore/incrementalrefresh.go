@@ -17,23 +17,27 @@ const RefreshOverlap = 2 * time.Second
 
 // GovernanceRefreshDelta holds governance entities changed since the previous refresh.
 type GovernanceRefreshDelta struct {
-	Organizations                  []tables.TableOrganization
-	VirtualKeys                    []tables.TableVirtualKey
-	Budgets                        []tables.TableBudget
-	BudgetUsages                   []tables.TableBudgetUsage
-	Accounts                       []tables.TableAccount
-	Wallets                        []tables.TableWallet
-	OrgUnits                       []tables.TableOrgUnit
-	UserOrgUnits                   []tables.TableUserOrgUnit
-	RateLimits                     []tables.TableRateLimit
-	ModelConfigs                   []tables.TableModelConfig
+	Organizations []tables.TableOrganization
+	VirtualKeys   []tables.TableVirtualKey
+	Budgets       []tables.TableBudget
+	BudgetUsages  []tables.TableBudgetUsage
+	Accounts      []tables.TableAccount
+	Wallets       []tables.TableWallet
+	OrgUnits      []tables.TableOrgUnit
+	UserOrgUnits  []tables.TableUserOrgUnit
+	RateLimits    []tables.TableRateLimit
+	ModelConfigs  []tables.TableModelConfig
 	// ConfigModels carries config_models catalog rows (including service_id) so billing
 	// service mapping refreshes without a gateway restart.
-	ConfigModels                   []tables.TableModel
-	Providers                      []tables.TableProvider
-	RoutingRules                   []tables.TableRoutingRule
-	ReloadOrgAllowedModelConfigs   bool
-	ReloadOrgProviderAccess        bool
+	ConfigModels                     []tables.TableModel
+	Providers                        []tables.TableProvider
+	RoutingRules                     []tables.TableRoutingRule
+	ReloadOrgAllowedModelConfigs     bool
+	ReloadOrgProviderAccess          bool
+	ReloadOrgUnitAllowedModelConfigs bool
+	ReloadOrgUnitProviderAccess      bool
+	ReloadUserAllowedModelConfigs    bool
+	ReloadUserProviderAccess         bool
 }
 
 // IsEmpty reports whether the delta contains no changes.
@@ -43,6 +47,10 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 	}
 	return !d.ReloadOrgAllowedModelConfigs &&
 		!d.ReloadOrgProviderAccess &&
+		!d.ReloadOrgUnitAllowedModelConfigs &&
+		!d.ReloadOrgUnitProviderAccess &&
+		!d.ReloadUserAllowedModelConfigs &&
+		!d.ReloadUserProviderAccess &&
 		len(d.Organizations) == 0 &&
 		len(d.VirtualKeys) == 0 &&
 		len(d.Budgets) == 0 &&
@@ -220,7 +228,7 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 
 	var orgConfigChanges int64
 	if err := db.Table("governance_virtual_key_provider_configs").
-		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL", since).
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NULL", since).
 		Count(&orgConfigChanges).Error; err != nil {
 		return nil, fmt.Errorf("org allowed model configs changed since: %w", err)
 	}
@@ -228,13 +236,49 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 
 	var orgPAChanges int64
 	if err := db.Table("governance_provider_access").
-		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL", since).
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NOT NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NULL", since).
 		Count(&orgPAChanges).Error; err != nil {
 		if !errors.Is(err, gorm.ErrUnsupportedDriver) {
 			return nil, fmt.Errorf("org provider access changed since: %w", err)
 		}
 	}
 	delta.ReloadOrgProviderAccess = orgPAChanges > 0
+
+	var orgUnitConfigChanges int64
+	if err := db.Table("governance_virtual_key_provider_configs").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NOT NULL AND scope_user_id IS NULL", since).
+		Count(&orgUnitConfigChanges).Error; err != nil {
+		return nil, fmt.Errorf("org-unit allowed model configs changed since: %w", err)
+	}
+	delta.ReloadOrgUnitAllowedModelConfigs = orgUnitConfigChanges > 0
+
+	var orgUnitPAChanges int64
+	if err := db.Table("governance_provider_access").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NOT NULL AND scope_user_id IS NULL", since).
+		Count(&orgUnitPAChanges).Error; err != nil {
+		if !errors.Is(err, gorm.ErrUnsupportedDriver) {
+			return nil, fmt.Errorf("org-unit provider access changed since: %w", err)
+		}
+	}
+	delta.ReloadOrgUnitProviderAccess = orgUnitPAChanges > 0
+
+	var userConfigChanges int64
+	if err := db.Table("governance_virtual_key_provider_configs").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NOT NULL", since).
+		Count(&userConfigChanges).Error; err != nil {
+		return nil, fmt.Errorf("user allowed model configs changed since: %w", err)
+	}
+	delta.ReloadUserAllowedModelConfigs = userConfigChanges > 0
+
+	var userPAChanges int64
+	if err := db.Table("governance_provider_access").
+		Where("updated_at >= ? AND virtual_key_id IS NULL AND scope_org_id IS NULL AND scope_org_unit_id IS NULL AND scope_user_id IS NOT NULL", since).
+		Count(&userPAChanges).Error; err != nil {
+		if !errors.Is(err, gorm.ErrUnsupportedDriver) {
+			return nil, fmt.Errorf("user provider access changed since: %w", err)
+		}
+	}
+	delta.ReloadUserProviderAccess = userPAChanges > 0
 
 	return delta, nil
 }
