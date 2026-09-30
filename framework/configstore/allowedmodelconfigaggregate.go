@@ -117,11 +117,13 @@ func AggregateAllowedModelConfigs(rows []tables.TableAllowedModelConfig) []table
 					synthetic.ProviderID = r.ProviderID
 					synthetic.Provider = r.Provider
 					synthetic.ConfigProvider = r.ConfigProvider
-					synthetic.AllowAllKeys = r.AllowAllKeys
 					synthetic.SystemColumns = r.SystemColumns
 					break
 				}
 			}
+			// Key allow/deny is stored on the header row only. A group made of
+			// model allow/block rows has no key restriction.
+			synthetic.AllowAllKeys = true
 		}
 
 		// Clear the persisted single-model FK fields on the synthetic record.
