@@ -383,11 +383,12 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 		}
 	}
 
-	// Find the provider config that matches the request's provider and apply key filtering
+	// Find the provider config that matches the request's provider and apply key filtering.
+	// A model allow/block row does not name keys. Only an explicit key list narrows which
+	// provider keys may be used; an empty list leaves every key for that provider available.
 	for _, pc := range vk.AllowedModelConfigs {
 		if schemas.ModelProvider(pc.Provider) == provider {
-			if !pc.AllowAllKeys {
-				// Restrict to specific keys (empty slice = no keys allowed)
+			if !pc.AllowAllKeys && len(pc.Keys) > 0 {
 				includeOnlyKeys := make([]string, 0, len(pc.Keys))
 				for _, dbKey := range pc.Keys {
 					includeOnlyKeys = append(includeOnlyKeys, dbKey.KeyID)
@@ -551,6 +552,11 @@ func (r *BudgetResolver) isModelAllowedByOrgUnitConfigs(configs []configstoreTab
 }
 
 func (r *BudgetResolver) isModelInAllowedList(provider schemas.ModelProvider, model string, allowedModels schemas.WhiteList) bool {
+	// ["*"] is a policy wildcard: the request is already routed to this provider, so the
+	// pricing catalog must not veto models it does not list (custom and self-hosted providers).
+	if allowedModels.IsUnrestricted() {
+		return true
+	}
 	if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
 		providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
 		if !ok {
