@@ -1524,6 +1524,15 @@ func (gs *LocalGovernanceStore) orgUnitIDForUser(userID string) string {
 	return strings.TrimSpace(*mapping.OrgUnitID)
 }
 
+// OrgUnitName returns the display name of an organizational unit, or empty when it is unknown.
+func (gs *LocalGovernanceStore) OrgUnitName(orgUnitID string) string {
+	orgUnit := gs.loadOrgUnit(strings.TrimSpace(orgUnitID))
+	if orgUnit == nil {
+		return ""
+	}
+	return strings.TrimSpace(orgUnit.Name)
+}
+
 func (gs *LocalGovernanceStore) loadOrgUnit(orgUnitID string) *configstoreTables.TableOrgUnit {
 	if orgUnitID == "" {
 		return nil
