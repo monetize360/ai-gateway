@@ -389,18 +389,11 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	for _, pc := range vk.AllowedModelConfigs {
 		if schemas.ModelProvider(pc.Provider) == provider {
 			if !pc.AllowAllKeys && len(pc.Keys) > 0 {
-				// Restrict to attached keys only. An empty key list must not set
-				// IncludeOnlyKeys=[] ("no keys allowed") — MPilot VKs attach models
-				// without config_keys and have no allow_all_keys column.
 				includeOnlyKeys := make([]string, 0, len(pc.Keys))
 				for _, dbKey := range pc.Keys {
-					if dbKey.KeyID != "" {
-						includeOnlyKeys = append(includeOnlyKeys, dbKey.KeyID)
-					}
+					includeOnlyKeys = append(includeOnlyKeys, dbKey.KeyID)
 				}
-				if len(includeOnlyKeys) > 0 {
-					ctx.SetValue(schemas.BifrostContextKeyGovernanceIncludeOnlyKeys, includeOnlyKeys)
-				}
+				ctx.SetValue(schemas.BifrostContextKeyGovernanceIncludeOnlyKeys, includeOnlyKeys)
 			}
 			break
 		}
