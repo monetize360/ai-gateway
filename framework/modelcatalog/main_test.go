@@ -159,6 +159,15 @@ func TestIsModelAllowedForProvider_PrefixedAllowedModelInCatalog(t *testing.T) {
 	assert.True(t, mc.IsModelAllowedForProvider(schemas.OpenRouter, "gpt-4o", &providerConfig, []string{"openai/gpt-4o"}))
 }
 
+func TestIsModelAllowedForProvider_SameProviderPrefixedAllowlist(t *testing.T) {
+	mc := newTestCatalog(nil, nil)
+
+	assert.True(t, mc.IsModelAllowedForProvider(
+		schemas.Anthropic, "claude-3.5-sonnet", nil, []string{"anthropic/claude-3.5-sonnet"}))
+	assert.False(t, mc.IsModelAllowedForProvider(
+		schemas.Anthropic, "claude-3-haiku", nil, []string{"anthropic/claude-3.5-sonnet"}))
+}
+
 func TestIsModelAllowedForProvider_CustomProviderListModelsDisabled(t *testing.T) {
 	mc := newTestCatalog(nil, nil)
 
