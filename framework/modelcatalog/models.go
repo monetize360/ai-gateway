@@ -166,9 +166,10 @@ func (mc *ModelCatalog) GetProvidersForModel(model string) []schemas.ModelProvid
 //   - If allowedModels is not empty: Checks if model matches any entry in the list
 //     Provider-specific validation:
 //   - Direct matches: "gpt-4o" in allowedModels for any provider
-//   - Prefixed matches: Only if the prefixed model exists in provider's catalog
-//     (e.g., "openai/gpt-4o" in allowedModels only matches if openrouter's catalog
-//     contains "openai/gpt-4o" AND the model part matches the request)
+//   - Same-provider composite: "anthropic/claude-3.5-sonnet" matches provider
+//     anthropic + model "claude-3.5-sonnet"
+//   - Cross-provider prefixed matches: only if the prefixed id exists in that
+//     provider's catalog (e.g. "openai/gpt-4o" on openrouter)
 //
 // Returns:
 //   - bool: true if the model is allowed for the provider, false otherwise
@@ -216,26 +217,19 @@ func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider
 	}
 
 	// Case 2: Explicit allowedModels = check if model matches any entry
-	// Get provider's catalog models for validation of prefixed entries
 	providerCatalogModels := mc.GetModelsForProvider(provider)
 
 	for _, allowedModel := range allowedModels {
-		// Direct match: "gpt-4o" == "gpt-4o"
-		if allowedModel == model {
+		if allowedModel == model || allowedModel == string(provider)+"/"+model {
 			return true
 		}
 
-		// Provider-prefixed match: verify it exists in provider's catalog first
-		// This ensures we only allow provider-specific model combinations that are actually supported
-		if strings.Contains(allowedModel, "/") {
-			// Check if this exact prefixed model exists in the provider's catalog
-			// e.g., for openrouter, check if "openai/gpt-4o" is in its catalog
-			if slices.Contains(providerCatalogModels, allowedModel) {
-				// Extract the model part and compare with request
-				_, modelPart := schemas.ParseModelString(allowedModel, "")
-				if modelPart == model {
-					return true
-				}
+		// Cross-provider prefix: "openai/gpt-4o" on openrouter is allowed only
+		// when that exact prefixed id is in the provider catalog.
+		if strings.Contains(allowedModel, "/") && slices.Contains(providerCatalogModels, allowedModel) {
+			_, modelPart := schemas.ParseModelString(allowedModel, "")
+			if modelPart == model {
+				return true
 			}
 		}
 	}
