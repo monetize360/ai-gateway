@@ -2077,10 +2077,16 @@ func (p *GovernancePlugin) publishInferenceUsage(
 		return
 	}
 
+	virtualKeyID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)
 	vkUserID := ""
 	if virtualKey != "" && comp != nil && comp.store != nil {
-		if vk, ok := comp.store.GetVirtualKey(ctx, virtualKey); ok && vk != nil && vk.UserID != nil {
-			vkUserID = strings.TrimSpace(*vk.UserID)
+		if vk, ok := comp.store.GetVirtualKey(ctx, virtualKey); ok && vk != nil {
+			if virtualKeyID == "" {
+				virtualKeyID = vk.ID
+			}
+			if vk.UserID != nil {
+				vkUserID = strings.TrimSpace(*vk.UserID)
+			}
 		}
 	}
 	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
@@ -2120,6 +2126,9 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	}
 	if apiLatencyMs > 0 {
 		dimensions["api_latency_ms"] = strconv.FormatInt(apiLatencyMs, 10)
+	}
+	if virtualKeyID != "" {
+		dimensions["virtual_key_id"] = virtualKeyID
 	}
 
 	message := map[string]any{
