@@ -502,7 +502,7 @@ func TestShouldApplySemanticRoutingDefaultForAll(t *testing.T) {
 	run, pref, handoff := p.shouldApplySemanticRouting(nil, vk, nil, true)
 	assert.True(t, run)
 	assert.Nil(t, pref)
-	assert.Equal(t, "default semantic routing", handoff)
+	assert.Equal(t, "default_for_all enabled; Routing to Semantic Router", handoff)
 }
 
 func TestShouldApplySemanticRoutingPinOverridesDefault(t *testing.T) {
@@ -533,7 +533,7 @@ func TestShouldApplySemanticRoutingFlagOffRequiresSemanticRule(t *testing.T) {
 	run, pref, handoff := p.shouldApplySemanticRouting(nil, vk, sem, true)
 	assert.True(t, run)
 	assert.Equal(t, []string{"openai/gpt-4o"}, pref)
-	assert.Contains(t, handoff, "Pick capable")
+	assert.Equal(t, `CEL rule "Pick capable" matched semantic_routing; Routing to Semantic Router`, handoff)
 }
 
 func TestShouldApplySemanticRoutingNoVirtualKey(t *testing.T) {
@@ -588,7 +588,7 @@ func TestShouldApplySemanticRoutingOmittedModel(t *testing.T) {
 	run, pref, handoff := p.shouldApplySemanticRouting(nil, vk, nil, false)
 	assert.True(t, run, "omitted model is an extra trigger when default_for_all is off")
 	assert.Nil(t, pref)
-	assert.Equal(t, "missing model; semantic routing", handoff)
+	assert.Equal(t, "No model found in the request; treated as AutoMode; Routing to Semantic Router", handoff)
 
 	run, _, _ = p.shouldApplySemanticRouting(nil, vk, nil, true)
 	assert.False(t, run, "with a model present and default_for_all off, existing path must not run")

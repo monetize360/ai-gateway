@@ -566,3 +566,246 @@ func TestApplySemanticRoutingPluginModeWithoutInjectionDeclines(t *testing.T) {
 	assert.Equal(t, "openai/"+testTextModel, out["model"])
 	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "layer2 router unset")
 }
+
+func expectedAutoRankedModel(t *testing.T, p *GovernancePlugin, ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey, body map[string]any) string {
+	t.Helper()
+	comp := p.getComponentsForContext(ctx)
+	require.NotNil(t, comp)
+	pool := p.enumerateCandidates(ctx, comp, vk)
+	require.NotEmpty(t, pool)
+	ranked := p.rankCandidates(pool, buildRequestProfile(body), p.semanticRouting, nil)
+	require.NotEmpty(t, ranked)
+	return ranked[0].qualified()
+}
+
+func helloMessagesBody(model string) map[string]any {
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	if model != "" {
+		body["model"] = model
+	}
+	return body
+}
+
+func layer2VisionTextVK() configstoreTables.TableVirtualKey {
+	return *buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
+		[]configstoreTables.TableVirtualKeyProviderConfig{
+			buildProviderConfig("openai", []string{testVisionModel, testTextModel}),
+		})
+}
+
+func assertExplicitKeepsIncoming(t *testing.T, p *GovernancePlugin, ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey, incoming string) {
+	t.Helper()
+	body := helloMessagesBody(incoming)
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
+	joined := strings.Join(routingLogMessages(ctx), "\n")
+	assert.False(t, routed)
+	assert.Equal(t, incoming, out["model"])
+	assert.NotContains(t, joined, "Auto ranking VK pool")
+	assert.Contains(t, joined, "declining semantic rewrite")
+}
+
+func assertAutoRanksVKPool(t *testing.T, p *GovernancePlugin, ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey) {
+	t.Helper()
+	body := helloMessagesBody("")
+	want := expectedAutoRankedModel(t, p, ctx, vk, body)
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, vk, nil)
+	joined := strings.Join(routingLogMessages(ctx), "\n")
+	require.True(t, routed)
+	assert.Equal(t, want, out["model"])
+	assert.Contains(t, joined, "Auto ranking VK pool")
+	assert.Contains(t, joined, "layer2 failed")
+}
+
+func TestApplySemanticRoutingLayer2ErrorKeepsIncomingAndAutoRanks(t *testing.T) {
+	incoming := "openai/" + testVisionModel
+	vk := layer2VisionTextVK()
+
+	t.Run("explicit 502 keeps incoming", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"nope"}`, http.StatusBadGateway)
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertExplicitKeepsIncoming(t, p, ctx, &vk, incoming)
+	})
+
+	t.Run("auto 502 ranks VK pool", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"nope"}`, http.StatusBadGateway)
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertAutoRanksVKPool(t, p, ctx, &vk)
+	})
+
+	t.Run("auto timeout ranks VK pool", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(200 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"selected_model":"openai/` + testVisionModel + `"}`))
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 20}
+		assertAutoRanksVKPool(t, p, ctx, &vk)
+	})
+
+	t.Run("explicit decode keeps incoming", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`not-json`))
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertExplicitKeepsIncoming(t, p, ctx, &vk, incoming)
+	})
+
+	t.Run("auto decode ranks VK pool", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`not-json`))
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertAutoRanksVKPool(t, p, ctx, &vk)
+	})
+
+	t.Run("explicit empty selected keeps incoming", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"selection_status":"selected"}`))
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertExplicitKeepsIncoming(t, p, ctx, &vk, incoming)
+	})
+
+	t.Run("auto empty selected ranks VK pool", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"selection_status":"selected"}`))
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+		assertAutoRanksVKPool(t, p, ctx, &vk)
+	})
+
+	t.Run("explicit circuit open keeps incoming", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 200}
+		tripVLLMSRCircuit(t, p)
+		assertExplicitKeepsIncoming(t, p, ctx, &vk, incoming)
+	})
+
+	t.Run("auto circuit open ranks VK pool", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+		p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+		defer ctx.Cancel()
+		p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 200}
+		tripVLLMSRCircuit(t, p)
+		assertAutoRanksVKPool(t, p, ctx, &vk)
+	})
+}
+
+func tripVLLMSRCircuit(t *testing.T, p *GovernancePlugin) {
+	t.Helper()
+	cfg := p.semanticRouting
+	body := helloMessagesBody("")
+	profile := buildRequestProfile(body)
+	eligible := testCandidates(testTextModel)
+	for i := 0; i < vllmsrBreakerThreshold; i++ {
+		_, err := p.previewVLLMSRRoute(nil, body, profile, eligible, cfg)
+		require.Error(t, err)
+	}
+	_, err := p.previewVLLMSRRoute(nil, body, profile, eligible, cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "circuit open")
+}
+
+func TestApplySemanticRoutingLayer2ErrorAutoMatchesRankCandidates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"nope"}`, http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	vk := layer2VisionTextVK()
+	p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+	defer ctx.Cancel()
+	p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+
+	comp := p.getComponentsForContext(ctx)
+	require.NotNil(t, comp)
+	pool := p.enumerateCandidates(ctx, comp, &vk)
+	require.GreaterOrEqual(t, len(pool), 2)
+	assert.Equal(t, testVisionModel, pool[0].Model, "VK list order must put vision first")
+
+	body := helloMessagesBody("")
+	want := expectedAutoRankedModel(t, p, ctx, &vk, body)
+	assert.Equal(t, "openai/"+testTextModel, want, "cost ranking must prefer text over first VK row")
+
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, &vk, nil)
+	require.True(t, routed)
+	assert.Equal(t, want, out["model"])
+	assert.NotEqual(t, "openai/"+testVisionModel, out["model"])
+	assert.Contains(t, strings.Join(routingLogMessages(ctx), "\n"), "Auto ranking VK pool")
+}
+
+func TestApplySemanticRoutingOmittedModelOutOfPoolDoesNotRank(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"selected_model":"openai/not-in-pool"}`))
+	}))
+	defer server.Close()
+
+	vk := layer2VisionTextVK()
+	p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+	defer ctx.Cancel()
+	p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+
+	body := helloMessagesBody("")
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, &vk, nil)
+	assert.False(t, routed)
+	_, hasModel := out["model"]
+	assert.False(t, hasModel)
+	joined := strings.Join(routingLogMessages(ctx), "\n")
+	assert.Contains(t, joined, "recommendations do not overlap the VK pool; declining semantic rewrite")
+	assert.NotContains(t, joined, "Auto ranking VK pool")
+}
+
+func TestApplySemanticRoutingOmittedModelFastResponseDoesNotRank(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"selection_status":"not_required","selection_method":"fast_response"}`))
+	}))
+	defer server.Close()
+
+	vk := layer2VisionTextVK()
+	p, ctx := newAccessAlignedSemanticPlugin(t, &vk)
+	defer ctx.Cancel()
+	p.semanticRouting.Router = &VLLMSRRouterConfig{BaseURL: server.URL, TimeoutMs: 1000}
+
+	body := helloMessagesBody("")
+	out, routed := p.applySemanticRouting(ctx, &schemas.HTTPRequest{}, body, &vk, nil)
+	assert.False(t, routed)
+	_, hasModel := out["model"]
+	assert.False(t, hasModel)
+	joined := strings.Join(routingLogMessages(ctx), "\n")
+	assert.Contains(t, joined, "no model rewrite required")
+	assert.NotContains(t, joined, "Auto ranking VK pool")
+}
