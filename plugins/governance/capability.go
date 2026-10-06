@@ -584,15 +584,15 @@ func (p *GovernancePlugin) shouldApplySemanticRouting(ctx *schemas.BifrostContex
 		if !decision.IsSemanticRouting() {
 			return false, nil, ""
 		}
-		return true, decision.Fallbacks, fmt.Sprintf("moving to semantic routing (rule=%q)", decision.MatchedRuleName)
+		return true, decision.Fallbacks, fmt.Sprintf("CEL rule %q matched semantic_routing; Routing to Semantic Router", decision.MatchedRuleName)
 	}
 	// No CEL match: keep the requested model unless the operator opted into
 	// default_for_all, or the request omitted model entirely.
 	if cfg.DefaultForAll {
-		return true, nil, "default semantic routing"
+		return true, nil, "default_for_all enabled; Routing to Semantic Router"
 	}
 	if !hasIncomingModel {
-		return true, nil, "missing model; semantic routing"
+		return true, nil, "No model found in the request; treated as AutoMode; Routing to Semantic Router"
 	}
 	return false, nil, ""
 }
@@ -677,7 +677,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 	}
 
 	step = time.Now()
-	ranked, skipRewrite := p.selectWithLayer2(ctx, comp, body, profile, candidates, cfg, preferenceOverride)
+	ranked, skipRewrite := p.selectWithLayer2(ctx, comp, body, profile, candidates, cfg, preferenceOverride, hasIncomingModel)
 	p.logSemantic(ctx, schemas.LogLevelInfo, "2/select: router-ordered %s took=%s", describeRanking(ranked), formatTook(time.Since(step)))
 	if skipRewrite {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "Skipped: Layer 2 did not require a model rewrite; %s", declineTail)
@@ -773,7 +773,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 // selectWithLayer2 is Step 2: Layer 2 (in-process plugin or vLLM-SR HTTP)
 // orders the models associated with the virtual key. Capability/catalog filtering
 // intentionally happens afterward so Layer 1 never prevents the router call.
-func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string) ([]routeCandidate, bool) {
+func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, body map[string]any, profile *RequestProfile, pool []routeCandidate, cfg *SemanticRoutingConfig, preferenceOverride []string, hasIncomingModel bool) ([]routeCandidate, bool) {
 	if !p.layer2Enabled(cfg) {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: layer2 router unset; declining semantic rewrite")
 		return nil, false
@@ -781,6 +781,10 @@ func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *t
 
 	route, err := p.previewLayer2Route(ctx, body, profile, pool, cfg)
 	if err != nil {
+		if !hasIncomingModel && len(pool) > 0 {
+			ranked := p.rankAutoVKPool(ctx, pool, profile, cfg, preferenceOverride, fmt.Sprintf("layer2 failed (%v)", err))
+			return ranked, false
+		}
 		p.logSemantic(ctx, schemas.LogLevelWarn, "2/route: layer2 failed (%v); declining semantic rewrite", err)
 		return nil, false
 	}
@@ -792,6 +796,13 @@ func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *t
 		}
 		ranked := p.rankByModelCards(ctx, comp, pool, profile, cfg, preferenceOverride, route)
 		if len(ranked) == 0 {
+			// Explicit model: keep the request as-is. Auto has nothing to keep, so
+			// use the VK pool so the request does not fail with "model is required".
+			if !hasIncomingModel && len(pool) > 0 {
+				ranked := p.rankAutoVKPool(ctx, pool, profile, cfg, preferenceOverride,
+					fmt.Sprintf("decision=%q no VK model card matched", route.Decision))
+				return ranked, false
+			}
 			p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: decision=%q no VK model card matched the capability profile; falling back to requested model",
 				route.Decision)
 			return nil, true
@@ -819,6 +830,13 @@ func (p *GovernancePlugin) selectWithLayer2(ctx *schemas.BifrostContext, comp *t
 		"2/route: layer2 selected=%s decision=%q algorithm=%q status=%q; ordering %d VK models",
 		route.SelectedModel, route.Decision, route.Algorithm, route.SelectionStatus, len(ranked))
 	return ranked, false
+}
+
+// rankAutoVKPool is the Auto fail-open when Layer 2 cannot name a model.
+// Callers must already know the request omitted model and the VK pool is non-empty.
+func (p *GovernancePlugin) rankAutoVKPool(ctx *schemas.BifrostContext, pool []routeCandidate, profile *RequestProfile, cfg *SemanticRoutingConfig, preferenceOverride []string, reason string) []routeCandidate {
+	p.logSemantic(ctx, schemas.LogLevelInfo, "2/route: %s; Auto ranking VK pool (%d models)", reason, len(pool))
+	return p.rankCandidates(pool, profile, cfg, preferenceOverride)
 }
 
 func formatTook(d time.Duration) string {
