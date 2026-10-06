@@ -116,6 +116,8 @@ func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, t
 	}
 	resolver := NewBudgetResolver(store, p.modelCatalog, p.logger, p.inMemoryStore)
 	tracker := NewUsageTracker(p.ctx, store, resolver, configStore, p.logger)
+	tracker.SetTenantID(tenantID)
+	tracker.SetAlertPublisher(p.usagePublisher)
 	engine, err := NewRoutingEngine(store, p.logger, p.routingChainMaxDepth)
 	if err != nil {
 		p.logger.Debug("failed to initialise routing engine for tenant %s: %v", tenantID, err)

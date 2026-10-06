@@ -43,12 +43,18 @@ type UsageTracker struct {
 	trackerCtx    context.Context
 	trackerCancel context.CancelFunc
 	resetTicker   *time.Ticker
+	alertTicker   *time.Ticker
 	done          chan struct{}
 	wg            sync.WaitGroup
+
+	alertMu        sync.RWMutex
+	tenantID       string
+	alertPublisher UsageEventPublisher
 }
 
 const (
 	workerInterval = 10 * time.Second
+	alertInterval  = time.Minute
 )
 
 // NewUsageTracker creates a new usage tracker and starts its background reset worker.
@@ -123,6 +129,11 @@ func (t *UsageTracker) startWorkers(ctx context.Context) {
 	t.resetTicker = time.NewTicker(workerInterval)
 	t.wg.Add(1)
 	go t.resetWorker(ctx)
+
+	// Alert scan is separate so a Kafka publish or claim insert cannot delay counter resets.
+	t.alertTicker = time.NewTicker(alertInterval)
+	t.wg.Add(1)
+	go t.alertWorker(ctx)
 }
 
 // resetWorker manages periodic resets of rate limit and usage counters
@@ -134,6 +145,20 @@ func (t *UsageTracker) resetWorker(ctx context.Context) {
 		case <-t.resetTicker.C:
 			t.resetExpiredCounters(ctx)
 
+		case <-t.done:
+			return
+		}
+	}
+}
+
+// alertWorker evaluates cached thresholds once a minute. It does not reset counters.
+func (t *UsageTracker) alertWorker(ctx context.Context) {
+	defer t.wg.Done()
+
+	for {
+		select {
+		case <-t.alertTicker.C:
+			t.scanBillingAlerts(ctx)
 		case <-t.done:
 			return
 		}
@@ -158,6 +183,60 @@ func (t *UsageTracker) resetExpiredCounters(ctx context.Context) {
 	// ==== PART 3: Dump rate limit counters to database ====
 	if err := t.store.DumpRateLimits(ctx, nil, nil); err != nil {
 		t.logger.Error("failed to dump rate limits to database: %v", err)
+	}
+}
+
+// SetTenantID records the tenant whose billing-alert topic this tracker publishes to.
+func (t *UsageTracker) SetTenantID(tenantID string) {
+	if t == nil {
+		return
+	}
+	t.alertMu.Lock()
+	t.tenantID = tenantID
+	t.alertMu.Unlock()
+}
+
+// SetAlertPublisher injects the Kafka publisher used by the alert scan. Nil skips publish
+// and leaves the notification unpublished so a later tick can retry.
+func (t *UsageTracker) SetAlertPublisher(publisher UsageEventPublisher) {
+	if t == nil {
+		return
+	}
+	t.alertMu.Lock()
+	t.alertPublisher = publisher
+	t.alertMu.Unlock()
+}
+
+func (t *UsageTracker) scanBillingAlerts(ctx context.Context) {
+	t.alertMu.RLock()
+	tenantID := t.tenantID
+	publisher := t.alertPublisher
+	t.alertMu.RUnlock()
+	if tenantID == "" {
+		return
+	}
+	scanner, ok := t.store.(interface {
+		ScanAlertThresholds(context.Context) []BillingAlertEvent
+		MarkAlertNotificationPublished(context.Context, string) error
+	})
+	if !ok || scanner == nil {
+		return
+	}
+	for _, event := range scanner.ScanAlertThresholds(ctx) {
+		if event.NotificationID == "" || event.Message == nil {
+			continue
+		}
+		if publisher == nil {
+			continue
+		}
+		event.Message["tenantId"] = tenantID
+		if err := publisher.PublishAlert(context.WithoutCancel(ctx), tenantID, event.NotificationID, event.Message); err != nil {
+			t.logger.Error("failed to publish billing alert %s: %v", event.NotificationID, err)
+			continue
+		}
+		if err := scanner.MarkAlertNotificationPublished(ctx, event.NotificationID); err != nil {
+			t.logger.Error("failed to mark billing alert %s published: %v", event.NotificationID, err)
+		}
 	}
 }
 
@@ -299,6 +378,9 @@ func (t *UsageTracker) Cleanup() error {
 	close(t.done)
 	if t.resetTicker != nil {
 		t.resetTicker.Stop()
+	}
+	if t.alertTicker != nil {
+		t.alertTicker.Stop()
 	}
 	// Wait for workers to finish
 	t.wg.Wait()

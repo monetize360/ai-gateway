@@ -361,12 +361,15 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 			VirtualKey: vk,
 		}
 	}
-	// 3. Check model filtering
-	if r.isModelRequired(requestType) && !r.isModelAllowedWithScopedConfigs(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs) {
-		return &EvaluationResult{
-			Decision:   DecisionModelBlocked,
-			Reason:     fmt.Sprintf("Model '%s' is not allowed for this virtual key", model),
-			VirtualKey: vk,
+	// 3. Check model filtering. The reason names the layer that denied the model
+	// (organization, organizational unit, user, or virtual key).
+	if r.isModelRequired(requestType) {
+		if reason := r.modelDenialReason(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs); reason != "" {
+			return &EvaluationResult{
+				Decision:   DecisionModelBlocked,
+				Reason:     reason,
+				VirtualKey: vk,
+			}
 		}
 	}
 
@@ -433,10 +436,10 @@ func (r *BudgetResolver) isProviderAndModelAccessibleForContext(ctx context.Cont
 // Enforcement is layered: org-level configs are checked first, then VK-level configs.
 // Within each layer blacklisted models win over allowed models (blacklist-wins semantics).
 //
-// Layer 1 — Org-level (OrgAllowedModelConfigs, populated from scope_org_id configs):
-//   - If any org config blacklists the model → block immediately (highest priority).
-//   - If org configs exist for this provider but none allow the model → block.
-//   - If no org configs exist for this provider → layer passes (no org restriction).
+// Layer 1 — Org-level (OrgAllowedModelConfigs, populated from the scope org and its ancestors):
+//   - Each ancestor that configured this provider must allow the model (allowlists intersect).
+//   - A blacklist on any ancestor blocks the model.
+//   - An ancestor with no rule for this provider does not widen or deny it.
 //
 // Layer 2 — VK-level (AllowedModelConfigs):
 //   - Same blacklist-wins, then allowlist logic as before.
@@ -446,109 +449,147 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 }
 
 func (r *BudgetResolver) isModelAllowedWithScopedConfigs(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) bool {
-	// --- Layer 1: Org-level restrictions ---
-	if len(vk.OrgAllowedModelConfigs) > 0 {
-		orgHasConfigForProvider := false
-		for _, pc := range vk.OrgAllowedModelConfigs {
-			if pc.Provider == string(provider) {
-				orgHasConfigForProvider = true
-				// Blacklist wins immediately.
-				if isModelBlockedByList(pc.BlacklistedModels, model) {
-					return false
-				}
-			}
-		}
-		if orgHasConfigForProvider {
-			// At least one org config exists for this provider; check allowlist.
-			orgAllows := false
-			for _, pc := range vk.OrgAllowedModelConfigs {
-				if pc.Provider != string(provider) {
-					continue
-				}
-				if r.isModelInAllowedList(provider, model, pc.AllowedModels) {
-					orgAllows = true
-					break
-				}
-			}
-			if !orgAllows {
-				return false
-			}
-		}
-	}
+	return r.modelDenialReason(vk, provider, model, orgUnitConfigs, userConfigs) == ""
+}
 
-	// --- Layer 2: Org-unit restrictions ---
-	if !r.isModelAllowedByOrgUnitConfigs(orgUnitConfigs, provider, model) {
-		return false
+// modelDenialReason returns an empty string when the model is allowed. Otherwise it names
+// the layer that blocked it. A department or team rule is reported with that unit's name.
+func (r *BudgetResolver) modelDenialReason(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) string {
+	if vk == nil {
+		return fmt.Sprintf("Model '%s' is not allowed", model)
 	}
-
-	// --- Layer 3: User restrictions ---
+	if _, blocked := r.blockingScopeID(vk.OrgAllowedModelConfigs, provider, model, orgConfigScopeID); blocked {
+		return fmt.Sprintf("Model '%s' is not allowed for this organization", model)
+	}
+	if scopeID, blocked := r.blockingScopeID(orgUnitConfigs, provider, model, orgUnitConfigScopeID); blocked {
+		if name := r.orgUnitName(scopeID); name != "" {
+			return fmt.Sprintf("Model '%s' is not allowed for organizational unit '%s'", model, name)
+		}
+		return fmt.Sprintf("Model '%s' is not allowed for this organizational unit", model)
+	}
 	if !r.isModelAllowedByUserConfigs(userConfigs, provider, model) {
-		return false
+		return fmt.Sprintf("Model '%s' is not allowed for this user", model)
 	}
+	if !r.isModelAllowedByVirtualKey(vk, provider, model) {
+		return fmt.Sprintf("Model '%s' is not allowed for this virtual key", model)
+	}
+	return ""
+}
 
-	// --- Layer 4: VK-level restrictions ---
+func (r *BudgetResolver) orgUnitName(orgUnitID string) string {
+	namer, ok := r.store.(interface {
+		OrgUnitName(string) string
+	})
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(namer.OrgUnitName(orgUnitID))
+}
+
+func (r *BudgetResolver) isModelAllowedByVirtualKey(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string) bool {
 	// Empty VK configs means no VK-level restriction.
-	if len(vk.AllowedModelConfigs) == 0 {
+	if vk == nil || len(vk.AllowedModelConfigs) == 0 {
 		return true
 	}
-
-	// Pass 1: if any matching VK config blacklists the model, block immediately.
+	hasProviderConfig := false
 	for _, pc := range vk.AllowedModelConfigs {
-		if pc.Provider == string(provider) && isModelBlockedByList(pc.BlacklistedModels, model) {
+		if pc.Provider != string(provider) {
+			continue
+		}
+		hasProviderConfig = true
+		if isModelBlockedByList(pc.BlacklistedModels, model) {
 			return false
 		}
 	}
-
-	// Pass 2: allowlist check — model is allowed if any matching VK config permits it.
+	if !hasProviderConfig {
+		return true
+	}
 	for _, pc := range vk.AllowedModelConfigs {
 		if pc.Provider == string(provider) && r.isModelInAllowedList(provider, model, pc.AllowedModels) {
 			return true
 		}
 	}
-
 	return false
 }
 
+func orgConfigScopeID(config configstoreTables.TableAllowedModelConfig) string {
+	if config.ScopeOrgID == nil || strings.TrimSpace(*config.ScopeOrgID) == "" {
+		// Configs attached without an org id still restrict this layer as one policy.
+		return "_"
+	}
+	return strings.TrimSpace(*config.ScopeOrgID)
+}
+
+func orgUnitConfigScopeID(config configstoreTables.TableAllowedModelConfig) string {
+	if config.ScopeOrgUnitID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*config.ScopeOrgUnitID)
+}
+
+func (r *BudgetResolver) isModelAllowedByOrgConfigs(configs []configstoreTables.TableAllowedModelConfig, provider schemas.ModelProvider, model string) bool {
+	_, blocked := r.blockingScopeID(configs, provider, model, orgConfigScopeID)
+	return !blocked
+}
+
 func (r *BudgetResolver) isModelAllowedByOrgUnitConfigs(configs []configstoreTables.TableAllowedModelConfig, provider schemas.ModelProvider, model string) bool {
+	_, blocked := r.blockingScopeID(configs, provider, model, orgUnitConfigScopeID)
+	return !blocked
+}
+
+// blockingScopeID reports the first scope, in config order, whose rule for this provider
+// denies the model. An empty id means the model is allowed by every scope in the list.
+func (r *BudgetResolver) blockingScopeID(configs []configstoreTables.TableAllowedModelConfig, provider schemas.ModelProvider, model string, scopeID func(configstoreTables.TableAllowedModelConfig) string) (string, bool) {
 	if len(configs) == 0 {
-		return true
+		return "", false
 	}
 
-	byOrgUnit := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	byScope := make(map[string][]configstoreTables.TableAllowedModelConfig)
+	order := make([]string, 0)
 	for _, config := range configs {
-		if config.ScopeOrgUnitID == nil || strings.TrimSpace(*config.ScopeOrgUnitID) == "" {
+		id := scopeID(config)
+		if id == "" {
 			continue
 		}
-		byOrgUnit[*config.ScopeOrgUnitID] = append(byOrgUnit[*config.ScopeOrgUnitID], config)
+		if _, seen := byScope[id]; !seen {
+			order = append(order, id)
+		}
+		byScope[id] = append(byScope[id], config)
 	}
 
-	for _, unitConfigs := range byOrgUnit {
+	for _, id := range order {
+		scopeConfigs := byScope[id]
 		hasProviderConfig := false
-		for _, config := range unitConfigs {
+		denied := false
+		for _, config := range scopeConfigs {
 			if config.Provider != string(provider) {
 				continue
 			}
 			hasProviderConfig = true
 			if isModelBlockedByList(config.BlacklistedModels, model) {
-				return false
+				denied = true
+				break
 			}
 		}
 		if !hasProviderConfig {
-			return false
+			continue
+		}
+		if denied {
+			return id, true
 		}
 
 		allowed := false
-		for _, config := range unitConfigs {
+		for _, config := range scopeConfigs {
 			if config.Provider == string(provider) && r.isModelInAllowedList(provider, model, config.AllowedModels) {
 				allowed = true
 				break
 			}
 		}
 		if !allowed {
-			return false
+			return id, true
 		}
 	}
-	return true
+	return "", false
 }
 
 func (r *BudgetResolver) isModelInAllowedList(provider schemas.ModelProvider, model string, allowedModels schemas.WhiteList) bool {
@@ -611,7 +652,7 @@ func (r *BudgetResolver) isModelAllowedByUserConfigs(configs []configstoreTables
 		}
 	}
 	if !hasProviderConfig {
-		return false
+		return true
 	}
 
 	for _, config := range configs {
@@ -677,33 +718,10 @@ func isProviderAllowedByAccessPolicy(vk *configstoreTables.TableVirtualKey, prov
 	return true, ""
 }
 
-func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider) bool {
-	// Org-level: if org has configs and none match this provider, block it.
-	if len(vk.OrgAllowedModelConfigs) > 0 {
-		orgPermitsProvider := false
-		for _, pc := range vk.OrgAllowedModelConfigs {
-			if pc.Provider == string(provider) {
-				orgPermitsProvider = true
-				break
-			}
-		}
-		if !orgPermitsProvider {
-			return false
-		}
-	}
-
-	// VK-level: empty means no restriction (all providers allowed at this layer).
-	if len(vk.AllowedModelConfigs) == 0 {
-		return true
-	}
-
-	for _, pc := range vk.AllowedModelConfigs {
-		if pc.Provider == string(provider) {
-			return true
-		}
-	}
-
-	return false
+func (r *BudgetResolver) isProviderAllowed(vk *configstoreTables.TableVirtualKey, _ schemas.ModelProvider) bool {
+	// Model allow/block rows restrict models of the provider they name. They are not a
+	// provider allowlist. Provider allow/block is evaluated by isProviderAllowedByAccessPolicy.
+	return vk != nil
 }
 
 // checkRateLimitHierarchy checks provider-level rate limits first, then VK rate limits using flexible approach

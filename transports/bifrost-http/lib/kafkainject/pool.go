@@ -85,9 +85,20 @@ func (p *Pool) GetOrCreate(ctx context.Context, tenantID, connectionID, dataSour
 	return entry, nil
 }
 
-// GetOrCreateStandard returns the environment-configured producer for a tenant.
+// GetOrCreateStandard returns the environment-configured InferenceUsage producer for a tenant.
 // This path intentionally does not read integration connections or datasources.
 func (p *Pool) GetOrCreateStandard(tenantID string) (*ProducerEntry, error) {
+	return p.getOrCreatePrefixedTopic(tenantID, KafkaUsageTopicPrefixEnv, DefaultUsageTopicPrefix)
+}
+
+// GetOrCreateBillingAlert returns the producer for billing-alert_{tenantId}.
+func (p *Pool) GetOrCreateBillingAlert(tenantID string) (*ProducerEntry, error) {
+	return p.getOrCreatePrefixedTopic(tenantID, KafkaBillingAlertTopicPrefixEnv, DefaultBillingAlertTopicPrefix)
+}
+
+// getOrCreatePrefixedTopic caches a producer for prefix + "_" + tenantID.
+// The derivation matches MPilot's per-tenant topic helpers.
+func (p *Pool) getOrCreatePrefixedTopic(tenantID, prefixEnv, defaultPrefix string) (*ProducerEntry, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
 		return nil, fmt.Errorf("tenantID is required")
@@ -97,12 +108,11 @@ func (p *Pool) GetOrCreateStandard(tenantID string) (*ProducerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	topicPrefix := strings.TrimSpace(os.Getenv(KafkaUsageTopicPrefixEnv))
+	topicPrefix := strings.TrimSpace(os.Getenv(prefixEnv))
 	if topicPrefix == "" {
-		topicPrefix = DefaultUsageTopicPrefix
+		topicPrefix = defaultPrefix
 	}
-	// Keep this derivation identical to MPilot UsageKafkaTopics.topic:
-	// KAFKA_USAGE_TOPIC_PREFIX + "_" + tenantId.
+	// prefix + "_" + tenantId, matching MPilot UsageKafkaTopics and BillingAlertKafkaTopics.
 	topic := topicPrefix + "_" + tenantID
 	key := standardPoolKey(tenantID, bootstrapServers, topic)
 

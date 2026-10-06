@@ -3928,6 +3928,98 @@ func (s *RDBConfigStore) GetWallets(ctx context.Context) ([]tables.TableWallet, 
 	return wallets, nil
 }
 
+// GetAlertThresholds retrieves AlertThreshold rows. An absent table returns an empty slice.
+func (s *RDBConfigStore) GetAlertThresholds(ctx context.Context) ([]tables.TableAlertThreshold, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAlertThreshold{}) {
+		return nil, nil
+	}
+	var rows []tables.TableAlertThreshold
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// GetAlertNotifications retrieves AlertNotification rows, including unpublished claims that still need a Kafka publish.
+func (s *RDBConfigStore) GetAlertNotifications(ctx context.Context) ([]tables.TableAlertNotification, error) {
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAlertNotification{}) {
+		return nil, nil
+	}
+	var rows []tables.TableAlertNotification
+	if err := GovernanceActive(db).Order("created_at ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// InsertAlertNotification inserts a claim. A unique conflict returns false and a nil error so another node keeps the publish.
+func (s *RDBConfigStore) InsertAlertNotification(ctx context.Context, notification *tables.TableAlertNotification) (bool, error) {
+	if notification == nil {
+		return false, fmt.Errorf("alert notification is required")
+	}
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAlertNotification{}) {
+		return false, nil
+	}
+	// Liquibase adds this index when the table already exists. Create it here too so a
+	// fresh metadata deploy that races the changeset still dedupes multi-node claims.
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS alertnotification_threshold_period_uidx
+		ON alertnotification__m (threshold_id, period_key)
+		WHERE deleted IS NOT TRUE`).Error; err != nil {
+		return false, err
+	}
+	if err := db.Create(notification).Error; err != nil {
+		if isUniqueConstraintViolation(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// MarkAlertNotificationPublished sets published after Kafka accepts the event.
+func (s *RDBConfigStore) MarkAlertNotificationPublished(ctx context.Context, notificationID string) error {
+	if notificationID == "" {
+		return fmt.Errorf("alert notification id is required")
+	}
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAlertNotification{}) {
+		return nil
+	}
+	result := db.Model(&tables.TableAlertNotification{}).
+		Where("id = ? AND deleted = ?", notificationID, false).
+		Updates(map[string]any{
+			"published":  true,
+			"updated_at": time.Now().UTC(),
+		})
+	return result.Error
+}
+
+// DeleteAlertNotification removes the claim so a wallet that has recovered can alert on the next drop.
+func (s *RDBConfigStore) DeleteAlertNotification(ctx context.Context, thresholdID, periodKey string) error {
+	if thresholdID == "" || periodKey == "" {
+		return fmt.Errorf("alert notification key is required")
+	}
+	db := s.DB().WithContext(ctx)
+	if !db.Migrator().HasTable(&tables.TableAlertNotification{}) {
+		return nil
+	}
+	return db.Exec(
+		"DELETE FROM alertnotification__m WHERE threshold_id = ? AND period_key = ?",
+		thresholdID, periodKey,
+	).Error
+}
+
+func isUniqueConstraintViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate key") || strings.Contains(msg, "UNIQUE constraint failed")
+}
+
 // GetOrgUnits retrieves OrgUnit rows from orgunit__m.
 func (s *RDBConfigStore) GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error) {
 	db := s.DB().WithContext(ctx)

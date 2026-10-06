@@ -385,13 +385,13 @@ type MockConfigStore struct {
 	clientConfig         *configstore.ClientConfig
 	providers            map[schemas.ModelProvider]configstore.ProviderConfig
 	providerRefreshDelta *configstore.ProviderConfigRefreshDelta
-	mcpConfig        *schemas.MCPConfig
-	governanceConfig *configstore.GovernanceConfig
-	authConfig       *configstore.AuthConfig
-	frameworkConfig  *tables.TableFrameworkConfig
-	vectorConfig     *vectorstore.Config
-	logsConfig       *logstore.Config
-	plugins          []*tables.TablePlugin
+	mcpConfig            *schemas.MCPConfig
+	governanceConfig     *configstore.GovernanceConfig
+	authConfig           *configstore.AuthConfig
+	frameworkConfig      *tables.TableFrameworkConfig
+	vectorConfig         *vectorstore.Config
+	logsConfig           *logstore.Config
+	plugins              []*tables.TablePlugin
 
 	// Track update calls for verification
 	clientConfigUpdated    bool
@@ -697,6 +697,26 @@ func (m *MockConfigStore) GetAccounts(ctx context.Context) ([]tables.TableAccoun
 
 func (m *MockConfigStore) GetWallets(ctx context.Context) ([]tables.TableWallet, error) {
 	return nil, nil
+}
+
+func (m *MockConfigStore) GetAlertThresholds(ctx context.Context) ([]tables.TableAlertThreshold, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetAlertNotifications(ctx context.Context) ([]tables.TableAlertNotification, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) InsertAlertNotification(ctx context.Context, notification *tables.TableAlertNotification) (bool, error) {
+	return false, nil
+}
+
+func (m *MockConfigStore) MarkAlertNotificationPublished(ctx context.Context, notificationID string) error {
+	return nil
+}
+
+func (m *MockConfigStore) DeleteAlertNotification(ctx context.Context, thresholdID, periodKey string) error {
+	return nil
 }
 
 func (m *MockConfigStore) GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error) {
@@ -12888,7 +12908,6 @@ func TestUpdateGovernanceConfigInStore_RejectsSharedGovernanceIDs(t *testing.T) 
 	})
 }
 
-
 // ===================================================================================
 // RUNTIME VS MIGRATION HASH PARITY TESTS (SQLite Integration)
 // ===================================================================================
@@ -15555,14 +15574,14 @@ var excludedGoFields = map[string]map[string]bool{
 		"virtual_keys": true, // GORM relation
 	},
 	"tables.TableVirtualKey": {
-		"config_hash":        true,
-		"created_at":         true,
-		"updated_at":         true,
-		"created_by": true, // DB ownership metadata; set by API/session layer
-		"budgets":            true, // GORM relation (budgets have virtual_key_id FK)
-		"rate_limit":         true, // GORM relation
-		"team":               true, // GORM relation
-		"customer":           true, // GORM relation
+		"config_hash": true,
+		"created_at":  true,
+		"updated_at":  true,
+		"created_by":  true, // DB ownership metadata; set by API/session layer
+		"budgets":     true, // GORM relation (budgets have virtual_key_id FK)
+		"rate_limit":  true, // GORM relation
+		"team":        true, // GORM relation
+		"customer":    true, // GORM relation
 	},
 	"tables.TableVirtualKeyProviderConfig": {
 		"rate_limit":     true, // GORM relation

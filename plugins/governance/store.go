@@ -32,13 +32,20 @@ type LocalGovernanceStore struct {
 	budgetUsages  sync.Map // string -> *TableBudgetUsage (BudgetUsage ID -> row from budgetusage__m)
 	accounts      sync.Map // string -> *TableAccount (Account ID -> row from account__m)
 	wallets       sync.Map // string -> *TableWallet (Wallet ID -> row from wallet__m)
-	orgUnits      sync.Map // string -> *TableOrgUnit (OrgUnit ID -> row from orgunit__m)
-	userOrgUnits  sync.Map // string -> *TableUserOrgUnit (User ID -> org_unit_id mapping)
-	rateLimits    sync.Map // string -> *RateLimit (RateLimit ID -> RateLimit)
-	modelConfigs  sync.Map // string -> *ModelConfig (key: "modelName" or "modelName:provider" -> ModelConfig)
-	configModels  sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
-	providers     sync.Map // string -> *Provider (Provider name -> Provider with preloaded relationships)
-	routingRules  sync.Map // string -> []*TableRoutingRule (key: "scope:scopeID" -> rules, scopeID="" for global)
+
+	// Alert thresholds are indexed by target id. Claims are a separate set: SyncBudgetUsageFromDatabase
+	// replaces the budget row, so a flag stored on that struct would be wiped.
+	alertMu                 sync.Mutex
+	alertThresholdsByID     map[string]*configstoreTables.TableAlertThreshold
+	alertThresholdsByTarget map[string][]*configstoreTables.TableAlertThreshold
+	alertClaims             map[string]*alertClaim
+	orgUnits                sync.Map // string -> *TableOrgUnit (OrgUnit ID -> row from orgunit__m)
+	userOrgUnits            sync.Map // string -> *TableUserOrgUnit (User ID -> org_unit_id mapping)
+	rateLimits              sync.Map // string -> *RateLimit (RateLimit ID -> RateLimit)
+	modelConfigs            sync.Map // string -> *ModelConfig (key: "modelName" or "modelName:provider" -> ModelConfig)
+	configModels            sync.Map // string -> *TableModel (key: "providerName:modelName" -> ConfigModel pricing)
+	providers               sync.Map // string -> *Provider (Provider name -> Provider with preloaded relationships)
+	routingRules            sync.Map // string -> []*TableRoutingRule (key: "scope:scopeID" -> rules, scopeID="" for global)
 
 	// modelCards indexes published catalog listings by "provider/model" and "model".
 	modelCards atomic.Pointer[map[string]*modelCard]
@@ -293,6 +300,9 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 		LastDBUsagesBudgets:            make(map[string]float64),
 		LastDBUsagesRequestsRateLimits: make(map[string]int64),
 		LastDBUsagesTokensRateLimits:   make(map[string]int64),
+		alertThresholdsByID:            make(map[string]*configstoreTables.TableAlertThreshold),
+		alertThresholdsByTarget:        make(map[string][]*configstoreTables.TableAlertThreshold),
+		alertClaims:                    make(map[string]*alertClaim),
 	}
 
 	if configStore != nil {
@@ -1524,6 +1534,15 @@ func (gs *LocalGovernanceStore) orgUnitIDForUser(userID string) string {
 	return strings.TrimSpace(*mapping.OrgUnitID)
 }
 
+// OrgUnitName returns the display name of an organizational unit, or empty when it is unknown.
+func (gs *LocalGovernanceStore) OrgUnitName(orgUnitID string) string {
+	orgUnit := gs.loadOrgUnit(strings.TrimSpace(orgUnitID))
+	if orgUnit == nil {
+		return ""
+	}
+	return strings.TrimSpace(orgUnit.Name)
+}
+
 func (gs *LocalGovernanceStore) loadOrgUnit(orgUnitID string) *configstoreTables.TableOrgUnit {
 	if orgUnitID == "" {
 		return nil
@@ -2100,7 +2119,9 @@ func (gs *LocalGovernanceStore) ResetExpiredBudgetUsagesInMemory(ctx context.Con
 		}
 		reset := *usage
 		reset.CurrentUsage = 0
-		reset.LastReset = &now
+		// Microsecond precision matches timestamptz so every node builds the same alert period key.
+		resetAt := now.UTC().Truncate(time.Microsecond)
+		reset.LastReset = &resetAt
 		gs.budgetUsages.Store(usage.ID, &reset)
 		snapshots = append(snapshots, BudgetUsageResetSnapshot{
 			Usage:         &reset,
@@ -2587,6 +2608,16 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess, orgUnitAllowedModelConfigs, orgUnitProviderAccess, userAllowedModelConfigs, userProviderAccess)
 	gs.loadModelCards(ctx)
 
+	alertThresholds, err := gs.configStore.GetAlertThresholds(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load alert thresholds: %w", err)
+	}
+	alertNotifications, err := gs.configStore.GetAlertNotifications(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load alert notifications: %w", err)
+	}
+	gs.replaceAlertCache(alertThresholds, alertNotifications)
+
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
 	gs.refreshMu.Unlock()
@@ -2652,6 +2683,10 @@ func (gs *LocalGovernanceStore) applyGovernanceRefreshDelta(ctx context.Context,
 			gs.wallets.Store(wallet.ID, &clone)
 		}
 		gs.reindexWalletsByAccount()
+	}
+
+	if len(delta.AlertThresholds) > 0 {
+		gs.applyAlertThresholdDelta(delta.AlertThresholds)
 	}
 
 	if len(delta.OrgUnits) > 0 {

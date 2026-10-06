@@ -416,6 +416,13 @@ func (p *GovernancePlugin) SetUsageEventPublisher(publisher UsageEventPublisher)
 		return
 	}
 	p.usagePublisher = publisher
+	p.tenantComponents.Range(func(_, value any) bool {
+		comp, ok := value.(*tenantGovernanceComponents)
+		if ok && comp != nil && comp.tracker != nil {
+			comp.tracker.SetAlertPublisher(publisher)
+		}
+		return true
+	})
 }
 
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
@@ -2141,6 +2148,9 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	}
 	if orgUnitID != "" {
 		message["orgUnitId"] = orgUnitID
+	}
+	if trimmedVirtualKey := strings.TrimSpace(virtualKey); trimmedVirtualKey != "" {
+		message["virtualKeyId"] = trimmedVirtualKey
 	}
 
 	// postHookWorker runs after the HTTP handler returns, so the request context is already

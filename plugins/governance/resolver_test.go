@@ -376,13 +376,13 @@ func TestBudgetResolver_IsProviderAllowed(t *testing.T) {
 			shouldBeAllowed: true,
 		},
 		{
-			name: "Provider not in allowlist",
+			name: "Model rule for another provider does not block this provider",
 			vk: buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
 				[]configstoreTables.TableVirtualKeyProviderConfig{
 					buildProviderConfig("anthropic", []string{"claude-3-sonnet"}),
 				}),
 			provider:        schemas.OpenAI,
-			shouldBeAllowed: false,
+			shouldBeAllowed: true,
 		},
 	}
 
