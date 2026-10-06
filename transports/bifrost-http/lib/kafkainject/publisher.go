@@ -51,3 +51,35 @@ func (p *UsagePublisher) PublishUsage(ctx context.Context, tenantID, key string,
 	_, _, _, err = ProduceSync(publishCtx, entry, key, payload)
 	return err
 }
+
+// PublishAlert produces a billing-alert message. The Kafka key is the notification id.
+func (p *UsagePublisher) PublishAlert(ctx context.Context, tenantID, key string, message map[string]any) error {
+	if p == nil || p.pool == nil {
+		return fmt.Errorf("kafka alert publisher not configured")
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return fmt.Errorf("tenantID is required")
+	}
+	if message == nil {
+		return fmt.Errorf("message is required")
+	}
+
+	publishCtx, cancel := context.WithTimeout(ctx, ProduceTimeout+2*time.Second)
+	defer cancel()
+
+	entry, err := p.pool.GetOrCreateBillingAlert(tenantID)
+	if err != nil {
+		return err
+	}
+
+	payload, err := sonic.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize billing alert: %w", err)
+	}
+	if len(payload) > MaxMessageBytes {
+		return fmt.Errorf("billing alert message exceeds max size")
+	}
+
+	_, _, _, err = ProduceSync(publishCtx, entry, key, payload)
+	return err
+}

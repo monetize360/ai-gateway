@@ -17,16 +17,17 @@ const RefreshOverlap = 2 * time.Second
 
 // GovernanceRefreshDelta holds governance entities changed since the previous refresh.
 type GovernanceRefreshDelta struct {
-	Organizations []tables.TableOrganization
-	VirtualKeys   []tables.TableVirtualKey
-	Budgets       []tables.TableBudget
-	BudgetUsages  []tables.TableBudgetUsage
-	Accounts      []tables.TableAccount
-	Wallets       []tables.TableWallet
-	OrgUnits      []tables.TableOrgUnit
-	UserOrgUnits  []tables.TableUserOrgUnit
-	RateLimits    []tables.TableRateLimit
-	ModelConfigs  []tables.TableModelConfig
+	Organizations   []tables.TableOrganization
+	VirtualKeys     []tables.TableVirtualKey
+	Budgets         []tables.TableBudget
+	BudgetUsages    []tables.TableBudgetUsage
+	Accounts        []tables.TableAccount
+	Wallets         []tables.TableWallet
+	AlertThresholds []tables.TableAlertThreshold
+	OrgUnits        []tables.TableOrgUnit
+	UserOrgUnits    []tables.TableUserOrgUnit
+	RateLimits      []tables.TableRateLimit
+	ModelConfigs    []tables.TableModelConfig
 	// ConfigModels carries config_models catalog rows (including service_id) so billing
 	// service mapping refreshes without a gateway restart.
 	ConfigModels                     []tables.TableModel
@@ -57,6 +58,7 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.BudgetUsages) == 0 &&
 		len(d.Accounts) == 0 &&
 		len(d.Wallets) == 0 &&
+		len(d.AlertThresholds) == 0 &&
 		len(d.OrgUnits) == 0 &&
 		len(d.UserOrgUnits) == 0 &&
 		len(d.RateLimits) == 0 &&
@@ -126,6 +128,15 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 			return nil, fmt.Errorf("wallets changed since: %w", err)
 		}
 		if err := appendDeletedRowsSince(db, since, &delta.Wallets); err != nil {
+			return nil, err
+		}
+	}
+
+	if db.Migrator().HasTable(&tables.TableAlertThreshold{}) {
+		if err := GovernanceActive(db.Where("updated_at >= ?", since)).Find(&delta.AlertThresholds).Error; err != nil {
+			return nil, fmt.Errorf("alert thresholds changed since: %w", err)
+		}
+		if err := appendDeletedRowsSince(db, since, &delta.AlertThresholds); err != nil {
 			return nil, err
 		}
 	}

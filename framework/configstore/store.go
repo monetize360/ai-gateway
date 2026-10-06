@@ -243,6 +243,13 @@ type ConfigStore interface {
 	// Accounts (billing account__m — PreLLM account hierarchy walk)
 	GetAccounts(ctx context.Context) ([]tables.TableAccount, error)
 	GetWallets(ctx context.Context) ([]tables.TableWallet, error)
+	// Alert thresholds and notifications (alertthreshold__m / alertnotification__m).
+	// Missing tables return an empty slice. InsertAlertNotification returns false on a unique conflict.
+	GetAlertThresholds(ctx context.Context) ([]tables.TableAlertThreshold, error)
+	GetAlertNotifications(ctx context.Context) ([]tables.TableAlertNotification, error)
+	InsertAlertNotification(ctx context.Context, notification *tables.TableAlertNotification) (bool, error)
+	MarkAlertNotificationPublished(ctx context.Context, notificationID string) error
+	DeleteAlertNotification(ctx context.Context, thresholdID, periodKey string) error
 	GetOrgUnits(ctx context.Context) ([]tables.TableOrgUnit, error)
 	GetUserOrgUnits(ctx context.Context) ([]tables.TableUserOrgUnit, error)
 
