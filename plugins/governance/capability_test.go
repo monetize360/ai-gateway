@@ -331,90 +331,6 @@ func newAccessAlignedSemanticPlugin(t *testing.T, vk *configstoreTables.TableVir
 	return p, ctx
 }
 
-func seedConfigModels(t *testing.T, store *LocalGovernanceStore, entries ...ConfigModelEntry) {
-	t.Helper()
-	require.NotNil(t, store)
-	for _, entry := range entries {
-		store.upsertConfigModelInMemory(&configstoreTables.TableModel{
-			ID:           entry.Provider + ":" + entry.Model,
-			Name:         entry.Model,
-			ProviderName: entry.Provider,
-		})
-	}
-}
-
-// Unrestricted VK provider expands from tenant config_models, not the pricing catalog.
-func TestEnumerateCandidatesUnrestrictedUsesConfigModels(t *testing.T) {
-	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
-		[]configstoreTables.TableAllowedModelConfig{
-			buildProviderConfig("openai", []string{"*"}),
-		})
-	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
-	defer ctx.Cancel()
-
-	comp := p.getComponentsForContext(ctx)
-	require.NotNil(t, comp)
-	store, ok := comp.store.(*LocalGovernanceStore)
-	require.True(t, ok)
-	seedConfigModels(t, store,
-		ConfigModelEntry{Provider: "openai", Model: testTextModel},
-		ConfigModelEntry{Provider: "openai", Model: testVisionModel},
-		ConfigModelEntry{Provider: "gemini", Model: "gemini-2.0-flash-lite"},
-	)
-
-	got := candidateModels(p.enumerateCandidates(ctx, comp, vk))
-	assert.ElementsMatch(t, []string{testTextModel, testVisionModel}, got,
-		"unrestricted openai must use only openai config_models")
-}
-
-// Empty VK provider mapping falls back to all active config_models.
-func TestEnumerateCandidatesEmptyVKFallsBackToConfigModels(t *testing.T) {
-	vk := buildVirtualKey("vk-empty", "sk-bf-empty", "Empty", true)
-	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
-	defer ctx.Cancel()
-
-	comp := p.getComponentsForContext(ctx)
-	require.NotNil(t, comp)
-	store, ok := comp.store.(*LocalGovernanceStore)
-	require.True(t, ok)
-	seedConfigModels(t, store,
-		ConfigModelEntry{Provider: "openai", Model: testTextModel},
-		ConfigModelEntry{Provider: "gemini", Model: "gemini-2.0-flash-lite"},
-	)
-
-	got := candidateModels(p.enumerateCandidates(ctx, comp, vk))
-	assert.ElementsMatch(t, []string{testTextModel, "gemini-2.0-flash-lite"}, got)
-}
-
-// Deleted config_models are absent from the in-memory index and must not enter the pool.
-func TestEnumerateCandidatesExcludesDeletedConfigModels(t *testing.T) {
-	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
-		[]configstoreTables.TableAllowedModelConfig{
-			buildProviderConfig("openai", []string{"*"}),
-		})
-	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
-	defer ctx.Cancel()
-
-	comp := p.getComponentsForContext(ctx)
-	require.NotNil(t, comp)
-	store, ok := comp.store.(*LocalGovernanceStore)
-	require.True(t, ok)
-	seedConfigModels(t, store,
-		ConfigModelEntry{Provider: "openai", Model: testTextModel},
-		ConfigModelEntry{Provider: "openai", Model: testVisionModel},
-	)
-	removed := &configstoreTables.TableModel{
-		ID:           "openai:" + testVisionModel,
-		Name:         testVisionModel,
-		ProviderName: "openai",
-	}
-	removed.Deleted = true
-	store.upsertConfigModelInMemory(removed)
-
-	got := candidateModels(p.enumerateCandidates(ctx, comp, vk))
-	assert.Equal(t, []string{testTextModel}, got)
-}
-
 // Org blacklist removes a VK-allowed model from the semantic pool; the sibling remains.
 func TestEnumerateCandidatesExcludesOrgBlacklistedModel(t *testing.T) {
 	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
@@ -576,35 +492,6 @@ func TestValidateCandidateRejectsOrgBlockedModel(t *testing.T) {
 	}
 	_, ok := p.validateCandidate(comp, vk, candidate)
 	assert.False(t, ok)
-}
-
-// Tenant custom models live in config_models only; final commit must not require pricing.json.
-func TestValidateCandidateAcceptsConfigModelOutsidePricingCatalog(t *testing.T) {
-	const customProvider = "digipowerx"
-	const customModel = "claude-3.5-sonnet"
-
-	vk := buildVirtualKeyWithProviders("vk1", "sk-bf-test", "Test",
-		[]configstoreTables.TableVirtualKeyProviderConfig{
-			buildProviderConfig(customProvider, []string{"*"}),
-		})
-	p, ctx := newAccessAlignedSemanticPlugin(t, vk)
-	defer ctx.Cancel()
-	p.inMemoryStore = &mockInMemoryStore{
-		configuredProviders: map[schemas.ModelProvider]configstore.ProviderConfig{
-			schemas.OpenAI:                   {},
-			schemas.ModelProvider(customProvider): {},
-		},
-	}
-	comp := p.getComponentsForContext(ctx)
-
-	candidate := routeCandidate{
-		Provider: schemas.ModelProvider(customProvider),
-		Model:    customModel,
-		Config:   vk.AllowedModelConfigs[0],
-	}
-	refined, ok := p.validateCandidate(comp, vk, candidate)
-	require.True(t, ok, "config_models candidate must pass without pricing-catalog membership")
-	assert.Equal(t, customModel, refined)
 }
 
 func TestShouldApplySemanticRoutingDefaultForAll(t *testing.T) {

@@ -274,10 +274,6 @@ type GovernanceStore interface {
 	ResolveConfigModelID(provider schemas.ModelProvider, model string) string
 	// ResolveConfigModelServiceID maps provider + model name to config_models.service_id.
 	ResolveConfigModelServiceID(provider schemas.ModelProvider, model string) string
-	// ConfigModelNamesForProvider returns active (non-deleted) config_models names for a provider.
-	ConfigModelNamesForProvider(provider string) []string
-	// AllConfigModelEntries returns every active config_models provider/name pair.
-	AllConfigModelEntries() []ConfigModelEntry
 	// ResolveLeafAccountExternalID returns the leaf billing account's external_id for orgID.
 	// Empty when the org has no unique account, or the leaf account has no external_id.
 	ResolveLeafAccountExternalID(orgID string) string
@@ -999,86 +995,6 @@ func (gs *LocalGovernanceStore) ResolveConfigProviderID(provider schemas.ModelPr
 		return ""
 	}
 	return p.ID
-}
-
-// ConfigModelEntry is one active config_models row used for semantic pool expansion.
-type ConfigModelEntry struct {
-	Provider string
-	Model    string
-}
-
-// configModelProviderAndName resolves provider/model from a configModels map entry.
-// Prefer fields on the row; fall back to the "providerName:modelName" map key.
-func configModelProviderAndName(key string, m *configstoreTables.TableModel) (providerName, modelName string) {
-	if m != nil {
-		providerName = strings.TrimSpace(m.ProviderName)
-		modelName = strings.TrimSpace(m.Name)
-	}
-	if providerName != "" && modelName != "" {
-		return providerName, modelName
-	}
-	provider, model, ok := strings.Cut(key, ":")
-	if !ok {
-		return providerName, modelName
-	}
-	if providerName == "" {
-		providerName = strings.TrimSpace(provider)
-	}
-	if modelName == "" {
-		modelName = strings.TrimSpace(model)
-	}
-	return providerName, modelName
-}
-
-// collectConfigModelEntries walks the in-memory config_models index once.
-// When providerFilter is non-empty, only that provider is returned (case-insensitive).
-func (gs *LocalGovernanceStore) collectConfigModelEntries(providerFilter string) []ConfigModelEntry {
-	if gs == nil {
-		return nil
-	}
-	providerFilter = strings.TrimSpace(providerFilter)
-	var entries []ConfigModelEntry
-	gs.configModels.Range(func(key, value interface{}) bool {
-		m, ok := value.(*configstoreTables.TableModel)
-		if !ok || m == nil || m.Deleted {
-			return true
-		}
-		keyStr, _ := key.(string)
-		providerName, modelName := configModelProviderAndName(keyStr, m)
-		if providerName == "" || modelName == "" {
-			return true
-		}
-		if providerFilter != "" && !strings.EqualFold(providerName, providerFilter) {
-			return true
-		}
-		entries = append(entries, ConfigModelEntry{Provider: providerName, Model: modelName})
-		return true
-	})
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Provider != entries[j].Provider {
-			return entries[i].Provider < entries[j].Provider
-		}
-		return entries[i].Model < entries[j].Model
-	})
-	return entries
-}
-
-// ConfigModelNamesForProvider returns active (non-deleted) config_models names for a provider.
-func (gs *LocalGovernanceStore) ConfigModelNamesForProvider(provider string) []string {
-	entries := gs.collectConfigModelEntries(provider)
-	if len(entries) == 0 {
-		return nil
-	}
-	names := make([]string, len(entries))
-	for i := range entries {
-		names[i] = entries[i].Model
-	}
-	return names
-}
-
-// AllConfigModelEntries returns every active config_models provider/name pair.
-func (gs *LocalGovernanceStore) AllConfigModelEntries() []ConfigModelEntry {
-	return gs.collectConfigModelEntries("")
 }
 
 // ResolveConfigModelID maps provider + model name to config_models.id.
@@ -2935,7 +2851,6 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 		if !ok || providerName == "" {
 			continue
 		}
-		cm.ProviderName = providerName
 		key := fmt.Sprintf("%s:%s", providerName, cm.Name)
 		gs.configModels.Store(key, cm)
 	}

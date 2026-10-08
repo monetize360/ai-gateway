@@ -563,8 +563,6 @@ alongside a vLLM-SR recommendation. They are not a standalone Layer 2 router.
 
 **Default for all (`default_for_all`)** — When `semantic_routing.enabled` and `default_for_all` are both true, every request that carries a virtual key enters semantic selection after CEL **unless** a pin rule matched. You do not need a per-VK `action: "semantic"` rule or an `x-semantic-route` header. Pin rules (for example Token-Limits) still override. Opt out of a single request with `x-bf-disable-semantic-routing`. Semantic still requires a virtual key; without one, the incoming model is kept.
 
-**Semantic candidate pool** — Explicit VK `allowed_model_id` rows pin those models. When a VK provider has no pinned models (unrestricted / `allowed_model_id` null) or the VK mapping yields an empty pool, candidates come from tenant `config_models` where `deleted` is false — not from the embedded pricing catalog. Org/VK access and blacklist filters still apply before Layer 2 and capability matching. Final commit re-checks VK/org access and that the provider is configured in Bifrost; it does **not** require the model to appear in the embedded pricing catalog (budget/$ cost still uses `config_models` pricing).
-
 **Omitted `model`** — Additional trigger only. If the request has a virtual key, semantic routing is enabled, no pin matched, and the body has no `model` (OpenAI-style JSON; Gemini/Bedrock path models still count as present), the same VK-pool lookup + Layer 2 router + post-router capability validation runs even when `default_for_all` is false. Pin, CEL `action: "semantic"`, and `default_for_all` are unchanged. If selection cannot commit, the handler still returns `model is required`.
 
 ```bash
