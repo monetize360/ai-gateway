@@ -167,39 +167,47 @@ func (c routeCandidate) qualified() string {
 }
 
 func (p *GovernancePlugin) enumerateCandidates(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, virtualKey *configstoreTables.TableVirtualKey) []routeCandidate {
-	if virtualKey == nil || len(virtualKey.AllowedModelConfigs) == 0 {
+	if virtualKey == nil {
 		return nil
 	}
 
-	blockedProviders := make(map[string]bool)
+	candidates := make([]routeCandidate, 0, len(virtualKey.AllowedModelConfigs))
+	accessSkipped := 0
+
+	blockedProviders := make(map[string]bool, len(virtualKey.AllowedModelConfigs))
 	for _, config := range virtualKey.AllowedModelConfigs {
 		if config.BlacklistedModels.IsBlockAll() {
 			blockedProviders[config.Provider] = true
 		}
 	}
 
-	candidates := make([]routeCandidate, 0, len(virtualKey.AllowedModelConfigs))
-	accessSkipped := 0
 	for _, config := range virtualKey.AllowedModelConfigs {
 		if blockedProviders[config.Provider] {
 			continue
 		}
-		if comp.resolver != nil {
+		// Skip before expanding unrestricted pools when the provider is already over budget/limits.
+		if comp != nil && comp.resolver != nil {
 			if comp.resolver.isProviderBudgetViolated(ctx, virtualKey, config) || comp.resolver.isProviderRateLimitViolated(ctx, virtualKey, config) {
 				continue
 			}
 		}
 
 		provider := schemas.ModelProvider(config.Provider)
-		for _, model := range p.modelsForConfig(provider, config) {
-			if isModelBlockedByList(config.BlacklistedModels, model) {
-				continue
+		for _, model := range p.modelsForConfig(comp, provider, config) {
+			if kept, skipped := p.acceptPoolCandidate(ctx, comp, virtualKey, provider, model, config); kept {
+				candidates = append(candidates, routeCandidate{Provider: provider, Model: model, Config: config})
+			} else {
+				accessSkipped += skipped
 			}
-			if comp.resolver != nil && !comp.resolver.isProviderAndModelAccessibleForContext(ctx, virtualKey, provider, model) {
-				accessSkipped++
-				continue
-			}
-			candidates = append(candidates, routeCandidate{Provider: provider, Model: model, Config: config})
+		}
+	}
+
+	if len(candidates) == 0 {
+		fallback, skipped := p.candidatesFromConfigModels(ctx, comp, virtualKey)
+		accessSkipped += skipped
+		if len(fallback) > 0 {
+			p.logSemantic(ctx, schemas.LogLevelInfo, "1/pool: empty VK mapping; falling back to %d config_models", len(fallback))
+			candidates = fallback
 		}
 	}
 
@@ -209,16 +217,71 @@ func (p *GovernancePlugin) enumerateCandidates(ctx *schemas.BifrostContext, comp
 	return candidates
 }
 
-func (p *GovernancePlugin) modelsForConfig(provider schemas.ModelProvider, config configstoreTables.TableAllowedModelConfig) []string {
+// acceptPoolCandidate applies blacklist, budget/rate-limit, and org/VK access filters.
+// skipped is 1 when the model was dropped by access policy (for pool debug logging).
+func (p *GovernancePlugin) acceptPoolCandidate(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, virtualKey *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, config configstoreTables.TableAllowedModelConfig) (kept bool, skipped int) {
+	if config.BlacklistedModels.IsBlockAll() || isModelBlockedByList(config.BlacklistedModels, model) {
+		return false, 0
+	}
+	if comp == nil || comp.resolver == nil {
+		return true, 0
+	}
+	if comp.resolver.isProviderBudgetViolated(ctx, virtualKey, config) || comp.resolver.isProviderRateLimitViolated(ctx, virtualKey, config) {
+		return false, 0
+	}
+	if !comp.resolver.isProviderAndModelAccessibleForContext(ctx, virtualKey, provider, model) {
+		return false, 1
+	}
+	return true, 0
+}
+
+// candidatesFromConfigModels builds a semantic pool from every active tenant config_models row.
+func (p *GovernancePlugin) candidatesFromConfigModels(ctx *schemas.BifrostContext, comp *tenantGovernanceComponents, virtualKey *configstoreTables.TableVirtualKey) ([]routeCandidate, int) {
+	if comp == nil || comp.store == nil {
+		return nil, 0
+	}
+	entries := comp.store.AllConfigModelEntries()
+	if len(entries) == 0 {
+		return nil, 0
+	}
+
+	configsByProvider := make(map[string]configstoreTables.TableAllowedModelConfig, len(virtualKey.AllowedModelConfigs))
+	for _, config := range virtualKey.AllowedModelConfigs {
+		configsByProvider[strings.ToLower(config.Provider)] = config
+	}
+
+	candidates := make([]routeCandidate, 0, len(entries))
+	accessSkipped := 0
+	for _, entry := range entries {
+		provider := schemas.ModelProvider(entry.Provider)
+		config, ok := configsByProvider[strings.ToLower(entry.Provider)]
+		if !ok {
+			config = configstoreTables.TableAllowedModelConfig{
+				Provider:      entry.Provider,
+				AllowedModels: schemas.WhiteList{"*"},
+			}
+		} else {
+			config.Provider = entry.Provider
+		}
+		if kept, skipped := p.acceptPoolCandidate(ctx, comp, virtualKey, provider, entry.Model, config); kept {
+			candidates = append(candidates, routeCandidate{Provider: provider, Model: entry.Model, Config: config})
+		} else {
+			accessSkipped += skipped
+		}
+	}
+	return candidates, accessSkipped
+}
+
+func (p *GovernancePlugin) modelsForConfig(comp *tenantGovernanceComponents, provider schemas.ModelProvider, config configstoreTables.TableAllowedModelConfig) []string {
 	if config.AllowedModels.IsEmpty() {
 		return nil
 	}
 
 	if config.AllowedModels.IsUnrestricted() {
-		if p.modelCatalog == nil {
+		if comp == nil || comp.store == nil {
 			return nil
 		}
-		return p.modelCatalog.GetModelsForProvider(provider)
+		return comp.store.ConfigModelNamesForProvider(string(provider))
 	}
 
 	models := make([]string, 0, len(config.AllowedModels))
@@ -530,11 +593,10 @@ func (p *GovernancePlugin) validateCandidateForContext(ctx context.Context, comp
 		}
 	}
 
-	providerConfig, configured := p.inMemoryStore.GetConfiguredProviders()[candidate.Provider]
-	if !configured {
-		return "", false
-	}
-	if !p.modelCatalog.IsModelAllowedForProvider(candidate.Provider, candidate.Model, &providerConfig, candidate.Config.AllowedModels) {
+	// Pool expansion already applied VK/org allow + blacklist + config_models.
+	// Do not re-validate against the embedded pricing catalog here — tenant custom
+	// providers (e.g. DigiPowerX) have models only in config_models.
+	if _, configured := p.inMemoryStore.GetConfiguredProviders()[candidate.Provider]; !configured {
 		return "", false
 	}
 
