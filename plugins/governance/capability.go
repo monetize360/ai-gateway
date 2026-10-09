@@ -203,11 +203,19 @@ func (p *GovernancePlugin) enumerateCandidates(ctx *schemas.BifrostContext, comp
 	}
 
 	if len(candidates) == 0 {
+		p.logSemantic(ctx, schemas.LogLevelInfo,
+			"1/pool: no VK pool candidates; expanding from config_models with org/org-unit/user/VK filters")
 		fallback, skipped := p.candidatesFromConfigModels(ctx, comp, virtualKey)
 		accessSkipped += skipped
 		if len(fallback) > 0 {
-			p.logSemantic(ctx, schemas.LogLevelInfo, "1/pool: empty VK mapping; falling back to %d config_models", len(fallback))
+			p.logSemantic(ctx, schemas.LogLevelInfo,
+				"1/pool: no VK pool candidates; selecting all allowed models from config_models (%d): %s",
+				len(fallback), describeCandidatePool(fallback))
 			candidates = fallback
+		} else {
+			p.logSemantic(ctx, schemas.LogLevelWarn,
+				"1/pool: no VK pool candidates; config_models fallback yielded 0 models after access filters (skipped=%d)",
+				skipped)
 		}
 	}
 
@@ -917,6 +925,24 @@ func describeRanking(ranked []routeCandidate) string {
 	out := strings.Join(parts, ", ")
 	if len(ranked) > limit {
 		out += ", ..."
+	}
+	return out
+}
+
+// describeCandidatePool lists provider/model ids already past org/org-unit/user/VK access.
+func describeCandidatePool(candidates []routeCandidate) string {
+	if len(candidates) == 0 {
+		return "(empty)"
+	}
+	const maxListed = 20
+	limit := min(maxListed, len(candidates))
+	parts := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, candidates[i].qualified())
+	}
+	out := strings.Join(parts, ", ")
+	if len(candidates) > limit {
+		out += fmt.Sprintf(", ... (+%d more)", len(candidates)-limit)
 	}
 	return out
 }
