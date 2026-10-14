@@ -19,7 +19,7 @@ import (
 
 // TestBuildScopeChain_GlobalOnly tests scope chain with no VirtualKey
 func TestBuildScopeChain_GlobalOnly(t *testing.T) {
-	chain := buildScopeChain(nil, nil)
+	chain := buildScopeChain(nil, nil, nil)
 
 	require.Equal(t, 1, len(chain))
 	assert.Equal(t, "global", chain[0].ScopeName)
@@ -33,7 +33,7 @@ func TestBuildScopeChain_VirtualKeyOnly(t *testing.T) {
 		Name: "test-vk",
 	}
 
-	chain := buildScopeChain(vk, nil)
+	chain := buildScopeChain(vk, nil, nil)
 
 	require.Equal(t, 2, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
@@ -51,7 +51,7 @@ func TestBuildScopeChain_WithOrg(t *testing.T) {
 		OrgID: &orgID,
 	}
 
-	chain := buildScopeChain(vk, []string{orgID})
+	chain := buildScopeChain(vk, nil, []string{orgID})
 
 	require.Equal(t, 3, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
@@ -61,7 +61,7 @@ func TestBuildScopeChain_WithOrg(t *testing.T) {
 	assert.Equal(t, "global", chain[2].ScopeName)
 }
 
-// TestBuildScopeChain_FullHierarchy tests scope chain with org ancestor chain
+// TestBuildScopeChain_FullHierarchy tests scope chain with org-unit and org ancestor chains.
 func TestBuildScopeChain_FullHierarchy(t *testing.T) {
 	orgID := "org-child"
 	parentOrgID := "org-parent"
@@ -73,19 +73,23 @@ func TestBuildScopeChain_FullHierarchy(t *testing.T) {
 		OrgID: &orgID,
 	}
 
-	chain := buildScopeChain(vk, []string{orgID, parentOrgID, rootOrgID})
+	chain := buildScopeChain(vk, []string{"ou-leaf", "ou-parent"}, []string{orgID, parentOrgID, rootOrgID})
 
-	require.Equal(t, 5, len(chain))
+	require.Equal(t, 7, len(chain))
 	assert.Equal(t, "virtual_key", chain[0].ScopeName)
 	assert.Equal(t, "vk-123", chain[0].ScopeID)
-	assert.Equal(t, "org", chain[1].ScopeName)
-	assert.Equal(t, "org-child", chain[1].ScopeID)
-	assert.Equal(t, "org", chain[2].ScopeName)
-	assert.Equal(t, "org-parent", chain[2].ScopeID)
+	assert.Equal(t, "org_unit", chain[1].ScopeName)
+	assert.Equal(t, "ou-leaf", chain[1].ScopeID)
+	assert.Equal(t, "org_unit", chain[2].ScopeName)
+	assert.Equal(t, "ou-parent", chain[2].ScopeID)
 	assert.Equal(t, "org", chain[3].ScopeName)
-	assert.Equal(t, "org-root", chain[3].ScopeID)
-	assert.Equal(t, "global", chain[4].ScopeName)
-	assert.Equal(t, "", chain[4].ScopeID)
+	assert.Equal(t, "org-child", chain[3].ScopeID)
+	assert.Equal(t, "org", chain[4].ScopeName)
+	assert.Equal(t, "org-parent", chain[4].ScopeID)
+	assert.Equal(t, "org", chain[5].ScopeName)
+	assert.Equal(t, "org-root", chain[5].ScopeID)
+	assert.Equal(t, "global", chain[6].ScopeName)
+	assert.Equal(t, "", chain[6].ScopeID)
 }
 
 // TestGetDefaultRouting tests getting default routing from context
@@ -557,6 +561,90 @@ func TestEvaluateRoutingRules_PinnedKeyPropagation(t *testing.T) {
 	}
 	ctxKeyID, _ := bgCtx.Value(schemas.BifrostContextKeyAPIKeyID).(string)
 	assert.Equal(t, pinnedKeyID, ctxKeyID)
+}
+
+// Org-unit rules are checked after the virtual key and before the organization.
+// A matching leaf org-unit rule wins over a parent org-unit rule and an org rule.
+func TestEvaluateRoutingRules_OrgUnitPrecedesOrg(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger(), schemas.Ptr(10))
+	require.NoError(t, err)
+
+	userID := "user-1"
+	leafOrgUnitID := "ou-engineering"
+	parentOrgUnitID := "ou-product"
+	orgID := "org-acme"
+	seedOrgUnitChain(store, userID, leafOrgUnitID, parentOrgUnitID)
+
+	leafRule := &configstoreTables.TableRoutingRule{
+		ID:             "ou-leaf",
+		Name:           "Engineering Pin",
+		CelExpression:  "model == 'gpt-4o'",
+		Provider:       bifrost.Ptr("groq"),
+		Model:          bifrost.Ptr("llama-3.1"),
+		ScopeOrgUnitID: &leafOrgUnitID,
+		Enabled:        bifrost.Ptr(true),
+		Priority:       10,
+	}
+	parentRule := &configstoreTables.TableRoutingRule{
+		ID:             "ou-parent",
+		Name:           "Product Pin",
+		CelExpression:  "true",
+		Provider:       bifrost.Ptr("anthropic"),
+		Model:          bifrost.Ptr("claude-3"),
+		ScopeOrgUnitID: &parentOrgUnitID,
+		Enabled:        bifrost.Ptr(true),
+		Priority:       0,
+	}
+	orgRule := &configstoreTables.TableRoutingRule{
+		ID:            "org-rule",
+		Name:          "Org Pin",
+		CelExpression: "true",
+		Provider:      bifrost.Ptr("azure"),
+		Model:         bifrost.Ptr("gpt-4-turbo"),
+		ScopeOrgID:    &orgID,
+		Enabled:       bifrost.Ptr(true),
+		Priority:      0,
+	}
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), leafRule))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), parentRule))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgRule))
+
+	vk := &configstoreTables.TableVirtualKey{
+		ID:     "vk-123",
+		Name:   "test-vk",
+		UserID: &userID,
+		OrgID:  &orgID,
+	}
+
+	leafDecision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  vk,
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, leafDecision)
+	assert.Equal(t, "ou-leaf", leafDecision.MatchedRuleID)
+	assert.Equal(t, "groq", leafDecision.Provider)
+	assert.Equal(t, "llama-3.1", leafDecision.Model)
+
+	parentDecision, err := engine.EvaluateRoutingRules(bgCtx, &RoutingContext{
+		VirtualKey:  vk,
+		Provider:    schemas.OpenAI,
+		Model:       "claude",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, parentDecision)
+	assert.Equal(t, "ou-parent", parentDecision.MatchedRuleID)
+	assert.Equal(t, "anthropic", parentDecision.Provider)
+	assert.Equal(t, "claude-3", parentDecision.Model)
 }
 
 // TestEvaluateRoutingRules_ScopePrecedence tests virtual_key scope takes precedence over global

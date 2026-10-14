@@ -1019,6 +1019,7 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 	require.NoError(t, err)
 
 	orgID := "org-456"
+	orgUnitID := "ou-456"
 	vkID := "vk-789"
 
 	// Create rules for different scopes
@@ -1028,12 +1029,16 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 	orgRule := &configstoreTables.TableRoutingRule{
 		ID: "2", Name: "Org", ScopeOrgID: &orgID, Priority: 20, Enabled: bifrost.Ptr(true),
 	}
+	orgUnitRule := &configstoreTables.TableRoutingRule{
+		ID: "4", Name: "OrgUnit", ScopeOrgUnitID: &orgUnitID, Priority: 15, Enabled: bifrost.Ptr(true),
+	}
 	vkRule := &configstoreTables.TableRoutingRule{
 		ID: "3", Name: "VirtualKey", VirtualKeyID: &vkID, Priority: 30, Enabled: bifrost.Ptr(true),
 	}
 
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), globalRule))
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgRule))
+	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), orgUnitRule))
 	require.NoError(t, store.UpdateRoutingRuleInMemory(context.Background(), vkRule))
 
 	// Test global scope
@@ -1046,6 +1051,11 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 	assert.Equal(t, 1, len(orgRules))
 	assert.Equal(t, "Org", orgRules[0].Name)
 
+	// Test org-unit scope
+	orgUnitRules := store.GetScopedRoutingRules(context.Background(), "org_unit", orgUnitID)
+	assert.Equal(t, 1, len(orgUnitRules))
+	assert.Equal(t, "OrgUnit", orgUnitRules[0].Name)
+
 	// Test virtual_key scope
 	vkRules := store.GetScopedRoutingRules(context.Background(), "virtual_key", vkID)
 	assert.Equal(t, 1, len(vkRules))
@@ -1053,10 +1063,11 @@ func TestGovernanceStore_RoutingRules_MultipleScopes(t *testing.T) {
 
 	// ListAll should return all rules sorted by priority ASC (lower numbers = higher priority)
 	allRules := store.GetAllRoutingRules(context.Background())
-	assert.Equal(t, 3, len(allRules))
+	assert.Equal(t, 4, len(allRules))
 	assert.Equal(t, 10, allRules[0].Priority) // Global (highest)
-	assert.Equal(t, 20, allRules[1].Priority) // Org
-	assert.Equal(t, 30, allRules[2].Priority) // Virtual key (lowest)
+	assert.Equal(t, 15, allRules[1].Priority) // Org unit
+	assert.Equal(t, 20, allRules[2].Priority) // Org
+	assert.Equal(t, 30, allRules[3].Priority) // Virtual key (lowest)
 }
 
 // TestCompileAndCacheProgram tests CEL program compilation and caching

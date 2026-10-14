@@ -12,7 +12,7 @@ import (
 )
 
 // TableRoutingRule represents a routing rule in the database.
-// Routing scope is expressed with scope_org_id and/or virtual_key_id (both nil = global).
+// Routing scope is one of scope_org_unit_id, scope_org_id, or virtual_key_id (all nil = global).
 // org_id is reserved for MPilot tenant visibility and is not used by the routing engine.
 type TableRoutingRule struct {
 	ID            string `gorm:"primaryKey;type:varchar(255)" json:"id"`
@@ -40,9 +40,11 @@ type TableRoutingRule struct {
 	// OrgID is MPilot tenant visibility only; not evaluated by the routing engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 
-	// ScopeOrgID is the org this rule applies to at routing runtime (mutually exclusive with virtual_key_id).
-	ScopeOrgID   *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"scope_org_id,omitempty"`
-	VirtualKeyID *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"virtual_key_id,omitempty"`
+	// ScopeOrgID is the org this rule applies to at routing runtime.
+	// ScopeOrgUnitID is the org unit this rule applies to. Both are mutually exclusive with each other and with virtual_key_id.
+	ScopeOrgID     *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"scope_org_id,omitempty"`
+	ScopeOrgUnitID *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"scope_org_unit_id,omitempty"`
+	VirtualKeyID   *string `gorm:"type:uuid;uniqueIndex:idx_routing_rule_name_association" json:"virtual_key_id,omitempty"`
 
 	// Chaining
 	ChainRule bool `gorm:"not null;default:false" json:"chain_rule"` // If true, re-evaluates routing chain after this rule matches
@@ -90,12 +92,12 @@ func (r *TableRoutingRule) EnabledValue() bool {
 	return *r.Enabled
 }
 
-// applyLegacyScopeJSON maps config.json scope/scope_id into scope_org_id/virtual_key_id.
+// applyLegacyScopeJSON maps config.json scope/scope_id into scope columns.
 func applyLegacyScopeJSON(r *TableRoutingRule, scope string, scopeID *string) {
 	if r == nil || strings.TrimSpace(scope) == "" {
 		return
 	}
-	if isNonEmptyString(r.ScopeOrgID) || isNonEmptyString(r.VirtualKeyID) {
+	if isNonEmptyString(r.ScopeOrgID) || isNonEmptyString(r.ScopeOrgUnitID) || isNonEmptyString(r.VirtualKeyID) {
 		return
 	}
 	switch strings.TrimSpace(scope) {
@@ -103,6 +105,11 @@ func applyLegacyScopeJSON(r *TableRoutingRule, scope string, scopeID *string) {
 		if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
 			id := strings.TrimSpace(*scopeID)
 			r.ScopeOrgID = &id
+		}
+	case "org_unit":
+		if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
+			id := strings.TrimSpace(*scopeID)
+			r.ScopeOrgUnitID = &id
 		}
 	case "virtual_key":
 		if scopeID != nil && strings.TrimSpace(*scopeID) != "" {
@@ -112,18 +119,28 @@ func applyLegacyScopeJSON(r *TableRoutingRule, scope string, scopeID *string) {
 	}
 }
 
-// NormalizeRoutingAssociation validates scope_org_id vs virtual_key_id.
+// NormalizeRoutingAssociation validates that at most one routing scope is set.
 func (r *TableRoutingRule) NormalizeRoutingAssociation() error {
 	if r == nil {
 		return fmt.Errorf("routing rule is nil")
 	}
-	if isNonEmptyString(r.ScopeOrgID) && isNonEmptyString(r.VirtualKeyID) {
-		return fmt.Errorf("routing rule cannot specify both scope_org_id and virtual_key_id")
+	scopes := 0
+	if isNonEmptyString(r.ScopeOrgID) {
+		scopes++
+	}
+	if isNonEmptyString(r.ScopeOrgUnitID) {
+		scopes++
+	}
+	if isNonEmptyString(r.VirtualKeyID) {
+		scopes++
+	}
+	if scopes > 1 {
+		return fmt.Errorf("routing rule can specify only one of scope_org_id, scope_org_unit_id, and virtual_key_id")
 	}
 	return nil
 }
 
-// RoutingRulesCacheKey returns the in-memory index key: global:, org:{id}, or virtual_key:{id}.
+// RoutingRulesCacheKey returns the in-memory index key: global:, org:{id}, org_unit:{id}, or virtual_key:{id}.
 func (r *TableRoutingRule) RoutingRulesCacheKey() string {
 	if r == nil {
 		return "global:"
@@ -131,10 +148,27 @@ func (r *TableRoutingRule) RoutingRulesCacheKey() string {
 	if isNonEmptyString(r.VirtualKeyID) {
 		return "virtual_key:" + strings.TrimSpace(*r.VirtualKeyID)
 	}
+	if isNonEmptyString(r.ScopeOrgUnitID) {
+		return "org_unit:" + strings.TrimSpace(*r.ScopeOrgUnitID)
+	}
 	if isNonEmptyString(r.ScopeOrgID) {
 		return "org:" + strings.TrimSpace(*r.ScopeOrgID)
 	}
 	return "global:"
+}
+
+// RoutingScopeID returns the entity id for the rule's scope, or empty for global.
+func (r *TableRoutingRule) RoutingScopeID() string {
+	if r == nil {
+		return ""
+	}
+	if isNonEmptyString(r.VirtualKeyID) {
+		return strings.TrimSpace(*r.VirtualKeyID)
+	}
+	if isNonEmptyString(r.ScopeOrgUnitID) {
+		return strings.TrimSpace(*r.ScopeOrgUnitID)
+	}
+	return r.RoutingScopeOrgID()
 }
 
 // RoutingScopeOrgID returns the org ID used for routing scope, if any.
@@ -156,6 +190,8 @@ func (r *TableRoutingRule) RoutingScopeName() string {
 		return "global"
 	case strings.HasPrefix(key, "virtual_key:"):
 		return "virtual_key"
+	case strings.HasPrefix(key, "org_unit:"):
+		return "org_unit"
 	default:
 		return "org"
 	}

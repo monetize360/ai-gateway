@@ -4288,7 +4288,7 @@ func (s *RDBConfigStore) GetRoutingRulesPaginated(ctx context.Context, params Ro
 }
 
 // GetRoutingRulesByScope retrieves routing rules by scope level and entity ID, ordered by priority ASC.
-// Scope values: global (scopeID ignored), org (scopeID = scope_org_id), virtual_key (scopeID = virtual_key_id).
+// Scope values: global (scopeID ignored), org (scopeID = scope_org_id), org_unit (scopeID = scope_org_unit_id), virtual_key (scopeID = virtual_key_id).
 func (s *RDBConfigStore) GetRoutingRulesByScope(ctx context.Context, scope string, scopeID string) ([]tables.TableRoutingRule, error) {
 	if scope != "global" && scope != "" && strings.TrimSpace(scopeID) == "" {
 		return nil, fmt.Errorf("scopeID is required for non-global scope %q", scope)
@@ -4343,6 +4343,23 @@ func (s *RDBConfigStore) GetRedactedRoutingRules(ctx context.Context, ids []stri
 	return routingRules, nil
 }
 
+func routingPriorityConflictError(rule *tables.TableRoutingRule) error {
+	if rule != nil && rule.ScopeOrgUnitID != nil && strings.TrimSpace(*rule.ScopeOrgUnitID) != "" {
+		return fmt.Errorf("routing rule with priority %d already exists for org unit %s", rule.Priority, strings.TrimSpace(*rule.ScopeOrgUnitID))
+	}
+	if rule != nil && rule.ScopeOrgID != nil && strings.TrimSpace(*rule.ScopeOrgID) != "" {
+		return fmt.Errorf("routing rule with priority %d already exists for org %s", rule.Priority, strings.TrimSpace(*rule.ScopeOrgID))
+	}
+	if rule != nil && rule.VirtualKeyID != nil && strings.TrimSpace(*rule.VirtualKeyID) != "" {
+		return fmt.Errorf("routing rule with priority %d already exists for virtual key %s", rule.Priority, strings.TrimSpace(*rule.VirtualKeyID))
+	}
+	priority := 0
+	if rule != nil {
+		priority = rule.Priority
+	}
+	return fmt.Errorf("routing rule with priority %d already exists for global scope", priority)
+}
+
 // CreateRoutingRule creates a new routing rule in the database.
 func (s *RDBConfigStore) CreateRoutingRule(ctx context.Context, rule *tables.TableRoutingRule, tx ...*gorm.DB) error {
 	database := s.DB()
@@ -4350,7 +4367,7 @@ func (s *RDBConfigStore) CreateRoutingRule(ctx context.Context, rule *tables.Tab
 		database = tx[0]
 	}
 
-	// Validate association and check duplicate priority within the same org/vk/global bucket.
+	// Validate association and check duplicate priority within the same org/org-unit/vk/global bucket.
 	if err := rule.NormalizeRoutingAssociation(); err != nil {
 		return err
 	}
@@ -4364,13 +4381,7 @@ func (s *RDBConfigStore) CreateRoutingRule(ctx context.Context, rule *tables.Tab
 		return s.parseGormError(err)
 	}
 	if count > 0 {
-		if rule.ScopeOrgID != nil && strings.TrimSpace(*rule.ScopeOrgID) != "" {
-			return fmt.Errorf("routing rule with priority %d already exists for org %s", rule.Priority, *rule.ScopeOrgID)
-		}
-		if rule.VirtualKeyID != nil && strings.TrimSpace(*rule.VirtualKeyID) != "" {
-			return fmt.Errorf("routing rule with priority %d already exists for virtual key %s", rule.Priority, *rule.VirtualKeyID)
-		}
-		return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
+		return routingPriorityConflictError(rule)
 	}
 
 	return s.parseGormError(database.WithContext(ctx).Create(rule).Error)
@@ -4384,7 +4395,7 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 		database = tx[0]
 	}
 
-	// Validate association and enforce unique priority within the same org/vk/global bucket.
+	// Validate association and enforce unique priority within the same org/org-unit/vk/global bucket.
 	if err := rule.NormalizeRoutingAssociation(); err != nil {
 		return err
 	}
@@ -4407,13 +4418,7 @@ func (s *RDBConfigStore) UpdateRoutingRule(ctx context.Context, rule *tables.Tab
 			return s.parseGormError(err)
 		}
 		if count > 0 {
-			if rule.ScopeOrgID != nil && strings.TrimSpace(*rule.ScopeOrgID) != "" {
-				return fmt.Errorf("routing rule with priority %d already exists for org %s", rule.Priority, *rule.ScopeOrgID)
-			}
-			if rule.VirtualKeyID != nil && strings.TrimSpace(*rule.VirtualKeyID) != "" {
-				return fmt.Errorf("routing rule with priority %d already exists for virtual key %s", rule.Priority, *rule.VirtualKeyID)
-			}
-			return fmt.Errorf("routing rule with priority %d already exists for global scope", rule.Priority)
+			return routingPriorityConflictError(rule)
 		}
 
 		return tx.Save(rule).Error

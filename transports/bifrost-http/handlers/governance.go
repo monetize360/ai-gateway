@@ -160,40 +160,42 @@ type UpdateBudgetRequest struct {
 
 // CreateRoutingRuleRequest represents the request body for creating a routing rule
 type CreateRoutingRuleRequest struct {
-	Name          string         `json:"name" validate:"required"`
-	Description   string         `json:"description,omitempty"`
-	Enabled       *bool          `json:"enabled,omitempty"`    // nil = use DB default (true)
-	ChainRule     *bool          `json:"chain_rule,omitempty"` // nil = use DB default (false)
-	CelExpression string         `json:"cel_expression"`
-	ProviderID    *string        `json:"provider_id,omitempty"` // nil = use incoming provider
-	ModelID       *string        `json:"model_id,omitempty"`    // nil = use incoming model
-	Provider      *string        `json:"provider,omitempty"`    // config/UI alias; resolved to provider_id on save
-	Model         *string        `json:"model,omitempty"`       // config/UI alias; resolved to model_id on save
-	KeyID         *string        `json:"key_id,omitempty"`      // nil = no key pin
-	Fallbacks     []string       `json:"fallbacks,omitempty"`
-	ScopeOrgID    *string        `json:"scope_org_id,omitempty"`
-	VirtualKeyID  *string        `json:"virtual_key_id,omitempty"`
-	Query         map[string]any `json:"query,omitempty"`
-	Priority      int            `json:"priority,omitempty"` // Defaults to 0 if not provided
+	Name           string         `json:"name" validate:"required"`
+	Description    string         `json:"description,omitempty"`
+	Enabled        *bool          `json:"enabled,omitempty"`    // nil = use DB default (true)
+	ChainRule      *bool          `json:"chain_rule,omitempty"` // nil = use DB default (false)
+	CelExpression  string         `json:"cel_expression"`
+	ProviderID     *string        `json:"provider_id,omitempty"` // nil = use incoming provider
+	ModelID        *string        `json:"model_id,omitempty"`    // nil = use incoming model
+	Provider       *string        `json:"provider,omitempty"`    // config/UI alias; resolved to provider_id on save
+	Model          *string        `json:"model,omitempty"`       // config/UI alias; resolved to model_id on save
+	KeyID          *string        `json:"key_id,omitempty"`      // nil = no key pin
+	Fallbacks      []string       `json:"fallbacks,omitempty"`
+	ScopeOrgID     *string        `json:"scope_org_id,omitempty"`
+	ScopeOrgUnitID *string        `json:"scope_org_unit_id,omitempty"`
+	VirtualKeyID   *string        `json:"virtual_key_id,omitempty"`
+	Query          map[string]any `json:"query,omitempty"`
+	Priority       int            `json:"priority,omitempty"` // Defaults to 0 if not provided
 }
 
 // UpdateRoutingRuleRequest represents the request body for updating a routing rule
 type UpdateRoutingRuleRequest struct {
-	Name          *string        `json:"name,omitempty"`
-	Description   *string        `json:"description,omitempty"`
-	Enabled       *bool          `json:"enabled,omitempty"`
-	ChainRule     *bool          `json:"chain_rule,omitempty"`
-	CelExpression *string        `json:"cel_expression,omitempty"`
-	ProviderID    *string        `json:"provider_id,omitempty"`
-	ModelID       *string        `json:"model_id,omitempty"`
-	Provider      *string        `json:"provider,omitempty"`
-	Model         *string        `json:"model,omitempty"`
-	KeyID         *string        `json:"key_id,omitempty"`
-	Fallbacks     []string       `json:"fallbacks,omitempty"`
-	Query         map[string]any `json:"query,omitempty"`
-	Priority      *int           `json:"priority,omitempty"`
-	ScopeOrgID    *string        `json:"scope_org_id,omitempty"`
-	VirtualKeyID  *string        `json:"virtual_key_id,omitempty"`
+	Name           *string        `json:"name,omitempty"`
+	Description    *string        `json:"description,omitempty"`
+	Enabled        *bool          `json:"enabled,omitempty"`
+	ChainRule      *bool          `json:"chain_rule,omitempty"`
+	CelExpression  *string        `json:"cel_expression,omitempty"`
+	ProviderID     *string        `json:"provider_id,omitempty"`
+	ModelID        *string        `json:"model_id,omitempty"`
+	Provider       *string        `json:"provider,omitempty"`
+	Model          *string        `json:"model,omitempty"`
+	KeyID          *string        `json:"key_id,omitempty"`
+	Fallbacks      []string       `json:"fallbacks,omitempty"`
+	Query          map[string]any `json:"query,omitempty"`
+	Priority       *int           `json:"priority,omitempty"`
+	ScopeOrgID     *string        `json:"scope_org_id,omitempty"`
+	ScopeOrgUnitID *string        `json:"scope_org_unit_id,omitempty"`
+	VirtualKeyID   *string        `json:"virtual_key_id,omitempty"`
 }
 
 // CreateRateLimitRequest represents the request body for creating a rate limit using flexible approach
@@ -3133,6 +3135,7 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 	scope := string(ctx.QueryArgs().Peek("scope"))
 	scopeID := string(ctx.QueryArgs().Peek("scope_id"))
 	scopeOrgID := string(ctx.QueryArgs().Peek("scope_org_id"))
+	scopeOrgUnitID := string(ctx.QueryArgs().Peek("scope_org_unit_id"))
 	virtualKeyID := string(ctx.QueryArgs().Peek("virtual_key_id"))
 
 	// Check if "from_memory" query parameter is set to true
@@ -3148,29 +3151,25 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		// Filter rules by scope and scopeID
 		var rules []configstoreTables.TableRoutingRule
 		for _, rule := range inMemoryRules {
-			if scopeOrgID != "" {
-				if rule.RoutingScopeOrgID() != scopeOrgID {
-					continue
-				}
+			if scopeOrgID != "" && rule.RoutingScopeOrgID() != scopeOrgID {
+				continue
+			}
+			if scopeOrgUnitID != "" && rule.RoutingScopeID() != scopeOrgUnitID {
+				continue
 			}
 			if virtualKeyID != "" {
 				if rule.VirtualKeyID == nil || *rule.VirtualKeyID != virtualKeyID {
 					continue
 				}
 			}
-			if scope != "" && scopeOrgID == "" && virtualKeyID == "" {
+			explicitScope := scopeOrgID != "" || scopeOrgUnitID != "" || virtualKeyID != ""
+			if scope != "" && !explicitScope {
 				if rule.RoutingScopeName() != scope {
 					continue
 				}
 			}
-			if scopeID != "" && scopeOrgID == "" && virtualKeyID == "" {
-				ruleScopeID := rule.RoutingScopeOrgID()
-				if rule.VirtualKeyID != nil {
-					ruleScopeID = *rule.VirtualKeyID
-				}
-				if ruleScopeID != scopeID {
-					continue
-				}
+			if scopeID != "" && !explicitScope && rule.RoutingScopeID() != scopeID {
+				continue
 			}
 			rules = append(rules, *rule)
 		}
@@ -3185,8 +3184,11 @@ func (h *GovernanceHandler) getRoutingRules(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// If scope_org_id/virtual_key_id or legacy scope filters are specified, use scoped lookup.
-	if scopeOrgID != "" {
+	// If an explicit scope id is specified, use scoped lookup.
+	if scopeOrgUnitID != "" {
+		scope = "org_unit"
+		scopeID = scopeOrgUnitID
+	} else if scopeOrgID != "" {
 		scope = "org"
 		scopeID = scopeOrgID
 	} else if virtualKeyID != "" {
@@ -3362,7 +3364,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := validateRoutingAssociation(req.ScopeOrgID, req.VirtualKeyID); err != nil {
+	if err := validateRoutingAssociation(req.ScopeOrgID, req.ScopeOrgUnitID, req.VirtualKeyID); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
 	}
@@ -3388,6 +3390,7 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		Model:           req.Model,
 		KeyID:           req.KeyID,
 		ScopeOrgID:      req.ScopeOrgID,
+		ScopeOrgUnitID:  req.ScopeOrgUnitID,
 		VirtualKeyID:    req.VirtualKeyID,
 		Priority:        req.Priority,
 		ParsedFallbacks: req.Fallbacks,
@@ -3520,6 +3523,13 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 			rule.ScopeOrgID = req.ScopeOrgID
 		}
 	}
+	if req.ScopeOrgUnitID != nil {
+		if strings.TrimSpace(*req.ScopeOrgUnitID) == "" {
+			rule.ScopeOrgUnitID = nil
+		} else {
+			rule.ScopeOrgUnitID = req.ScopeOrgUnitID
+		}
+	}
 	if req.VirtualKeyID != nil {
 		if strings.TrimSpace(*req.VirtualKeyID) == "" {
 			rule.VirtualKeyID = nil
@@ -3578,17 +3588,17 @@ func (h *GovernanceHandler) deleteRoutingRule(ctx *fasthttp.RequestCtx) {
 var validRoutingScopes = map[string]bool{
 	"global":      true,
 	"org":         true,
+	"org_unit":    true,
 	"virtual_key": true,
 }
 
-// validateRoutingAssociation ensures scope_org_id and virtual_key_id are not both set.
-func validateRoutingAssociation(scopeOrgID, virtualKeyID *string) error {
-	hasOrg := scopeOrgID != nil && strings.TrimSpace(*scopeOrgID) != ""
-	hasVK := virtualKeyID != nil && strings.TrimSpace(*virtualKeyID) != ""
-	if hasOrg && hasVK {
-		return fmt.Errorf("scope_org_id and virtual_key_id are mutually exclusive")
-	}
-	return nil
+// validateRoutingAssociation ensures at most one of org, org unit, and virtual key is set.
+func validateRoutingAssociation(scopeOrgID, scopeOrgUnitID, virtualKeyID *string) error {
+	return (&configstoreTables.TableRoutingRule{
+		ScopeOrgID:     scopeOrgID,
+		ScopeOrgUnitID: scopeOrgUnitID,
+		VirtualKeyID:   virtualKeyID,
+	}).NormalizeRoutingAssociation()
 }
 
 // validateRoutingScope validates legacy scope query values (org replaces team/customer).
@@ -3597,7 +3607,7 @@ func validateRoutingScope(scope string) error {
 		return nil
 	}
 	if !validRoutingScopes[scope] {
-		return fmt.Errorf("invalid scope %q: must be one of: global, org, virtual_key", scope)
+		return fmt.Errorf("invalid scope %q: must be one of: global, org, org_unit, virtual_key", scope)
 	}
 	return nil
 }
