@@ -18,10 +18,13 @@ func RoutingRuleAssociationQuery(db *gorm.DB, rule *TableRoutingRule) (*gorm.DB,
 	if isNonEmptyString(rule.VirtualKeyID) {
 		return db.Where("virtual_key_id = ?", strings.TrimSpace(*rule.VirtualKeyID)), nil
 	}
+	if isNonEmptyString(rule.ScopeOrgUnitID) {
+		return db.Where("scope_org_unit_id = ?", strings.TrimSpace(*rule.ScopeOrgUnitID)), nil
+	}
 	if isNonEmptyString(rule.ScopeOrgID) {
 		return db.Where("scope_org_id = ?", strings.TrimSpace(*rule.ScopeOrgID)), nil
 	}
-	return db.Where("(scope_org_id IS NULL OR scope_org_id::text = '') AND (virtual_key_id IS NULL OR virtual_key_id::text = '')"), nil
+	return db.Where("(scope_org_id IS NULL OR scope_org_id::text = '') AND (scope_org_unit_id IS NULL OR scope_org_unit_id::text = '') AND (virtual_key_id IS NULL OR virtual_key_id::text = '')"), nil
 }
 
 // RoutingRulesByScopeQuery filters routing rules for a routing-engine scope level.
@@ -30,12 +33,17 @@ func RoutingRulesByScopeQuery(db *gorm.DB, scope, scopeID string) (*gorm.DB, err
 	scopeID = strings.TrimSpace(scopeID)
 	switch scope {
 	case "", "global":
-		return db.Where("(scope_org_id IS NULL OR scope_org_id::text = '') AND (virtual_key_id IS NULL OR virtual_key_id::text = '')"), nil
+		return db.Where("(scope_org_id IS NULL OR scope_org_id::text = '') AND (scope_org_unit_id IS NULL OR scope_org_unit_id::text = '') AND (virtual_key_id IS NULL OR virtual_key_id::text = '')"), nil
 	case "virtual_key":
 		if scopeID == "" {
 			return nil, fmt.Errorf("virtual_key_id is required for virtual_key scope")
 		}
 		return db.Where("virtual_key_id = ?", scopeID), nil
+	case "org_unit":
+		if scopeID == "" {
+			return nil, fmt.Errorf("scope_org_unit_id is required for org_unit scope")
+		}
+		return db.Where("scope_org_unit_id = ?", scopeID), nil
 	case "org", "team", "customer":
 		if scopeID == "" {
 			return nil, fmt.Errorf("scope_org_id is required for org scope")

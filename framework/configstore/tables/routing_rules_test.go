@@ -19,6 +19,29 @@ func TestNormalizeRoutingAssociation_ScopeOrgID(t *testing.T) {
 	assert.Equal(t, "org", rule.RoutingScopeName())
 }
 
+func TestNormalizeRoutingAssociation_ScopeOrgUnitID(t *testing.T) {
+	orgUnitID := "ou-123"
+	rule := &TableRoutingRule{
+		ScopeOrgUnitID: &orgUnitID,
+	}
+	require.NoError(t, rule.NormalizeRoutingAssociation())
+	assert.Equal(t, "org_unit:"+orgUnitID, rule.RoutingRulesCacheKey())
+	assert.Equal(t, "org_unit", rule.RoutingScopeName())
+	assert.Equal(t, orgUnitID, rule.RoutingScopeID())
+}
+
+func TestNormalizeRoutingAssociation_RejectsScopeOrgAndOrgUnit(t *testing.T) {
+	orgID := "org-123"
+	orgUnitID := "ou-123"
+	rule := &TableRoutingRule{
+		ScopeOrgID:     &orgID,
+		ScopeOrgUnitID: &orgUnitID,
+	}
+	err := rule.NormalizeRoutingAssociation()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "scope_org_id, scope_org_unit_id, and virtual_key_id")
+}
+
 func TestNormalizeRoutingAssociation_VirtualKeyID(t *testing.T) {
 	vkID := "vk-456"
 	rule := &TableRoutingRule{
@@ -38,7 +61,7 @@ func TestNormalizeRoutingAssociation_RejectsScopeOrgAndVirtualKey(t *testing.T) 
 	}
 	err := rule.NormalizeRoutingAssociation()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "scope_org_id and virtual_key_id")
+	assert.Contains(t, err.Error(), "scope_org_id, scope_org_unit_id, and virtual_key_id")
 }
 
 func TestUnmarshalJSON_LegacyScopeMapsToScopeOrgID(t *testing.T) {
@@ -53,6 +76,22 @@ func TestUnmarshalJSON_LegacyScopeMapsToScopeOrgID(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(raw), &rule))
 	require.NotNil(t, rule.ScopeOrgID)
 	assert.Equal(t, "org-legacy", *rule.ScopeOrgID)
+	assert.Nil(t, rule.VirtualKeyID)
+}
+
+func TestUnmarshalJSON_LegacyOrgUnitScope(t *testing.T) {
+	raw := `{
+		"id": "3",
+		"name": "legacy-org-unit",
+		"cel_expression": "true",
+		"scope": "org_unit",
+		"scope_id": "ou-legacy"
+	}`
+	var rule TableRoutingRule
+	require.NoError(t, json.Unmarshal([]byte(raw), &rule))
+	require.NotNil(t, rule.ScopeOrgUnitID)
+	assert.Equal(t, "ou-legacy", *rule.ScopeOrgUnitID)
+	assert.Nil(t, rule.ScopeOrgID)
 	assert.Nil(t, rule.VirtualKeyID)
 }
 

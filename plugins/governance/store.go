@@ -268,6 +268,9 @@ type GovernanceStore interface {
 	// entities.
 	CollectApplicableGovernanceIDs(ctx context.Context, virtualKey string, provider schemas.ModelProvider, model string) (budgetIDs []string, rateLimitIDs []string)
 	CollectOrgAncestorIDs(orgID string) []string
+	// ResolveOrgUnitHierarchyIDs returns the leaf org unit for the first user that has one,
+	// then each ancestor up to the root (leaf-first).
+	ResolveOrgUnitHierarchyIDs(userIDs ...string) []string
 	// ResolveConfigProviderID maps a runtime provider key to config_providers.id.
 	ResolveConfigProviderID(provider schemas.ModelProvider) string
 	// ResolveConfigModelID maps provider + model name to config_models.id.

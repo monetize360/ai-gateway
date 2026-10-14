@@ -1204,8 +1204,9 @@ func GenerateRoutingRuleHash(r tables.TableRoutingRule) (string, error) {
 		hash.Write([]byte("chain_rule:false"))
 	}
 
-	// Hash ScopeOrgID / VirtualKeyID (nil = global). OrgID is visibility-only and excluded.
+	// Hash routing scope (nil = global). OrgID is visibility-only and excluded.
 	hash.Write([]byte(derefStr(r.ScopeOrgID)))
+	hash.Write([]byte("scopeOrgUnitID:" + derefStr(r.ScopeOrgUnitID)))
 	hash.Write([]byte(derefStr(r.VirtualKeyID)))
 
 	// Hash Priority

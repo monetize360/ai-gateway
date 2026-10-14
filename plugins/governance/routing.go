@@ -18,7 +18,7 @@ const DefaultRoutingChainMaxDepth = 10
 
 // ScopeLevel represents a level in the scope precedence hierarchy
 type ScopeLevel struct {
-	ScopeName string // "virtual_key", "org", or "global"
+	ScopeName string // "virtual_key", "org_unit", "org", or "global"
 	ScopeID   string // empty string for global scope
 }
 
@@ -47,6 +47,7 @@ type RoutingContext struct {
 	VirtualKey               *configstoreTables.TableVirtualKey // nil if no VK
 	Provider                 schemas.ModelProvider              // Current provider
 	Model                    string                             // Current model
+	OrgUnitID                string                             // Leaf org unit of the virtual key's user (empty if unset)
 	RequestType              string                             // Normalized request type (e.g., "chat_completion", "embedding") from HTTP context
 	Fallbacks                []string                           // Fallback chain: ["provider/model", ...]
 	Headers                  map[string]string                  // Request headers for dynamic routing
@@ -86,7 +87,7 @@ func NewRoutingEngine(store GovernanceStore, logger schemas.Logger, chainMaxDept
 }
 
 // EvaluateRoutingRules evaluates routing rules for a given context and returns a routing decision.
-// Implements scope precedence: VirtualKey > Org (ancestors) > Global (first-match-wins within each iteration).
+// Implements scope precedence: VirtualKey > Org unit (leaf to root) > Org (ancestors) > Global (first-match-wins within each iteration).
 // When a matched rule has chain_rule=true, the resolved provider/model is fed back into the evaluator
 // and the full scope chain is re-evaluated with the updated context. This repeats until:
 //  1. No rule matches the current context
@@ -117,12 +118,19 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 	// Build scope chain once — it's based on the immutable VirtualKey and won't change across chain steps.
 	var orgAncestors []string
+	var orgUnitAncestors []string
 	if routingCtx.VirtualKey != nil {
 		if scopeOrgID := routingCtx.VirtualKey.GovernanceScopeOrgID(); scopeOrgID != nil {
 			orgAncestors = re.store.CollectOrgAncestorIDs(*scopeOrgID)
 		}
+		if routingCtx.VirtualKey.UserID != nil {
+			orgUnitAncestors = re.store.ResolveOrgUnitHierarchyIDs(*routingCtx.VirtualKey.UserID)
+		}
 	}
-	scopeChain := buildScopeChain(routingCtx.VirtualKey, orgAncestors)
+	if len(orgUnitAncestors) > 0 {
+		routingCtx.OrgUnitID = orgUnitAncestors[0]
+	}
+	scopeChain := buildScopeChain(routingCtx.VirtualKey, orgUnitAncestors, orgAncestors)
 
 	// Cache rules per scope upfront to avoid redundant store lookups when rules chain
 	// and we re-evaluate the scope hierarchy on subsequent steps.
@@ -296,10 +304,10 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	return finalDecision, nil
 }
 
-// buildScopeChain builds the scope evaluation chain based on organizational hierarchy
-// Returns scope levels in precedence order (highest to lowest)
-// VirtualKey > Org (each ancestor) > Global
-func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgAncestors []string) []ScopeLevel {
+// buildScopeChain builds the scope evaluation chain based on organizational hierarchy.
+// Returns scope levels in precedence order (highest to lowest):
+// VirtualKey > Org unit (leaf to root) > Org (each ancestor) > Global.
+func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgUnitAncestors []string, orgAncestors []string) []ScopeLevel {
 	var chain []ScopeLevel
 
 	if virtualKey != nil {
@@ -307,6 +315,13 @@ func buildScopeChain(virtualKey *configstoreTables.TableVirtualKey, orgAncestors
 			ScopeName: "virtual_key",
 			ScopeID:   virtualKey.ID,
 		})
+
+		for _, orgUnitID := range orgUnitAncestors {
+			chain = append(chain, ScopeLevel{
+				ScopeName: "org_unit",
+				ScopeID:   orgUnitID,
+			})
+		}
 
 		for _, orgID := range orgAncestors {
 			chain = append(chain, ScopeLevel{
@@ -420,6 +435,7 @@ func extractRoutingVariables(ctx *RoutingContext) (map[string]any, error) {
 		variables["virtual_key_name"] = ""
 		variables["org_id"] = ""
 	}
+	variables["org_unit_id"] = ctx.OrgUnitID
 	// Deprecated CEL variables kept for backward compatibility with existing rules.
 	variables["team_id"] = ""
 	variables["team_name"] = ""
@@ -589,6 +605,7 @@ func createCELEnvironment() (*cel.Env, error) {
 		cel.Variable("virtual_key_id", cel.StringType),
 		cel.Variable("virtual_key_name", cel.StringType),
 		cel.Variable("org_id", cel.StringType),
+		cel.Variable("org_unit_id", cel.StringType),
 		cel.Variable("team_id", cel.StringType),
 		cel.Variable("team_name", cel.StringType),
 		cel.Variable("customer_id", cel.StringType),
