@@ -352,3 +352,98 @@ func TestHTTPTransportPreHook_BedrockNoRoutingRuleStillLoadBalances(t *testing.T
 	require.True(t, ok, "context modelId should be set by governance LB")
 	require.Equal(t, "repro-openai-b/probe-bedrock-model", ctxModelID)
 }
+
+// TestHTTPTransportPreHook_AutoSemanticNoSuitableModel verifies Auto (omitted model)
+// rejects with a clear capability/pool message instead of falling through to
+// "model is required" when semantic routing cannot commit a selection.
+func TestHTTPTransportPreHook_AutoSemanticNoSuitableModel(t *testing.T) {
+	logger := NewMockLogger()
+	virtualKey := buildVirtualKeyWithProviders(
+		"vk-auto-semantic",
+		"sk-bf-auto-semantic",
+		"auto-semantic-vk",
+		nil, // empty pool → semantic cannot select
+	)
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		VirtualKeys: []configstoreTables.TableVirtualKey{*virtualKey},
+	}, nil)
+	require.NoError(t, err)
+
+	plugin, err := InitFromStore(context.Background(), &Config{
+		IsVkMandatory: boolPtr(false),
+		SemanticRouting: &SemanticRoutingConfig{
+			Enabled:       true,
+			DefaultForAll: false,
+		},
+	}, logger, store, nil, nil, nil, nil)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, plugin.Cleanup())
+	}()
+
+	req := schemas.AcquireHTTPRequest()
+	defer schemas.ReleaseHTTPRequest(req)
+	req.Method = "POST"
+	req.Path = "/v1/chat/completions"
+	req.Headers["Content-Type"] = "application/json"
+	// Auto: no model field
+	req.Body = []byte(`{"messages":[{"role":"user","content":"Write java code"}]}`)
+
+	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-auto-semantic")
+	bfCtx.SetValue(schemas.BifrostContextKeyHTTPRequestType, schemas.ChatCompletionRequest)
+
+	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp, "Auto semantic failure must short-circuit")
+	require.Equal(t, 400, resp.StatusCode)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(resp.Body, &body))
+	errObj, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, semanticNoSuitableModelMessage, errObj["message"])
+	require.Equal(t, "semantic_routing_no_suitable_model", errObj["type"])
+}
+
+// TestHTTPTransportPreHook_AutoSemanticOptOutStillFallsThrough verifies that
+// x-bf-disable-semantic-routing does not use the no-suitable-model short-circuit.
+func TestHTTPTransportPreHook_AutoSemanticOptOutStillFallsThrough(t *testing.T) {
+	logger := NewMockLogger()
+	virtualKey := buildVirtualKeyWithProviders(
+		"vk-auto-optout",
+		"sk-bf-auto-optout",
+		"auto-optout-vk",
+		nil,
+	)
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		VirtualKeys: []configstoreTables.TableVirtualKey{*virtualKey},
+	}, nil)
+	require.NoError(t, err)
+
+	plugin, err := InitFromStore(context.Background(), &Config{
+		IsVkMandatory: boolPtr(false),
+		SemanticRouting: &SemanticRoutingConfig{
+			Enabled: true,
+		},
+	}, logger, store, nil, nil, nil, nil)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, plugin.Cleanup())
+	}()
+
+	req := schemas.AcquireHTTPRequest()
+	defer schemas.ReleaseHTTPRequest(req)
+	req.Method = "POST"
+	req.Path = "/v1/chat/completions"
+	req.Headers["Content-Type"] = "application/json"
+	req.Headers[semanticRoutingDisableHeader] = "true"
+	req.Body = []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	bfCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bfCtx.SetValue(schemas.BifrostContextKeyVirtualKey, "vk-auto-optout")
+
+	resp, err := plugin.HTTPTransportPreHook(bfCtx, req)
+	require.NoError(t, err)
+	require.Nil(t, resp, "opt-out must not short-circuit with no-suitable-model")
+}

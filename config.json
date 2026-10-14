@@ -45,7 +45,7 @@
       "config": {
         "semantic_routing": {
           "enabled": true,
-          "default_for_all": true,
+          "default_for_all": false,
           "router": {
             "mode": "plugin",
             "timeout_ms": 2000
