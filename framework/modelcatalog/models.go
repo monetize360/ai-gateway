@@ -342,7 +342,10 @@ func (mc *ModelCatalog) UpsertModelDataForProvider(provider schemas.ModelProvide
 	// Case where list models failed but we have allowed models from keys
 	if len(modelData.Data) == 0 && len(allowedModels) > 0 {
 		for _, allowedModel := range allowedModels {
-			parsedProvider, parsedModel := schemas.ParseModelString(allowedModel.ID, "")
+			// Default to the provider being synced so namespaced ids such as
+			// "Qwen/Qwen3.8-27B" stay attached to it. A different known provider
+			// prefix is still rejected below.
+			parsedProvider, parsedModel := schemas.ParseModelString(allowedModel.ID, provider)
 			if parsedProvider != provider {
 				continue
 			}
@@ -353,7 +356,10 @@ func (mc *ModelCatalog) UpsertModelDataForProvider(provider schemas.ModelProvide
 		}
 	}
 	for _, model := range modelData.Data {
-		parsedProvider, parsedModel := schemas.ParseModelString(model.ID, "")
+		// Default to the provider being synced so namespaced ids such as
+		// "Qwen/Qwen3.8-27B" stay attached to it. A different known provider
+		// prefix is still rejected below.
+		parsedProvider, parsedModel := schemas.ParseModelString(model.ID, provider)
 		if parsedProvider != provider {
 			continue
 		}
@@ -396,7 +402,10 @@ func (mc *ModelCatalog) UpsertUnfilteredModelDataForProvider(provider schemas.Mo
 		}
 	}
 	for _, model := range modelData.Data {
-		parsedProvider, parsedModel := schemas.ParseModelString(model.ID, "")
+		// Default to the provider being synced so namespaced ids such as
+		// "Qwen/Qwen3.8-27B" stay attached to it. A different known provider
+		// prefix is still rejected below.
+		parsedProvider, parsedModel := schemas.ParseModelString(model.ID, provider)
 		if parsedProvider != provider {
 			continue
 		}
