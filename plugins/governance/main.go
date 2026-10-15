@@ -578,10 +578,17 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 	// semantic_routing == true), when default_for_all is on, or when the request omitted
 	// model. No matching CEL rule keeps the requested model for load balancing.
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
+	requestProfile := buildRequestProfile(payload)
+	modelForLog, _ := payload["model"].(string)
+	hasImage := requestProfile != nil && requestProfile.HasImage
+	isStreaming := requestProfile != nil && requestProfile.IsStreaming
+	logRequestFlow(ctx, p.logger, "1/received: request received model=%q stream=%t has_image=%t",
+		modelForLog, isStreaming, hasImage)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s", handoff)
 		var routed bool
 		payload, routed = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
+		logRequestFlow(ctx, p.logger, "2/routing: routing semantic=true rewritten=%t", routed)
 		if routed {
 			needsMarshal = true
 		} else if !hasIncomingModel && !semanticRoutingOptedOut(req) {
@@ -592,6 +599,8 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		} else {
 			p.logSemantic(ctx, schemas.LogLevelInfo, "Did not rewrite the model; continuing to load balancing")
 		}
+	} else {
+		logRequestFlow(ctx, p.logger, "2/routing: routing skipped keeping model")
 	}
 
 	// Process virtual key if provided
@@ -601,6 +610,11 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		if err != nil {
 			return nil, err
 		}
+		modelAfterLB, _ := payload["model"].(string)
+		selectedProvider, selectedModel := schemas.ParseModelString(modelAfterLB, "")
+		logRequestFlow(ctx, p.logger, "3/model-selected: model selected provider=%s model=%q",
+			selectedProvider, selectedModel)
+
 		//4. Add MCP tools only when auto-inject is enabled and header not already set by the caller
 		p.cfgMutex.RLock()
 		autoInjectDisabled := p.disableAutoToolInject != nil && *p.disableAutoToolInject
@@ -703,7 +717,7 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s", handoff)
 		payload, _ = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
 	}
 
@@ -831,7 +845,7 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
-		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
+		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s", handoff)
 		var routed bool
 		payload, routed = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
 		if !routed && !hasIncomingModel && !semanticRoutingOptedOut(req) {

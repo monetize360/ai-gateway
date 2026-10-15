@@ -831,9 +831,15 @@ func HandleOpenAIChatCompletionRequest(
 
 	req.SetBody(jsonData)
 
+	logProviderChatUpstreamCall(ctx, logger, request, false, "request", nil, nil)
 	// Make request
 	latency, bifrostErr, wait := providerUtils.MakeRequestWithContext(ctx, activeClient, req, resp)
 	defer wait()
+	var dialErr error
+	if bifrostErr != nil && bifrostErr.Error != nil {
+		dialErr = bifrostErr.Error.Error
+	}
+	logProviderChatUpstreamCall(ctx, logger, request, false, "response", resp, dialErr)
 	if bifrostErr != nil {
 		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, nil, sendBackRawRequest, sendBackRawResponse)
 	}
@@ -844,7 +850,7 @@ func HandleOpenAIChatCompletionRequest(
 	// Handle error response
 	if resp.StatusCode() != fasthttp.StatusOK {
 		providerUtils.MaterializeStreamErrorBody(ctx, resp)
-		logger.Debug("error from %s provider: %s", providerName, string(resp.Body()))
+		logProviderChatHTTPError(ctx, logger, request.Model, resp)
 		if customErrorConverter != nil {
 			return nil, providerUtils.EnrichError(ctx, customErrorConverter(resp), jsonData, nil, sendBackRawRequest, sendBackRawResponse)
 		}
@@ -1029,8 +1035,10 @@ func HandleOpenAIChatCompletionStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	startTime := time.Now()
+	logProviderChatUpstreamCall(ctx, logger, request, true, "request", nil, nil)
 	// Make the request
 	err := activeClient.Do(req, resp)
+	logProviderChatUpstreamCall(ctx, logger, request, true, "response", resp, err)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(ctx, resp)
 		if errors.Is(err, context.Canceled) {
@@ -1056,6 +1064,15 @@ func HandleOpenAIChatCompletionStreaming(
 	if resp.StatusCode() != fasthttp.StatusOK {
 		defer providerUtils.ReleaseStreamingResponse(ctx, resp)
 		providerUtils.MaterializeStreamErrorBody(ctx, resp)
+		// Stream error bodies are often only on BodyStream; force a read so logs/parse see DigiPowerX payloads.
+		if len(resp.Body()) == 0 {
+			if stream := resp.BodyStream(); stream != nil {
+				if bodyBytes, readErr := io.ReadAll(io.LimitReader(stream, 512*1024)); readErr == nil {
+					resp.SetBody(bodyBytes)
+				}
+			}
+		}
+		logProviderChatHTTPError(ctx, logger, request.Model, resp)
 		if customErrorConverter != nil {
 			return nil, providerUtils.EnrichError(ctx, customErrorConverter(resp), jsonBody, nil, sendBackRawRequest, sendBackRawResponse)
 		}
@@ -1149,6 +1166,24 @@ func HandleOpenAIChatCompletionStreaming(
 				var bifrostErr schemas.BifrostError
 				if err := sonic.UnmarshalString(jsonData, &bifrostErr); err == nil {
 					if bifrostErr.Error != nil && bifrostErr.Error.Message != "" {
+						hasImage, _ := chatRequestImageSummary(request)
+						preview := jsonData
+						if len(preview) > providerErrorBodyLogLimit {
+							preview = preview[:providerErrorBodyLogLimit] + "...(truncated)"
+						}
+						logRequestFlowWarn(ctx, logger, "6/llm-error: LLM error status=%d message=%q",
+							resp.StatusCode(), bifrostErr.Error.Message)
+						// Some OpenAI-compatible providers return HTTP 200 with an SSE error event;
+						// surface short context in the client message for opaque errors.
+						if isOpaqueProviderErrorMessage(bifrostErr.Error.Message) {
+							bifrostErr.Error.Message = fmt.Sprintf(
+								"%s (sse_http=%d; has_image=%t; sse_body=%s)",
+								bifrostErr.Error.Message,
+								resp.StatusCode(),
+								hasImage,
+								preview,
+							)
+						}
 						ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 						providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, providerUtils.EnrichError(ctx, &bifrostErr, jsonBody, nil, sendBackRawRequest, sendBackRawResponse), responseChan, logger, postHookSpanFinalizer)
 						return
