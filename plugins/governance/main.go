@@ -42,7 +42,27 @@ const (
 	// semanticRoutingDisableHeader opts a single request out of semantic routing, so a
 	// caller can pin an exact model for evals or to reproduce a misroute.
 	semanticRoutingDisableHeader = "x-bf-disable-semantic-routing"
+
+	// semanticNoSuitableModelMessage is returned when Auto / omitted-model semantic
+	// routing runs but cannot commit a provider/model from the VK pool.
+	semanticNoSuitableModelMessage = "Your currently configured models are not suitable for this request. Please configure a model with the required capabilities and try again."
 )
+
+// semanticNoSuitableModelHTTPResponse short-circuits Auto semantic failures so the
+// chat handler does not fall through to the generic "model is required" validator.
+func semanticNoSuitableModelHTTPResponse() *schemas.HTTPResponse {
+	errorBody, _ := sonic.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": semanticNoSuitableModelMessage,
+			"type":    "semantic_routing_no_suitable_model",
+		},
+	})
+	return &schemas.HTTPResponse{
+		StatusCode: fasthttp.StatusBadRequest,
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Body:       errorBody,
+	}
+}
 
 // Config is the configuration for the governance plugin
 type Config struct {
@@ -564,6 +584,11 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		payload, routed = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
 		if routed {
 			needsMarshal = true
+		} else if !hasIncomingModel && !semanticRoutingOptedOut(req) {
+			// AutoMode: semantic ran but could not select a model. Stop here with a
+			// clear capability/pool error instead of falling through to "model is required".
+			p.logSemantic(ctx, schemas.LogLevelWarn, "Auto semantic routing did not select a model; rejecting request")
+			return semanticNoSuitableModelHTTPResponse(), nil
 		} else {
 			p.logSemantic(ctx, schemas.LogLevelInfo, "Did not rewrite the model; continuing to load balancing")
 		}
@@ -807,7 +832,12 @@ func (p *GovernancePlugin) governRealtimeQueryParam(ctx *schemas.BifrostContext,
 	_, hasIncomingModel := resolveRoutedModel(ctx, req, payload)
 	if run, preferenceOverride, handoff := p.shouldApplySemanticRouting(ctx, virtualKey, routingDecision, hasIncomingModel); run {
 		p.logSemantic(ctx, schemas.LogLevelInfo, "0/handoff: %s (vk=%q)", handoff, virtualKey.Name)
-		payload, _ = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
+		var routed bool
+		payload, routed = p.applySemanticRouting(ctx, req, payload, virtualKey, preferenceOverride)
+		if !routed && !hasIncomingModel && !semanticRoutingOptedOut(req) {
+			p.logSemantic(ctx, schemas.LogLevelWarn, "Auto semantic routing did not select a model; rejecting realtime request")
+			return semanticNoSuitableModelHTTPResponse(), nil
+		}
 	}
 
 	// Process virtual key: load balance provider
