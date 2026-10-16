@@ -3284,7 +3284,60 @@ func (c *Config) GetProvidersForModel(model string) []schemas.ModelProvider {
 // GetProvidersForModelForRequest resolves configured providers for a model using
 // the tenant ID injected by TenantMiddleware when present.
 func (c *Config) GetProvidersForModelForRequest(ctx *fasthttp.RequestCtx, model string) []schemas.ModelProvider {
-	return c.GetProvidersForModelForTenant(TenantIDFromRequest(ctx), model)
+	providers := c.GetProvidersForModelForTenant(TenantIDFromRequest(ctx), model)
+	return c.unionProvidersFromConfigModels(ctx, providers, model)
+}
+
+// unionProvidersFromConfigModels adds configured providers whose config_models
+// row matches the bare model name. The in-memory catalog is the embedded
+// datasheet plus list-models, so a namespaced custom model such as
+// "Qwen/Qwen3.8-27B" is present in config_models via provider_id but missing
+// from that catalog.
+func (c *Config) unionProvidersFromConfigModels(ctx *fasthttp.RequestCtx, providers []schemas.ModelProvider, model string) []schemas.ModelProvider {
+	if c == nil || strings.TrimSpace(model) == "" {
+		return providers
+	}
+	store := c.StoreFromContext(ctx)
+	if store == nil {
+		return providers
+	}
+	rows, err := store.GetConfigModels(ctx)
+	if err != nil || len(rows) == 0 {
+		return providers
+	}
+	providerRows, err := store.GetProviders(ctx)
+	if err != nil || len(providerRows) == 0 {
+		return providers
+	}
+	nameByID := make(map[string]schemas.ModelProvider, len(providerRows))
+	for _, row := range providerRows {
+		if row.ID != "" && row.Name != "" {
+			nameByID[row.ID] = schemas.ModelProvider(row.Name)
+		}
+	}
+	configured := make(map[schemas.ModelProvider]struct{}, len(providers))
+	for _, provider := range c.configuredProviderNamesForTenant(TenantIDFromRequest(ctx)) {
+		configured[provider] = struct{}{}
+	}
+	for _, row := range rows {
+		if !strings.EqualFold(strings.TrimSpace(row.Name), strings.TrimSpace(model)) {
+			continue
+		}
+		provider, ok := nameByID[row.ProviderID]
+		if !ok {
+			continue
+		}
+		if _, allowed := configured[provider]; !allowed {
+			continue
+		}
+		if !slices.Contains(providers, provider) {
+			providers = append(providers, provider)
+		}
+	}
+	slices.SortFunc(providers, func(a, b schemas.ModelProvider) int {
+		return strings.Compare(string(a), string(b))
+	})
+	return providers
 }
 
 // GetProvidersForModelForTenant returns providers that can serve model for the
