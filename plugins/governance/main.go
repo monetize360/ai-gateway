@@ -34,6 +34,11 @@ const PluginName = "governance"
 const (
 	governanceRejectedContextKey schemas.BifrostContextKey = "bf-governance-rejected"
 
+	// streamDataChunkSeenContextKey is set once a streaming attempt has emitted a data
+	// chunk. After that the stream is committed to the client, so a later error is not
+	// retried and must still publish usage.
+	streamDataChunkSeenContextKey schemas.BifrostContextKey = "bf-governance-stream-data-chunk-seen"
+
 	VirtualKeyPrefix = "sk-bf-"
 
 	// testTenantID is used by InitFromStore for unit tests without a live registry.
@@ -1665,6 +1670,12 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 
 	isFinalChunk := bifrost.IsFinalChunk(ctx)
 
+	// A data chunk commits the stream. CheckFirstStreamChunkForError only turns the
+	// first chunk into a retry/fallback; later errors are terminal.
+	if bifrost.IsStreamRequestType(requestType) && err == nil && result != nil {
+		ctx.SetValue(streamDataChunkSeenContextKey, true)
+	}
+
 	// Always process usage tracking (with or without virtual key).
 	// Enterprise user auth skips VK usage tracking so user-level governance owns limits.
 	effectiveVK := virtualKey
@@ -1688,11 +1699,15 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 			ctx.SetValue(schemas.BifrostContextKeyGovernanceRateLimitIDs, rateLimitIDs)
 		}
 
+		// Captured here, before handleRequest advances the fallback index on this context.
+		// A failed attempt that will be retried must not emit an InferenceUsage event.
+		publishUsage := !failedAttemptWillBeRetried(ctx, err)
+
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
 			// Use the requested model for usage tracking
-			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk)
+			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, publishUsage)
 		}()
 	}
 
@@ -1926,6 +1941,33 @@ func extractBudgetTokenCounts(result *schemas.BifrostResponse) (promptTokens, co
 	}
 }
 
+// failedAttemptWillBeRetried reports whether this provider attempt failed and Bifrost will
+// still try a configured fallback. It mirrors shouldTryFallbacks, using the fallback count
+// stored on the context because PostLLMHook does not see the original request.
+// Call it synchronously inside PostLLMHook: handleRequest advances the fallback index
+// on the shared context as soon as this hook returns.
+func failedAttemptWillBeRetried(ctx context.Context, err *schemas.BifrostError) bool {
+	if err == nil {
+		return false
+	}
+	// The stream was already handed to the client, so this error will not fall back.
+	if bifrost.GetBoolFromContext(ctx, streamDataChunkSeenContextKey) {
+		return false
+	}
+	if err.Error != nil && err.Error.Type != nil && *err.Error.Type == schemas.RequestCancelled {
+		return false
+	}
+	if err.AllowFallbacks != nil && !*err.AllowFallbacks {
+		return false
+	}
+	fallbackCount := bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackCount)
+	if fallbackCount <= 0 {
+		return false
+	}
+	fallbackIndex := bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackIndex)
+	return fallbackIndex < fallbackCount
+}
+
 // postHookWorker is a worker function that processes the response and updates usage tracking
 // It is used to avoid blocking the main thread when updating usage tracking
 // Handles both cases: with virtual key and without virtual key (empty string)
@@ -1942,7 +1984,9 @@ func extractBudgetTokenCounts(result *schemas.BifrostResponse) (promptTokens, co
 //   - isCacheRead: Whether the request is a cache read
 //   - isBatch: Whether the request is a batch request
 //   - isFinalChunk: Whether the request is the final chunk
-func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool) {
+//   - publishUsage: Whether this attempt should emit an InferenceUsage event. False when the
+//     provider attempt failed and a configured fallback will still be tried.
+func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool, publishUsage bool) {
 	if comp == nil || comp.tracker == nil {
 		return
 	}
@@ -2040,8 +2084,14 @@ func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGover
 		}
 
 		// Spend is always rated by MPilot from the published InferenceUsage event.
-		p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
-			promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs, ttftMs, apiLatencyMs)
+		// Skip the event when this attempt failed and a fallback will still be tried;
+		// the attempt that finishes (success, or the last failure) is the one that publishes.
+		if publishUsage {
+			p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
+				promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs, ttftMs, apiLatencyMs)
+		} else {
+			p.logger.Debug("skipping InferenceUsage kafka publish: provider attempt failed and a fallback will be tried (request_id=%s)", requestID)
+		}
 
 		// Cost stays 0: the tracker only advances rate-limit counters, and BudgetUsage spend
 		// arrives back from the database once MPilot Rating has priced the request.
