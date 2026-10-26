@@ -2239,6 +2239,7 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	key := externalTransactionID
 	if err := p.usagePublisher.PublishUsage(context.WithoutCancel(ctx), tenantID, key, message); err != nil {
 		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
+		p.recordBillingPipelineError(ctx, tenantID, pipelineErrorTypePublishFailed, err.Error(), externalTransactionID, message)
 	}
 }
 
