@@ -165,7 +165,7 @@ type GovernancePlugin struct {
 	tenantRefreshes  sync.Map // string (tenantID) → *tenantRefreshCall
 	tenantSyncOnce   sync.Once
 	tenantSyncCancel context.CancelFunc
-	redisCache       *redisGovernanceCache
+	redisCache       governanceSnapshotCache
 
 	// streamTTFTMs stores first-chunk latency (ms) per requestID until the final
 	// InferenceUsage publish. ExtraFields.Latency on the last stream chunk is total

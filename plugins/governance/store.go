@@ -2965,22 +2965,30 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	return nil
 }
 
+// clearSyncMap drops every key without replacing the map. Redis refresh runs
+// while requests are reading, and assigning a new sync.Map races with Load.
+func clearSyncMap(m *sync.Map) {
+	m.Range(func(key, _ any) bool {
+		m.Delete(key)
+		return true
+	})
+}
+
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
 func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess, orgUnitAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgUnitProviderAccessRows []configstoreTables.TableProviderAccess, userAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, userProviderAccessRows []configstoreTables.TableProviderAccess) {
-	// Clear existing data by creating new sync.Maps
-	gs.virtualKeys = sync.Map{}
-	gs.organizations = sync.Map{}
-	gs.budgets = sync.Map{}
-	gs.budgetUsages = sync.Map{}
-	gs.accounts = sync.Map{}
-	gs.wallets = sync.Map{}
-	gs.orgUnits = sync.Map{}
-	gs.userOrgUnits = sync.Map{}
-	gs.rateLimits = sync.Map{}
-	gs.modelConfigs = sync.Map{}
-	gs.configModels = sync.Map{}
-	gs.providers = sync.Map{}
-	gs.routingRules = sync.Map{}
+	clearSyncMap(&gs.virtualKeys)
+	clearSyncMap(&gs.organizations)
+	clearSyncMap(&gs.budgets)
+	clearSyncMap(&gs.budgetUsages)
+	clearSyncMap(&gs.accounts)
+	clearSyncMap(&gs.wallets)
+	clearSyncMap(&gs.orgUnits)
+	clearSyncMap(&gs.userOrgUnits)
+	clearSyncMap(&gs.rateLimits)
+	clearSyncMap(&gs.modelConfigs)
+	clearSyncMap(&gs.configModels)
+	clearSyncMap(&gs.providers)
+	clearSyncMap(&gs.routingRules)
 
 	providerNameByID := make(map[string]string, len(providers))
 	for i := range providers {

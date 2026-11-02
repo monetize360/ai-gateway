@@ -38,6 +38,14 @@ type governanceCacheEvent struct {
 	Version  int64  `json:"version"`
 }
 
+// governanceSnapshotCache is the configuration cache consulted before Postgres.
+// *redisGovernanceCache is the production implementation.
+type governanceSnapshotCache interface {
+	load(ctx context.Context, tenantID string) (*redisGovernanceSnapshot, error)
+	start(parent context.Context, onChanged func(string, int64))
+	stop()
+}
+
 // redisGovernanceCache reads the entity hashes written by MPilot. Pub/sub is an
 // acceleration path; the monotonic version key makes a missed notification safe.
 type redisGovernanceCache struct {

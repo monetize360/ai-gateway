@@ -8,6 +8,7 @@ require (
 	github.com/bytedance/sonic v1.15.0
 	github.com/fasthttp/router v1.5.4
 	github.com/fasthttp/websocket v1.5.12
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/pprof v0.0.0-20251213031049-b05bdaca462f
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.4
@@ -115,7 +116,6 @@ require (
 	github.com/go-openapi/swag/yamlutils v0.25.4 // indirect
 	github.com/go-openapi/validate v0.25.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/google/cel-go v0.26.1 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect

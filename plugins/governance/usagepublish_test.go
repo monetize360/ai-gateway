@@ -167,6 +167,11 @@ func TestPostLLMHook_PublishesInferenceUsageAfterRequestContextReleased(t *testi
 
 	_, _, err = plugin.PostLLMHook(ctx, result, nil)
 	require.NoError(t, err)
+	// The request goroutine is done. Release the request-scoped values the way
+	// fasthttp reuses RequestCtx. The Kafka payload must already have been copied.
+	parent.values[schemas.BifrostContextKeyTenantID] = "released-tenant"
+	parent.values[schemas.BifrostContextKeyRequestID] = "released-request"
+	parent.values[schemas.BifrostContextKeyGovernanceOrgID] = "released-org"
 	plugin.wg.Wait()
 
 	call := publisher.get()
