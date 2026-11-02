@@ -2,7 +2,14 @@
   "$schema": "https://www.getbifrost.ai/schema",
   "tenant_store": {
     "enabled": true,
-    "refresh_interval_seconds": 10,
+    "governance_cache": {
+      "enabled": false,
+      "address": "localhost:6379",
+      "key_prefix": "mpilot:ai-gateway:governance",
+      "channel": "mpilot:ai-gateway:governance:changed",
+      "lru_capacity": 10000,
+      "lru_ttl_seconds": 300
+    },
     "max_idle_conns": 2,
     "max_open_conns": 10,
     "global": {

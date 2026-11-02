@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/plugins/compat"
@@ -88,6 +89,24 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		governanceConfig, err := MarshalPluginConfig[governance.Config](pluginConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal governance plugin config: %w", err)
+		}
+		if governanceConfig == nil {
+			governanceConfig = &governance.Config{}
+		}
+		if tenantCache := bifrostConfig.TenantStoreConfig; tenantCache != nil && tenantCache.GovernanceCache != nil && tenantCache.GovernanceCache.Enabled {
+			cacheConfig := tenantCache.GovernanceCache
+			governanceConfig.RedisCache = &governance.RedisCacheConfig{
+				Address:        cacheConfig.Address,
+				Username:       cacheConfig.Username,
+				Password:       cacheConfig.Password,
+				Database:       cacheConfig.Database,
+				TLS:            cacheConfig.TLS,
+				KeyPrefix:      cacheConfig.KeyPrefix,
+				Channel:        cacheConfig.Channel,
+				LRUCapacity:    cacheConfig.LRUCapacity,
+				LRUTTL:         time.Duration(cacheConfig.LRUTTLSeconds) * time.Second,
+				ConnectTimeout: time.Duration(cacheConfig.ConnectTimeoutMS) * time.Millisecond,
+			}
 		}
 		inMemoryStore := &GovernanceInMemoryStore{Config: bifrostConfig}
 		governancePlugin, err := governance.Init(ctx, governanceConfig, logger, bifrostConfig.Registry(),

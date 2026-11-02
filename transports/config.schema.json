@@ -876,7 +876,26 @@
         "refresh_interval_seconds": {
           "type": "integer",
           "minimum": 1,
-          "description": "Interval for refreshing tenant configuration from the global DB"
+          "description": "Legacy tenant lifecycle refresh interval. Governance configuration uses governance_cache Redis pub/sub."
+        },
+        "governance_cache": {
+          "type": "object",
+          "description": "Shared Redis L2 cache and invalidation channel for tenant governance state.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "address": { "type": "string" },
+            "username": { "type": "string" },
+            "password": { "type": "string" },
+            "database": { "type": "integer", "minimum": 0 },
+            "tls": { "type": "boolean" },
+            "key_prefix": { "type": "string" },
+            "channel": { "type": "string" },
+            "lru_capacity": { "type": "integer", "minimum": 1 },
+            "lru_ttl_seconds": { "type": "integer", "minimum": 1 },
+            "connect_timeout_ms": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["enabled"],
+          "additionalProperties": false
         },
         "max_idle_conns": {
           "type": "integer",

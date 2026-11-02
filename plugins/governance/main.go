@@ -80,6 +80,7 @@ type Config struct {
 	// When enabled with default_for_all, selection runs for every VK request
 	// that did not match a pin rule; otherwise it runs only for semantic_routing CEL rules.
 	SemanticRouting *SemanticRoutingConfig `json:"semantic_routing,omitempty"`
+	RedisCache      *RedisCacheConfig      `json:"-"`
 }
 
 type InMemoryStore interface {
@@ -125,6 +126,7 @@ type GovernancePlugin struct {
 	tenantComponents sync.Map // string (tenantID) → *tenantGovernanceComponents
 	tenantSyncOnce   sync.Once
 	tenantSyncCancel context.CancelFunc
+	redisCache       *redisGovernanceCache
 
 	// streamTTFTMs stores first-chunk latency (ms) per requestID until the final
 	// InferenceUsage publish. ExtraFields.Latency on the last stream chunk is total
@@ -261,7 +263,31 @@ func Init(
 		inMemoryStore:         inMemoryStore,
 	}
 	plugin.initVLLMSRTransport()
+	if config != nil && config.RedisCache != nil {
+		cache, cacheErr := newRedisGovernanceCache(*config.RedisCache, logger)
+		if cacheErr != nil {
+			return nil, fmt.Errorf("initialize governance Redis cache: %w", cacheErr)
+		}
+		plugin.redisCache = cache
+	}
 	return plugin, nil
+}
+
+// StartRedisGovernanceCache subscribes to MPilot's committed configuration
+// updates. A received version evicts the affected tenant components; the next
+// request hydrates from Redis before using Postgres as a bootstrap fallback.
+func (p *GovernancePlugin) StartRedisGovernanceCache() {
+	if p == nil || p.redisCache == nil {
+		return
+	}
+	p.redisCache.start(p.ctx, func(tenantID string, _ int64) {
+		p.ReleaseTenant(tenantID)
+	})
+	p.logger.Info("tenant governance Redis cache subscriber started")
+}
+
+func (p *GovernancePlugin) HasRedisGovernanceCache() bool {
+	return p != nil && p.redisCache != nil
 }
 
 // InitFromStore initializes and returns a governance plugin instance with a custom store.
@@ -1902,6 +1928,9 @@ func (p *GovernancePlugin) Cleanup() error {
 	p.cleanupOnce.Do(func() {
 		if p.tenantSyncCancel != nil {
 			p.tenantSyncCancel()
+		}
+		if p.redisCache != nil {
+			p.redisCache.stop()
 		}
 		if p.cancelFunc != nil {
 			p.cancelFunc()

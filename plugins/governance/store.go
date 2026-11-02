@@ -327,6 +327,25 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	return store, nil
 }
 
+// newEmptyLocalGovernanceStore is used when a complete tenant snapshot is
+// already available from Redis. It avoids an otherwise unnecessary full tenant
+// database load during a Gateway cold start.
+func newEmptyLocalGovernanceStore(logger schemas.Logger, configStore configstore.ConfigStore, modelCatalog *modelcatalog.ModelCatalog) (*LocalGovernanceStore, error) {
+	env, err := createCELEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CEL environment: %w", err)
+	}
+	return &LocalGovernanceStore{
+		configStore:                    configStore,
+		logger:                         logger,
+		routingCELEnv:                  env,
+		modelCatalog:                   modelCatalog,
+		LastDBUsagesBudgets:            make(map[string]float64),
+		LastDBUsagesRequestsRateLimits: make(map[string]int64),
+		LastDBUsagesTokensRateLimits:   make(map[string]int64),
+	}, nil
+}
+
 // RefreshFromDatabase reloads governance entities from the backing config store.
 // After the initial full load, only rows with updated_at within the refresh window
 // are fetched and merged into the in-memory maps.
@@ -373,6 +392,41 @@ func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 	gs.lastRefreshAt = refreshStartedAt
 	gs.refreshMu.Unlock()
 	return nil
+}
+
+// ReplaceFromRedisSnapshot atomically publishes a fully assembled Redis view by
+// rebuilding the same indexes used by the database bootstrap path. The cache
+// deliberately carries configuration only; locally accumulated rate-limit
+// usage remains preserved by the normal tracker/dump lifecycle.
+func (gs *LocalGovernanceStore) ReplaceFromRedisSnapshot(ctx context.Context, snapshot *redisGovernanceSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	gs.rebuildInMemoryStructures(
+		ctx,
+		snapshot.Organizations,
+		snapshot.VirtualKeys,
+		snapshot.Budgets,
+		snapshot.BudgetUsages,
+		snapshot.Accounts,
+		snapshot.Wallets,
+		snapshot.OrgUnits,
+		nil,
+		snapshot.RateLimits,
+		snapshot.ModelConfigs,
+		snapshot.Providers,
+		snapshot.ConfigModels,
+		snapshot.RoutingRules,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	gs.refreshMu.Lock()
+	gs.lastRefreshAt = time.Now().UTC()
+	gs.refreshMu.Unlock()
 }
 
 // LoadBudget loads a budget by its ID from the local store.

@@ -109,7 +109,23 @@ func (p *GovernancePlugin) initTenantGovernanceComponents(ctx context.Context, t
 		}
 	}
 
-	store, err := NewLocalGovernanceStore(ctx, p.logger, configStore, nil, p.modelCatalog)
+	var store *LocalGovernanceStore
+	var err error
+	if p.redisCache != nil {
+		snapshot, cacheErr := p.redisCache.load(ctx, tenantID)
+		if cacheErr != nil {
+			p.logger.Warn("failed to load governance cache for tenant %s: %v", tenantID, cacheErr)
+		} else if snapshot != nil {
+			store, err = newEmptyLocalGovernanceStore(p.logger, configStore, p.modelCatalog)
+			if err == nil {
+				store.ReplaceFromRedisSnapshot(ctx, snapshot)
+				p.logger.Info("tenant governance store loaded from Redis for tenant %s", tenantID)
+			}
+		}
+	}
+	if store == nil && err == nil {
+		store, err = NewLocalGovernanceStore(ctx, p.logger, configStore, nil, p.modelCatalog)
+	}
 	if err != nil {
 		p.logger.Debug("failed to initialise governance store for tenant %s: %v", tenantID, err)
 		return nil
