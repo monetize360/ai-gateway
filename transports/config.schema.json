@@ -880,10 +880,10 @@
         },
         "governance_cache": {
           "type": "object",
-          "description": "Shared Redis L2 cache and invalidation channel for tenant governance state.",
+          "description": "Required Redis cache and invalidation channel for tenant governance state. Inference auth reads this cache after memory and before Postgres.",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "address": { "type": "string" },
+            "enabled": { "type": "boolean", "const": true },
+            "address": { "type": "string", "minLength": 1 },
             "username": { "type": "string" },
             "password": { "type": "string" },
             "database": { "type": "integer", "minimum": 0 },
@@ -894,7 +894,7 @@
             "lru_ttl_seconds": { "type": "integer", "minimum": 1 },
             "connect_timeout_ms": { "type": "integer", "minimum": 1 }
           },
-          "required": ["enabled"],
+          "required": ["enabled", "address"],
           "additionalProperties": false
         },
         "max_idle_conns": {
@@ -995,7 +995,7 @@
           "description": "Base64-encoded RSA public key for admin tokens carrying only tenantId"
         }
       },
-      "required": ["enabled"],
+      "required": ["enabled", "governance_cache"],
       "additionalProperties": false
     },
     "config_store": {

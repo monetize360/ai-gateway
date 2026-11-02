@@ -51,7 +51,39 @@ const (
 	// semanticNoSuitableModelMessage is returned when Auto / omitted-model semantic
 	// routing runs but cannot commit a provider/model from the VK pool.
 	semanticNoSuitableModelMessage = "Your currently configured models are not suitable for this request. Please configure a model with the required capabilities and try again."
+
+	// inferenceUsagePublishTimeout bounds the detached Kafka publish. The worker
+	// must not inherit the request deadline: that context is cancelled, and its
+	// fasthttp parent is reused, as soon as the handler returns.
+	inferenceUsagePublishTimeout = 5 * time.Second
 )
+
+// inferenceUsageSnapshot is everything the post-hook worker needs from a request.
+// Built on the request goroutine. The worker must not retain the request context
+// or the response: fasthttp clears RequestCtx as soon as the handler returns.
+type inferenceUsageSnapshot struct {
+	TenantID            string
+	OrganizationID      string
+	VirtualKeyID        string
+	BillingUserID       string
+	VirtualKey          string
+	RequestID           string
+	UserID              string
+	Provider            schemas.ModelProvider
+	Model               string
+	RequestType         schemas.RequestType
+	IsFinalChunk        bool
+	PublishUsage        bool
+	Success             bool
+	PromptTokens        int
+	CompletionTokens    int
+	TotalTokens         int
+	CachedInputTokens   int
+	CacheCreationTokens int
+	ReasoningTokens     int
+	DurationMs          int64
+	APILatencyMs        int64
+}
 
 // semanticNoSuitableModelHTTPResponse short-circuits Auto semantic failures so the
 // chat handler does not fall through to the generic "model is required" validator.
@@ -96,6 +128,12 @@ type tenantGovernanceComponents struct {
 	engine   *RoutingEngine
 }
 
+type tenantRefreshCall struct {
+	done   chan struct{}
+	loaded bool
+	err    error
+}
+
 type BaseGovernancePlugin interface {
 	GetName() string
 	EvaluateGovernanceRequest(ctx *schemas.BifrostContext, evaluationRequest *EvaluationRequest, requestType schemas.RequestType) (*EvaluationResult, *schemas.BifrostError)
@@ -124,6 +162,7 @@ type GovernancePlugin struct {
 	inMemoryStore InMemoryStore
 
 	tenantComponents sync.Map // string (tenantID) → *tenantGovernanceComponents
+	tenantRefreshes  sync.Map // string (tenantID) → *tenantRefreshCall
 	tenantSyncOnce   sync.Once
 	tenantSyncCancel context.CancelFunc
 	redisCache       *redisGovernanceCache
@@ -274,14 +313,34 @@ func Init(
 }
 
 // StartRedisGovernanceCache subscribes to MPilot's committed configuration
-// updates. A received version evicts the affected tenant components; the next
-// request hydrates from Redis before using Postgres as a bootstrap fallback.
+// updates. Every warm tenant replaces its in-memory snapshot directly from
+// Redis, keeping all gateway instances coherent without request-path database
+// reads. Cold tenants remain cold until their first authenticated request.
 func (p *GovernancePlugin) StartRedisGovernanceCache() {
 	if p == nil || p.redisCache == nil {
 		return
 	}
 	p.redisCache.start(p.ctx, func(tenantID string, _ int64) {
-		p.ReleaseTenant(tenantID)
+		raw, ok := p.tenantComponents.Load(tenantID)
+		if !ok {
+			return
+		}
+		comp, ok := raw.(*tenantGovernanceComponents)
+		if !ok || comp == nil {
+			return
+		}
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			loaded, err := p.refreshTenantFromRedis(p.ctx, tenantID, comp)
+			if err != nil {
+				p.logger.Warn("failed to apply Redis governance update for tenant %s: %v", tenantID, err)
+				return
+			}
+			if !loaded {
+				p.logger.Warn("Redis governance update for tenant %s has no snapshot", tenantID)
+			}
+		}()
 	})
 	p.logger.Info("tenant governance Redis cache subscriber started")
 }
@@ -1729,12 +1788,14 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		// A failed attempt that will be retried must not emit an InferenceUsage event.
 		publishUsage := !failedAttemptWillBeRetried(ctx, err)
 
+		// Copy every value the worker needs before returning. The goroutine runs
+		// after fasthttp has released RequestCtx, so it must not read ctx or result.
+		snap := snapshotInferenceUsage(ctx, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, publishUsage)
 		p.wg.Add(1)
-		go func() {
+		go func(snap inferenceUsageSnapshot) {
 			defer p.wg.Done()
-			// Use the requested model for usage tracking
-			p.postHookWorker(ctx, comp, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, publishUsage)
-		}()
+			p.postHookWorker(comp, snap)
+		}(snap)
 	}
 
 	return result, err, nil
@@ -1898,7 +1959,9 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 		}
 	}
 
-	// Create usage update for tracker (business logic) - MCP requests track request count and tool cost
+	// Create usage update for tracker (business logic) - MCP requests track request count and tool cost.
+	// Resolved here, on the request goroutine. The worker must not read ctx: fasthttp
+	// reuses RequestCtx as soon as this hook returns.
 	usageUpdate := &UsageUpdate{
 		VirtualKey:   virtualKey,
 		Success:      success,
@@ -1908,15 +1971,15 @@ func (p *GovernancePlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schema
 		IsFinalChunk: true,
 		HasUsageData: toolCost > 0, // Has usage data if we have a cost
 	}
+	comp := p.getComponentsForContext(ctx)
+	if comp == nil || comp.tracker == nil {
+		return resp, bifrostErr, nil
+	}
 
-	// Queue usage update asynchronously using tracker
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		comp := p.getComponentsForContext(ctx)
-		if comp != nil && comp.tracker != nil {
-			comp.tracker.UpdateUsage(ctx, usageUpdate)
-		}
+		comp.tracker.UpdateUsage(context.Background(), usageUpdate)
 	}()
 
 	return resp, bifrostErr, nil
@@ -1997,188 +2060,176 @@ func failedAttemptWillBeRetried(ctx context.Context, err *schemas.BifrostError) 
 	return fallbackIndex < fallbackCount
 }
 
-// postHookWorker is a worker function that processes the response and updates usage tracking
-// It is used to avoid blocking the main thread when updating usage tracking
-// Handles both cases: with virtual key and without virtual key (empty string)
-// When virtualKey is empty, the tracker will only update provider-level and model-level usage
-// Parameters:
-//   - result: The Bifrost response to be processed
-//   - provider: The provider of the request
-//   - model: The model of the request
-//   - requestType: The type of the request
-//   - virtualKey: The raw virtual key token of the request (empty string if not present)
-//   - selectedKeyID: The selected provider key ID used for scoped pricing overrides
-//   - requestID: The request ID
-//   - userID: The user ID for enterprise user-level governance (empty string if not present)
-//   - isCacheRead: Whether the request is a cache read
-//   - isBatch: Whether the request is a batch request
-//   - isFinalChunk: Whether the request is the final chunk
-//   - publishUsage: Whether this attempt should emit an InferenceUsage event. False when the
-//     provider attempt failed and a configured fallback will still be tried.
-func (p *GovernancePlugin) postHookWorker(ctx context.Context, comp *tenantGovernanceComponents, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk bool, publishUsage bool) {
+// postHookWorker updates rate-limit counters and publishes InferenceUsage.
+// snap is a copy taken on the request goroutine. This function must not read
+// the request context or the provider response.
+func (p *GovernancePlugin) postHookWorker(comp *tenantGovernanceComponents, snap inferenceUsageSnapshot) {
 	if comp == nil || comp.tracker == nil {
 		return
 	}
-	// Determine if request was successful
-	success := (result != nil)
+	isStreaming := bifrost.IsStreamRequestType(snap.RequestType)
 
-	// Streaming detection
-	isStreaming := bifrost.IsStreamRequestType(requestType)
-
-	if isStreaming && !isFinalChunk {
-		p.rememberStreamTTFT(requestID, responseLatencyMs(result))
+	if isStreaming && !snap.IsFinalChunk {
+		p.rememberStreamTTFT(snap.RequestID, snap.APILatencyMs)
 		return
 	}
 
-	if !isStreaming || (isStreaming && isFinalChunk) {
-		promptTokens, completionTokens := extractBudgetTokenCounts(result)
-		tokensUsed := 0
-		cachedInputTokens := 0
-		cacheCreationTokens := 0
-		reasoningTokens := 0
-		durationMs := int64(0)
-		if result != nil {
-			switch {
-			case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
-				tokensUsed = result.TextCompletionResponse.Usage.TotalTokens
-				if result.TextCompletionResponse.Usage.PromptTokensDetails != nil {
-					cachedInputTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedReadTokens
-					cacheCreationTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedWriteTokens
-				}
-				if result.TextCompletionResponse.Usage.CompletionTokensDetails != nil {
-					reasoningTokens = result.TextCompletionResponse.Usage.CompletionTokensDetails.ReasoningTokens
-				}
-				durationMs = result.TextCompletionResponse.ExtraFields.Latency
-			case result.ChatResponse != nil && result.ChatResponse.Usage != nil:
-				tokensUsed = result.ChatResponse.Usage.TotalTokens
-				if result.ChatResponse.Usage.PromptTokensDetails != nil {
-					cachedInputTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedReadTokens
-					cacheCreationTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedWriteTokens
-				}
-				if result.ChatResponse.Usage.CompletionTokensDetails != nil {
-					reasoningTokens = result.ChatResponse.Usage.CompletionTokensDetails.ReasoningTokens
-				}
-				durationMs = result.ChatResponse.ExtraFields.Latency
-			case result.ResponsesResponse != nil && result.ResponsesResponse.Usage != nil:
-				tokensUsed = result.ResponsesResponse.Usage.TotalTokens
-				if result.ResponsesResponse.Usage.InputTokensDetails != nil {
-					cachedInputTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedReadTokens
-					cacheCreationTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedWriteTokens
-				}
-				if result.ResponsesResponse.Usage.OutputTokensDetails != nil {
-					reasoningTokens = result.ResponsesResponse.Usage.OutputTokensDetails.ReasoningTokens
-				}
-				durationMs = result.ResponsesResponse.ExtraFields.Latency
-			case result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.Response != nil && result.ResponsesStreamResponse.Response.Usage != nil:
-				tokensUsed = result.ResponsesStreamResponse.Response.Usage.TotalTokens
-				if result.ResponsesStreamResponse.Response.Usage.InputTokensDetails != nil {
-					cachedInputTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedReadTokens
-					cacheCreationTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedWriteTokens
-				}
-				if result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails != nil {
-					reasoningTokens = result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails.ReasoningTokens
-				}
-				durationMs = result.ResponsesStreamResponse.ExtraFields.Latency
-			case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
-				tokensUsed = result.EmbeddingResponse.Usage.TotalTokens
-				durationMs = result.EmbeddingResponse.ExtraFields.Latency
-			case result.SpeechResponse != nil && result.SpeechResponse.Usage != nil:
-				tokensUsed = result.SpeechResponse.Usage.TotalTokens
-				durationMs = result.SpeechResponse.ExtraFields.Latency
-			case result.SpeechStreamResponse != nil && result.SpeechStreamResponse.Usage != nil:
-				tokensUsed = result.SpeechStreamResponse.Usage.TotalTokens
-				durationMs = result.SpeechStreamResponse.ExtraFields.Latency
-			case result.TranscriptionResponse != nil && result.TranscriptionResponse.Usage != nil && result.TranscriptionResponse.Usage.TotalTokens != nil:
-				tokensUsed = *result.TranscriptionResponse.Usage.TotalTokens
-				durationMs = result.TranscriptionResponse.ExtraFields.Latency
-			case result.TranscriptionStreamResponse != nil && result.TranscriptionStreamResponse.Usage != nil && result.TranscriptionStreamResponse.Usage.TotalTokens != nil:
-				tokensUsed = *result.TranscriptionStreamResponse.Usage.TotalTokens
-				durationMs = result.TranscriptionStreamResponse.ExtraFields.Latency
-			}
-		}
+	durationMs := snap.DurationMs
+	if durationMs == 0 {
+		durationMs = snap.APILatencyMs
+	}
 
-		// ExtraFields.Latency is total request duration even when usage is missing.
-		apiLatencyMs := responseLatencyMs(result)
-		if durationMs == 0 {
-			durationMs = apiLatencyMs
+	// Streams report total duration on the final chunk, so fall back to the
+	// first-chunk latency captured earlier; non-streaming TTFT is the duration.
+	ttftMs := durationMs
+	if isStreaming {
+		if stored, ok := p.takeStreamTTFT(snap.RequestID); ok {
+			ttftMs = stored
 		}
+	}
 
-		// Streams report total duration on the final chunk, so fall back to the
-		// first-chunk latency captured earlier; non-streaming TTFT is the duration.
-		ttftMs := durationMs
-		if isStreaming {
-			if stored, ok := p.takeStreamTTFT(requestID); ok {
-				ttftMs = stored
-			}
-		}
+	// Spend is always rated by MPilot from the published InferenceUsage event.
+	// Skip the event when this attempt failed and a fallback will still be tried;
+	// the attempt that finishes (success, or the last failure) is the one that publishes.
+	if snap.PublishUsage {
+		p.publishInferenceUsage(comp, snap, durationMs, ttftMs)
+	} else {
+		p.logger.Debug("skipping InferenceUsage kafka publish: provider attempt failed and a fallback will be tried (request_id=%s)", snap.RequestID)
+	}
 
-		// Spend is always rated by MPilot from the published InferenceUsage event.
-		// Skip the event when this attempt failed and a fallback will still be tried;
-		// the attempt that finishes (success, or the last failure) is the one that publishes.
-		if publishUsage {
-			p.publishInferenceUsage(ctx, provider, model, virtualKey, requestID, userID,
-				promptTokens, completionTokens, tokensUsed, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs, ttftMs, apiLatencyMs)
-		} else {
-			p.logger.Debug("skipping InferenceUsage kafka publish: provider attempt failed and a fallback will be tried (request_id=%s)", requestID)
-		}
+	// Cost stays 0: the tracker only advances rate-limit counters, and BudgetUsage spend
+	// arrives back from the database once MPilot Rating has priced the request.
+	comp.tracker.UpdateUsage(context.Background(), &UsageUpdate{
+		VirtualKey:   snap.VirtualKey,
+		Provider:     snap.Provider,
+		Model:        snap.Model,
+		Success:      snap.Success,
+		TokensUsed:   int64(snap.TotalTokens),
+		Cost:         0,
+		RequestID:    snap.RequestID,
+		UserID:       snap.UserID,
+		IsStreaming:  isStreaming,
+		IsFinalChunk: snap.IsFinalChunk,
+		HasUsageData: snap.TotalTokens > 0,
+	})
+}
 
-		// Cost stays 0: the tracker only advances rate-limit counters, and BudgetUsage spend
-		// arrives back from the database once MPilot Rating has priced the request.
-		usageUpdate := &UsageUpdate{
-			VirtualKey:   virtualKey,
-			Provider:     provider,
-			Model:        model,
-			Success:      success,
-			TokensUsed:   int64(tokensUsed),
-			Cost:         0,
-			RequestID:    requestID,
-			UserID:       userID,
-			IsStreaming:  isStreaming,
-			IsFinalChunk: isFinalChunk,
-			HasUsageData: tokensUsed > 0,
-		}
-		comp.tracker.UpdateUsage(ctx, usageUpdate)
+// snapshotInferenceUsage copies the request and response fields the async worker
+// needs. Call it before starting the goroutine.
+func snapshotInferenceUsage(ctx context.Context, result *schemas.BifrostResponse, provider schemas.ModelProvider, model string, requestType schemas.RequestType, virtualKey, requestID, userID string, isFinalChunk, publishUsage bool) inferenceUsageSnapshot {
+	promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens, durationMs := usageCountersFromResponse(result)
+	return inferenceUsageSnapshot{
+		TenantID:            bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID),
+		OrganizationID:      bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID),
+		VirtualKeyID:        bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID),
+		BillingUserID:       bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID),
+		VirtualKey:          virtualKey,
+		RequestID:           requestID,
+		UserID:              userID,
+		Provider:            provider,
+		Model:               model,
+		RequestType:         requestType,
+		IsFinalChunk:        isFinalChunk,
+		PublishUsage:        publishUsage,
+		Success:             result != nil,
+		PromptTokens:        promptTokens,
+		CompletionTokens:    completionTokens,
+		TotalTokens:         totalTokens,
+		CachedInputTokens:   cachedInputTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		ReasoningTokens:     reasoningTokens,
+		DurationMs:          durationMs,
+		APILatencyMs:        responseLatencyMs(result),
 	}
 }
 
+func usageCountersFromResponse(result *schemas.BifrostResponse) (promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens int, durationMs int64) {
+	promptTokens, completionTokens = extractBudgetTokenCounts(result)
+	if result == nil {
+		return
+	}
+	switch {
+	case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
+		totalTokens = result.TextCompletionResponse.Usage.TotalTokens
+		if result.TextCompletionResponse.Usage.PromptTokensDetails != nil {
+			cachedInputTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedReadTokens
+			cacheCreationTokens = result.TextCompletionResponse.Usage.PromptTokensDetails.CachedWriteTokens
+		}
+		if result.TextCompletionResponse.Usage.CompletionTokensDetails != nil {
+			reasoningTokens = result.TextCompletionResponse.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		durationMs = result.TextCompletionResponse.ExtraFields.Latency
+	case result.ChatResponse != nil && result.ChatResponse.Usage != nil:
+		totalTokens = result.ChatResponse.Usage.TotalTokens
+		if result.ChatResponse.Usage.PromptTokensDetails != nil {
+			cachedInputTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedReadTokens
+			cacheCreationTokens = result.ChatResponse.Usage.PromptTokensDetails.CachedWriteTokens
+		}
+		if result.ChatResponse.Usage.CompletionTokensDetails != nil {
+			reasoningTokens = result.ChatResponse.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		durationMs = result.ChatResponse.ExtraFields.Latency
+	case result.ResponsesResponse != nil && result.ResponsesResponse.Usage != nil:
+		totalTokens = result.ResponsesResponse.Usage.TotalTokens
+		if result.ResponsesResponse.Usage.InputTokensDetails != nil {
+			cachedInputTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedReadTokens
+			cacheCreationTokens = result.ResponsesResponse.Usage.InputTokensDetails.CachedWriteTokens
+		}
+		if result.ResponsesResponse.Usage.OutputTokensDetails != nil {
+			reasoningTokens = result.ResponsesResponse.Usage.OutputTokensDetails.ReasoningTokens
+		}
+		durationMs = result.ResponsesResponse.ExtraFields.Latency
+	case result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.Response != nil && result.ResponsesStreamResponse.Response.Usage != nil:
+		totalTokens = result.ResponsesStreamResponse.Response.Usage.TotalTokens
+		if result.ResponsesStreamResponse.Response.Usage.InputTokensDetails != nil {
+			cachedInputTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedReadTokens
+			cacheCreationTokens = result.ResponsesStreamResponse.Response.Usage.InputTokensDetails.CachedWriteTokens
+		}
+		if result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails != nil {
+			reasoningTokens = result.ResponsesStreamResponse.Response.Usage.OutputTokensDetails.ReasoningTokens
+		}
+		durationMs = result.ResponsesStreamResponse.ExtraFields.Latency
+	case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
+		totalTokens = result.EmbeddingResponse.Usage.TotalTokens
+		durationMs = result.EmbeddingResponse.ExtraFields.Latency
+	case result.SpeechResponse != nil && result.SpeechResponse.Usage != nil:
+		totalTokens = result.SpeechResponse.Usage.TotalTokens
+		durationMs = result.SpeechResponse.ExtraFields.Latency
+	case result.SpeechStreamResponse != nil && result.SpeechStreamResponse.Usage != nil:
+		totalTokens = result.SpeechStreamResponse.Usage.TotalTokens
+		durationMs = result.SpeechStreamResponse.ExtraFields.Latency
+	case result.TranscriptionResponse != nil && result.TranscriptionResponse.Usage != nil && result.TranscriptionResponse.Usage.TotalTokens != nil:
+		totalTokens = *result.TranscriptionResponse.Usage.TotalTokens
+		durationMs = result.TranscriptionResponse.ExtraFields.Latency
+	case result.TranscriptionStreamResponse != nil && result.TranscriptionStreamResponse.Usage != nil && result.TranscriptionStreamResponse.Usage.TotalTokens != nil:
+		totalTokens = *result.TranscriptionStreamResponse.Usage.TotalTokens
+		durationMs = result.TranscriptionStreamResponse.ExtraFields.Latency
+	}
+	return
+}
+
 // publishInferenceUsage builds the InferenceUsage Kafka payload and publishes via the injected publisher.
-func (p *GovernancePlugin) publishInferenceUsage(
-	ctx context.Context,
-	provider schemas.ModelProvider,
-	model string,
-	virtualKey, requestID, userID string,
-	promptTokens, completionTokens, totalTokens, cachedInputTokens, cacheCreationTokens, reasoningTokens int,
-	durationMs int64,
-	ttftMs int64,
-	apiLatencyMs int64,
-) {
+// It reads only the snapshot and the tenant store. The publish context is detached from the request.
+func (p *GovernancePlugin) publishInferenceUsage(comp *tenantGovernanceComponents, snap inferenceUsageSnapshot, durationMs, ttftMs int64) {
 	if p.usagePublisher == nil {
 		return
 	}
-	tenantID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyTenantID)
-	if tenantID == "" {
-		if tid, ok := ctx.Value(schemas.BifrostContextKeyTenantID).(string); ok {
-			tenantID = tid
-		}
-	}
-	if tenantID == "" {
+	if snap.TenantID == "" {
 		p.logger.Debug("skipping InferenceUsage kafka publish: tenant id missing")
 		return
 	}
 
 	serviceID := ""
 	billingAccountRef := ""
-	comp := p.getComponentsForContext(ctx)
 	if comp != nil && comp.store != nil {
-		serviceID = strings.TrimSpace(comp.store.ResolveConfigModelServiceID(provider, model))
+		serviceID = strings.TrimSpace(comp.store.ResolveConfigModelServiceID(snap.Provider, snap.Model))
 	}
 	if serviceID == "" {
-		p.logger.Debug("skipping InferenceUsage kafka publish: service_id missing for model %s", model)
+		p.logger.Debug("skipping InferenceUsage kafka publish: service_id missing for model %s", snap.Model)
 		return
 	}
 
-	organizationID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceOrgID)
-	if organizationID == "" {
+	if snap.OrganizationID == "" {
 		p.logger.Debug("skipping InferenceUsage kafka publish: organizationId missing")
 		return
 	}
@@ -2186,17 +2237,17 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	// billingAccountRef is the leaf Account.external_id for the VK's organization.
 	// Rating resolves the account by external id — no request-body account_id required.
 	if comp != nil && comp.store != nil {
-		billingAccountRef = strings.TrimSpace(comp.store.ResolveLeafAccountExternalID(organizationID))
+		billingAccountRef = strings.TrimSpace(comp.store.ResolveLeafAccountExternalID(snap.OrganizationID))
 	}
 	if billingAccountRef == "" {
-		p.logger.Debug("skipping InferenceUsage kafka publish: leaf account external_id missing for org %s", organizationID)
+		p.logger.Debug("skipping InferenceUsage kafka publish: leaf account external_id missing for org %s", snap.OrganizationID)
 		return
 	}
 
-	virtualKeyID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)
+	virtualKeyID := snap.VirtualKeyID
 	vkUserID := ""
-	if virtualKey != "" && comp != nil && comp.store != nil {
-		if vk, ok := comp.store.GetVirtualKey(ctx, virtualKey); ok && vk != nil {
+	if snap.VirtualKey != "" && comp != nil && comp.store != nil {
+		if vk, ok := comp.store.GetVirtualKey(context.Background(), snap.VirtualKey); ok && vk != nil {
 			if virtualKeyID == "" {
 				virtualKeyID = vk.ID
 			}
@@ -2205,13 +2256,12 @@ func (p *GovernancePlugin) publishInferenceUsage(
 			}
 		}
 	}
-	billingUserID := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyBillingUserID)
 	orgUnitID := ""
 	if comp != nil && comp.store != nil {
-		orgUnitID = strings.TrimSpace(comp.store.ResolveLeafOrgUnitID(vkUserID, userID, billingUserID))
+		orgUnitID = strings.TrimSpace(comp.store.ResolveLeafOrgUnitID(vkUserID, snap.UserID, snap.BillingUserID))
 	}
 
-	externalTransactionID := requestID
+	externalTransactionID := snap.RequestID
 	if externalTransactionID == "" {
 		externalTransactionID = uuid.NewString()
 	}
@@ -2223,25 +2273,25 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	// Keys must match the Service INPUT dimension names created by MPilot's
 	// model inventory publish API.
 	dimensions := map[string]string{
-		"input_token":  strconv.Itoa(promptTokens),
-		"output_token": strconv.Itoa(completionTokens),
-		"model":        model,
-		"provider":     string(provider),
+		"input_token":  strconv.Itoa(snap.PromptTokens),
+		"output_token": strconv.Itoa(snap.CompletionTokens),
+		"model":        snap.Model,
+		"provider":     string(snap.Provider),
 	}
-	if cachedInputTokens > 0 {
-		dimensions["cached_input_token"] = strconv.Itoa(cachedInputTokens)
+	if snap.CachedInputTokens > 0 {
+		dimensions["cached_input_token"] = strconv.Itoa(snap.CachedInputTokens)
 	}
-	if cacheCreationTokens > 0 {
-		dimensions["cache_creation_token"] = strconv.Itoa(cacheCreationTokens)
+	if snap.CacheCreationTokens > 0 {
+		dimensions["cache_creation_token"] = strconv.Itoa(snap.CacheCreationTokens)
 	}
-	if reasoningTokens > 0 {
-		dimensions["reasoning_token"] = strconv.Itoa(reasoningTokens)
+	if snap.ReasoningTokens > 0 {
+		dimensions["reasoning_token"] = strconv.Itoa(snap.ReasoningTokens)
 	}
 	if ttftMs > 0 {
 		dimensions["ttft_ms"] = strconv.FormatInt(ttftMs, 10)
 	}
-	if apiLatencyMs > 0 {
-		dimensions["api_latency_ms"] = strconv.FormatInt(apiLatencyMs, 10)
+	if snap.APILatencyMs > 0 {
+		dimensions["api_latency_ms"] = strconv.FormatInt(snap.APILatencyMs, 10)
 	}
 	if virtualKeyID != "" {
 		dimensions["virtual_key_id"] = virtualKeyID
@@ -2249,7 +2299,7 @@ func (p *GovernancePlugin) publishInferenceUsage(
 
 	message := map[string]any{
 		"externalTransactionId": externalTransactionID,
-		"organizationId":        organizationID,
+		"organizationId":        snap.OrganizationID,
 		"serviceId":             serviceID,
 		"eventTimestamp":        eventTimestamp.Format(time.RFC3339Nano),
 		"billingAccountRef":     billingAccountRef,
@@ -2258,17 +2308,15 @@ func (p *GovernancePlugin) publishInferenceUsage(
 	if orgUnitID != "" {
 		message["orgUnitId"] = orgUnitID
 	}
-	if trimmedVirtualKey := strings.TrimSpace(virtualKey); trimmedVirtualKey != "" {
+	if trimmedVirtualKey := strings.TrimSpace(snap.VirtualKey); trimmedVirtualKey != "" {
 		message["virtualKeyId"] = trimmedVirtualKey
 	}
 
-	// postHookWorker runs after the HTTP handler returns, so the request context is already
-	// cancelled by then — especially on streaming. Keep the context values but drop the
-	// cancellation so the produce is not aborted before it reaches the broker.
-	key := externalTransactionID
-	if err := p.usagePublisher.PublishUsage(context.WithoutCancel(ctx), tenantID, key, message); err != nil {
-		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", requestID, err)
-		p.recordBillingPipelineError(ctx, tenantID, pipelineErrorTypePublishFailed, err.Error(), externalTransactionID, message)
+	publishCtx, cancel := context.WithTimeout(context.Background(), inferenceUsagePublishTimeout)
+	defer cancel()
+	if err := p.usagePublisher.PublishUsage(publishCtx, snap.TenantID, externalTransactionID, message); err != nil {
+		p.logger.Error("failed to publish InferenceUsage to kafka (request_id=%s): %v", snap.RequestID, err)
+		p.recordBillingPipelineError(context.Background(), snap.TenantID, pipelineErrorTypePublishFailed, err.Error(), externalTransactionID, message)
 	}
 }
 

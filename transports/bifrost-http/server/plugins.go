@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -93,8 +94,11 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		if governanceConfig == nil {
 			governanceConfig = &governance.Config{}
 		}
-		if tenantCache := bifrostConfig.TenantStoreConfig; tenantCache != nil && tenantCache.GovernanceCache != nil && tenantCache.GovernanceCache.Enabled {
-			cacheConfig := tenantCache.GovernanceCache
+		if bifrostConfig.TenantStoreConfig != nil && bifrostConfig.TenantStoreConfig.Enabled {
+			cacheConfig := bifrostConfig.TenantStoreConfig.GovernanceCache
+			if cacheConfig == nil || !cacheConfig.Enabled || strings.TrimSpace(cacheConfig.Address) == "" {
+				return nil, fmt.Errorf("tenant_store.governance_cache is required: set enabled to true and provide address")
+			}
 			governanceConfig.RedisCache = &governance.RedisCacheConfig{
 				Address:        cacheConfig.Address,
 				Username:       cacheConfig.Username,

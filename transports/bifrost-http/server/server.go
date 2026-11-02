@@ -1462,10 +1462,14 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	// Redis replaces periodic governance configuration polling. The rate-limit
 	// tracker keeps its independent persistence/reset cadence.
 	if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
-		if govPlugin.HasRedisGovernanceCache() {
+		if s.TenantMiddleware != nil {
+			s.TenantMiddleware.SetVirtualKeyResolver(govPlugin)
+		}
+		if s.Config.TenantStoreConfig != nil && s.Config.TenantStoreConfig.Enabled {
+			if !govPlugin.HasRedisGovernanceCache() {
+				return fmt.Errorf("tenant_store.governance_cache is required")
+			}
 			govPlugin.StartRedisGovernanceCache()
-		} else {
-			govPlugin.StartTenantGovernanceSync(lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
 		}
 		if s.Config.TenantStore != nil && s.Config.TenantStore.Manager != nil {
 			// Governance caches per-tenant components holding a reference to the tenant

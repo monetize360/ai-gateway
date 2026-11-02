@@ -16,6 +16,7 @@ import (
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/temptoken"
 	"github.com/maximhq/bifrost/framework/tenantstore"
@@ -1214,10 +1215,15 @@ func GetObservabilityPlugins(plugins []schemas.BasePlugin) []schemas.Observabili
 // TenantMiddleware validates MPilot JWTs and injects tenant-scoped identity into the
 // fasthttp user-value map. Inference routes require a virtual-key JWT; admin/API
 // routes accept a tenant-only JWT signed with the MPilot admin key (admin_jwt_public_key).
+type TenantVirtualKeyResolver interface {
+	ResolveTenantVirtualKey(ctx context.Context, tenantID, virtualKeyID string) (*configstoreTables.TableVirtualKey, error)
+}
+
 type TenantMiddleware struct {
-	virtualKeyJWTKey []byte
-	adminJWTKey      []byte
-	registry         tenantstore.Resolver
+	virtualKeyJWTKey   []byte
+	adminJWTKey        []byte
+	registry           tenantstore.Resolver
+	virtualKeyResolver TenantVirtualKeyResolver
 }
 
 // NewTenantMiddleware creates a TenantMiddleware using the supplied key bytes.
@@ -1229,6 +1235,15 @@ func NewTenantMiddleware(virtualKeyJWTKey []byte, registry tenantstore.Resolver,
 		m.adminJWTKey = adminJWTKey[0]
 	}
 	return m
+}
+
+// SetVirtualKeyResolver installs the governance-backed lookup used by inference
+// JWT authentication. It is set after plugins are loaded.
+func (m *TenantMiddleware) SetVirtualKeyResolver(resolver TenantVirtualKeyResolver) {
+	if m == nil {
+		return
+	}
+	m.virtualKeyResolver = resolver
 }
 
 // OptionalMiddleware returns tenant JWT middleware for admin/API routes. Whitelisted
@@ -1286,12 +1301,19 @@ func (m *TenantMiddleware) authenticateInferenceRequest(ctx *fasthttp.RequestCtx
 	if m.registry == nil {
 		return fmt.Errorf("tenant store not configured")
 	}
-	store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
-	if store == nil {
-		return fmt.Errorf("unknown tenant")
+	var (
+		vk    *configstoreTables.TableVirtualKey
+		vkErr error
+	)
+	if m.virtualKeyResolver != nil {
+		vk, vkErr = m.virtualKeyResolver.ResolveTenantVirtualKey(ctx, claims.TenantID, claims.VirtualKey)
+	} else {
+		store := m.registry.GetStoreForTenant(ctx, claims.TenantID)
+		if store == nil {
+			return fmt.Errorf("unknown tenant")
+		}
+		vk, vkErr = store.GetVirtualKey(ctx, claims.VirtualKey)
 	}
-
-	vk, vkErr := store.GetVirtualKey(ctx, claims.VirtualKey)
 	if vkErr != nil || vk == nil {
 		return fmt.Errorf("virtual key not found")
 	}

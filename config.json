@@ -3,7 +3,7 @@
   "tenant_store": {
     "enabled": true,
     "governance_cache": {
-      "enabled": false,
+      "enabled": true,
       "address": "localhost:6379",
       "key_prefix": "mpilot:ai-gateway:governance",
       "channel": "mpilot:ai-gateway:governance:changed",
