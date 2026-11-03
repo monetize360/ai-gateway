@@ -1459,9 +1459,22 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err := s.LoadPlugins(ctx); err != nil {
 		return fmt.Errorf("failed to instantiate plugins: %v", err)
 	}
-	// Start per-tenant governance sync worker.
+	// Redis replaces periodic governance configuration polling. The rate-limit
+	// tracker keeps its independent persistence/reset cadence.
 	if govPlugin, govErr := lib.FindPluginAs[*governance.GovernancePlugin](s.Config, governance.PluginName); govErr == nil {
-		govPlugin.StartTenantGovernanceSync(lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig))
+		if s.TenantMiddleware != nil {
+			s.TenantMiddleware.SetVirtualKeyResolver(govPlugin)
+		}
+		if s.Config.TenantStoreConfig != nil && s.Config.TenantStoreConfig.Enabled {
+			if !govPlugin.HasRedisGovernanceCache() {
+				return fmt.Errorf("tenant_store.governance_cache is required")
+			}
+			syncInterval := lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig)
+			govPlugin.StartRedisGovernanceCache(syncInterval)
+			// Budget spend is written to Postgres by MPilot Rating; read it back
+			// on the same cadence, independent of Redis version bumps.
+			govPlugin.StartTenantSpendRefresh(syncInterval)
+		}
 		if s.Config.TenantStore != nil && s.Config.TenantStore.Manager != nil {
 			// Governance caches per-tenant components holding a reference to the tenant
 			// store; release them before the pool closes so usage is flushed and the next

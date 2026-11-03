@@ -32,6 +32,30 @@ type RDBConfigStore struct {
 	logger           schemas.Logger
 	migrateOnFreshFn func(ctx context.Context, fn func(context.Context, *gorm.DB) error) error
 	refreshPoolFn    func(ctx context.Context) error
+
+	// budgetUsageTablePresent caches the budgetusage__m existence check for the
+	// spend refresh, which runs every few seconds per tenant. Present is cached
+	// for good; absent is re-checked after budgetUsageTableRecheck, in case the
+	// table is created later.
+	budgetUsageTablePresent   atomic.Bool
+	budgetUsageTableCheckedAt atomic.Int64 // unix nanos of the last "absent" result
+}
+
+const budgetUsageTableRecheck = 5 * time.Minute
+
+func (s *RDBConfigStore) hasBudgetUsageTable(db *gorm.DB) bool {
+	if s.budgetUsageTablePresent.Load() {
+		return true
+	}
+	if checked := s.budgetUsageTableCheckedAt.Load(); checked != 0 && time.Since(time.Unix(0, checked)) < budgetUsageTableRecheck {
+		return false
+	}
+	if db.Migrator().HasTable(&tables.TableBudgetUsage{}) {
+		s.budgetUsageTablePresent.Store(true)
+		return true
+	}
+	s.budgetUsageTableCheckedAt.Store(time.Now().UnixNano())
+	return false
 }
 
 // getWeight safely dereferences a *float64 weight pointer, returning 1.0 as default if nil.
@@ -3896,6 +3920,29 @@ func (s *RDBConfigStore) GetBudgetUsages(ctx context.Context) ([]tables.TableBud
 	var usages []tables.TableBudgetUsage
 	if err := GovernanceActive(db).Order("created_at ASC").Find(&usages).Error; err != nil {
 		return nil, err
+	}
+	return usages, nil
+}
+
+// GetBudgetUsagesChangedSince returns BudgetUsage rows updated at or after since,
+// plus soft-deleted rows in the same window. It backs the gateway's spend refresh:
+// MPilot Rating writes current_usage here, and the gateway reads it back.
+// Returns an empty slice when the table is absent (tenants without billing).
+func (s *RDBConfigStore) GetBudgetUsagesChangedSince(ctx context.Context, since time.Time) ([]tables.TableBudgetUsage, error) {
+	if since.IsZero() {
+		return nil, fmt.Errorf("budget usage refresh since watermark is required")
+	}
+	since = NormalizeRefreshSince(since)
+	db := s.DB().WithContext(ctx)
+	if !s.hasBudgetUsageTable(db) {
+		return nil, nil
+	}
+	// One query for both active and soft-deleted rows (callers drop Deleted
+	// ones): with active = "deleted = false", the two sets together are simply
+	// every row changed in the window, served by the updated_at index.
+	var usages []tables.TableBudgetUsage
+	if err := db.Unscoped().Where("updated_at >= ?", since).Find(&usages).Error; err != nil {
+		return nil, fmt.Errorf("budget usages changed since: %w", err)
 	}
 	return usages, nil
 }

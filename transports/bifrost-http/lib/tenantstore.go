@@ -15,8 +15,11 @@ import (
 
 // TenantStoreFileConfig is the config.json shape for multi-tenant mode.
 type TenantStoreFileConfig struct {
-	Enabled                bool                           `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// RefreshIntervalSeconds is retained only for backwards-compatible tenant lifecycle
+	// maintenance. Governance configuration is synchronized by Redis pub/sub.
 	RefreshIntervalSeconds int                            `json:"refresh_interval_seconds,omitempty"`
+	GovernanceCache        *GovernanceCacheFileConfig     `json:"governance_cache,omitempty"`
 	MaxIdleConns           int                            `json:"max_idle_conns,omitempty"`
 	MaxOpenConns           int                            `json:"max_open_conns,omitempty"`
 	ConnMaxLifetimeSeconds int                            `json:"conn_max_lifetime_seconds,omitempty"`
@@ -28,6 +31,23 @@ type TenantStoreFileConfig struct {
 	// AdminJWTPublicKey is the MPilot admin API RSA public key (jwt.key.public).
 	// When set, tenant admin routes accept Bearer tokens that carry only tenantId.
 	AdminJWTPublicKey string `json:"admin_jwt_public_key,omitempty"`
+}
+
+// GovernanceCacheFileConfig configures the shared L2 Redis cache used by the
+// governance plugin. Sensitive values support the same environment expansion as
+// other Bifrost configuration fields when they are converted by the plugin.
+type GovernanceCacheFileConfig struct {
+	Enabled          bool   `json:"enabled"`
+	Address          string `json:"address"`
+	Username         string `json:"username,omitempty"`
+	Password         string `json:"password,omitempty"`
+	Database         int    `json:"database,omitempty"`
+	TLS              bool   `json:"tls,omitempty"`
+	KeyPrefix        string `json:"key_prefix,omitempty"`
+	Channel          string `json:"channel,omitempty"`
+	LRUCapacity      int    `json:"lru_capacity,omitempty"`
+	LRUTTLSeconds    int    `json:"lru_ttl_seconds,omitempty"`
+	ConnectTimeoutMS int    `json:"connect_timeout_ms,omitempty"`
 }
 
 // TenantStoreGlobalPostgresFile holds plain-string postgres settings for the global DB.

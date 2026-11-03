@@ -4,6 +4,7 @@ package governance
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,17 @@ type LocalGovernanceStore struct {
 
 	// modelCards indexes published catalog listings by "provider/model" and "model".
 	modelCards atomic.Pointer[map[string]*modelCard]
+
+	// redisVersion is the MPilot governance version last applied from Redis
+	// (0 when the store was loaded from Postgres only).
+	redisVersion atomic.Int64
+
+	// spendMu serializes every write of BudgetUsage spend from the database
+	// (full loads, Redis applies, and the periodic spend refresh) so an older
+	// full read can never overwrite newer spend. spendWatermark is the start
+	// time of the last successful spend read; zero means "do a full read next".
+	spendMu        sync.Mutex
+	spendWatermark time.Time
 
 	// Last DB usages for budgets and rate limits
 	LastDBUsagesBudgetsMu            sync.RWMutex       // Last DB usages for budgets
@@ -327,6 +339,92 @@ func NewLocalGovernanceStore(ctx context.Context, logger schemas.Logger, configS
 	return store, nil
 }
 
+// newEmptyLocalGovernanceStore is used when a complete tenant snapshot is
+// already available from Redis. It avoids an otherwise unnecessary full tenant
+// database load during a Gateway cold start.
+func newEmptyLocalGovernanceStore(logger schemas.Logger, configStore configstore.ConfigStore, modelCatalog *modelcatalog.ModelCatalog) (*LocalGovernanceStore, error) {
+	env, err := createCELEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CEL environment: %w", err)
+	}
+	return &LocalGovernanceStore{
+		configStore:                    configStore,
+		logger:                         logger,
+		routingCELEnv:                  env,
+		modelCatalog:                   modelCatalog,
+		LastDBUsagesBudgets:            make(map[string]float64),
+		LastDBUsagesRequestsRateLimits: make(map[string]int64),
+		LastDBUsagesTokensRateLimits:   make(map[string]int64),
+		alertThresholdsByID:            make(map[string]*configstoreTables.TableAlertThreshold),
+		alertThresholdsByTarget:        make(map[string][]*configstoreTables.TableAlertThreshold),
+		alertClaims:                    make(map[string]*alertClaim),
+	}, nil
+}
+
+// governanceSupplementalRows is the governance state MPilot does not publish to
+// Redis. It still lives only in the tenant database, so it is loaded alongside
+// every Redis snapshot instead of being wiped by it.
+type governanceSupplementalRows struct {
+	userOrgUnits               []configstoreTables.TableUserOrgUnit
+	orgAllowedModelConfigs     []configstoreTables.TableAllowedModelConfig
+	orgProviderAccess          []configstoreTables.TableProviderAccess
+	orgUnitAllowedModelConfigs []configstoreTables.TableAllowedModelConfig
+	orgUnitProviderAccess      []configstoreTables.TableProviderAccess
+	userAllowedModelConfigs    []configstoreTables.TableAllowedModelConfig
+	userProviderAccess         []configstoreTables.TableProviderAccess
+	alertThresholds            []configstoreTables.TableAlertThreshold
+	alertNotifications         []configstoreTables.TableAlertNotification
+	// budgetUsages comes from the database, not Redis: MPilot Rating writes
+	// spend to Postgres, and the Redis copy may lag behind it.
+	budgetUsages []configstoreTables.TableBudgetUsage
+	// readStartedAt is when the database reads began; it becomes the spend watermark.
+	readStartedAt time.Time
+	loaded        bool
+}
+
+// loadSupplementalFromDatabase reads the rows a Redis snapshot does not carry.
+// It returns an empty, not-loaded set when the store has no database.
+func (gs *LocalGovernanceStore) loadSupplementalFromDatabase(ctx context.Context) (*governanceSupplementalRows, error) {
+	rows := &governanceSupplementalRows{}
+	if gs.configStore == nil {
+		return rows, nil
+	}
+	rows.readStartedAt = time.Now().UTC()
+	var err error
+	if rows.budgetUsages, err = gs.configStore.GetBudgetUsages(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load budget usages: %w", err)
+	}
+	if rows.userOrgUnits, err = gs.configStore.GetUserOrgUnits(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load user org units: %w", err)
+	}
+	if rows.orgAllowedModelConfigs, err = gs.configStore.GetOrgAllowedModelConfigs(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load org allowed model configs: %w", err)
+	}
+	if rows.orgProviderAccess, err = gs.configStore.GetOrgProviderAccess(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load org provider access: %w", err)
+	}
+	if rows.orgUnitAllowedModelConfigs, err = gs.configStore.GetOrgUnitAllowedModelConfigs(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load org-unit allowed model configs: %w", err)
+	}
+	if rows.orgUnitProviderAccess, err = gs.configStore.GetOrgUnitProviderAccess(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load org-unit provider access: %w", err)
+	}
+	if rows.userAllowedModelConfigs, err = gs.configStore.GetUserAllowedModelConfigs(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load user allowed model configs: %w", err)
+	}
+	if rows.userProviderAccess, err = gs.configStore.GetUserProviderAccess(ctx, nil); err != nil {
+		return nil, fmt.Errorf("failed to load user provider access: %w", err)
+	}
+	if rows.alertThresholds, err = gs.configStore.GetAlertThresholds(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load alert thresholds: %w", err)
+	}
+	if rows.alertNotifications, err = gs.configStore.GetAlertNotifications(ctx); err != nil {
+		return nil, fmt.Errorf("failed to load alert notifications: %w", err)
+	}
+	rows.loaded = true
+	return rows, nil
+}
+
 // RefreshFromDatabase reloads governance entities from the backing config store.
 // After the initial full load, only rows with updated_at within the refresh window
 // are fetched and merged into the in-memory maps.
@@ -373,6 +471,145 @@ func (gs *LocalGovernanceStore) RefreshFromDatabase(ctx context.Context) error {
 	gs.lastRefreshAt = refreshStartedAt
 	gs.refreshMu.Unlock()
 	return nil
+}
+
+// ReplaceFromRedisSnapshot publishes a Redis view by rebuilding the same
+// indexes used by the database bootstrap path. Readers never observe a missing
+// entry for a key present in both the old and new view (see
+// rebuildInMemoryStructures). Rate-limit counters are owned by this process's
+// tracker, so the in-memory values are carried over rather than taken from
+// Redis. supplemental carries the database-only rows; when it was not loaded
+// (no database), the current indexes for those rows are kept.
+// The snapshot must be exclusively owned by the caller: the store keeps
+// pointers into its slices.
+func (gs *LocalGovernanceStore) ReplaceFromRedisSnapshot(ctx context.Context, snapshot *redisGovernanceSnapshot, supplemental *governanceSupplementalRows) {
+	if snapshot == nil {
+		return
+	}
+	if supplemental == nil || !supplemental.loaded {
+		supplemental = gs.currentSupplementalRows()
+	}
+	budgetUsages := snapshot.BudgetUsages
+	if supplemental.loaded {
+		budgetUsages = supplemental.budgetUsages
+	}
+	gs.spendMu.Lock()
+	defer gs.spendMu.Unlock()
+	gs.rebuildInMemoryStructures(
+		ctx,
+		snapshot.Organizations,
+		snapshot.VirtualKeys,
+		snapshot.Budgets,
+		budgetUsages,
+		snapshot.Accounts,
+		snapshot.Wallets,
+		snapshot.OrgUnits,
+		supplemental.userOrgUnits,
+		snapshot.RateLimits,
+		snapshot.ModelConfigs,
+		snapshot.Providers,
+		snapshot.ConfigModels,
+		snapshot.RoutingRules,
+		supplemental.orgAllowedModelConfigs,
+		supplemental.orgProviderAccess,
+		supplemental.orgUnitAllowedModelConfigs,
+		supplemental.orgUnitProviderAccess,
+		supplemental.userAllowedModelConfigs,
+		supplemental.userProviderAccess,
+		true, // rate-limit counters are owned by this process, not Redis
+	)
+	if supplemental.loaded {
+		gs.replaceAlertCache(supplemental.alertThresholds, supplemental.alertNotifications)
+		gs.loadModelCards(ctx)
+		gs.spendWatermark = supplemental.readStartedAt
+	} else {
+		// Spend came from Redis and may be stale: the next spend refresh
+		// does a full database read.
+		gs.spendWatermark = time.Time{}
+	}
+	gs.redisVersion.Store(snapshot.Version)
+	gs.refreshMu.Lock()
+	gs.lastRefreshAt = time.Now().UTC()
+	gs.refreshMu.Unlock()
+}
+
+// storeRateLimitKeepingCounters publishes rl with the usage counters of the
+// entry it replaces. The copy and the swap are one compare-and-swap, the same
+// contract BumpRateLimitUsage uses, so an increment that lands while a Redis
+// rebuild is running is carried over instead of being overwritten.
+// rl must not be visible to other goroutines yet.
+func (gs *LocalGovernanceStore) storeRateLimitKeepingCounters(rl *configstoreTables.TableRateLimit) {
+	for {
+		raw, exists := gs.rateLimits.Load(rl.ID)
+		if !exists {
+			if _, loaded := gs.rateLimits.LoadOrStore(rl.ID, rl); !loaded {
+				return
+			}
+			continue
+		}
+		current, ok := raw.(*configstoreTables.TableRateLimit)
+		if !ok || current == nil {
+			if gs.rateLimits.CompareAndSwap(rl.ID, raw, rl) {
+				return
+			}
+			continue
+		}
+		rl.TokenCurrentUsage = current.TokenCurrentUsage
+		rl.RequestCurrentUsage = current.RequestCurrentUsage
+		rl.TokenLastReset = current.TokenLastReset
+		rl.RequestLastReset = current.RequestLastReset
+		if gs.rateLimits.CompareAndSwap(rl.ID, raw, rl) {
+			return
+		}
+	}
+}
+
+// RedisVersion reports the MPilot governance version last applied from Redis.
+func (gs *LocalGovernanceStore) RedisVersion() int64 {
+	return gs.redisVersion.Load()
+}
+
+// currentSupplementalRows reconstructs the database-only rows from the current
+// indexes, so a rebuild without database access keeps them unchanged.
+func (gs *LocalGovernanceStore) currentSupplementalRows() *governanceSupplementalRows {
+	rows := &governanceSupplementalRows{}
+	gs.userOrgUnits.Range(func(_, value any) bool {
+		if mapping, ok := value.(*configstoreTables.TableUserOrgUnit); ok && mapping != nil {
+			rows.userOrgUnits = append(rows.userOrgUnits, *mapping)
+		}
+		return true
+	})
+	gs.orgConfigsMu.RLock()
+	for _, configs := range gs.orgConfigsByOrgID {
+		rows.orgAllowedModelConfigs = append(rows.orgAllowedModelConfigs, configs...)
+	}
+	gs.orgConfigsMu.RUnlock()
+	gs.orgProviderAccessMu.RLock()
+	for _, access := range gs.orgProviderAccessByOrgID {
+		rows.orgProviderAccess = append(rows.orgProviderAccess, access...)
+	}
+	gs.orgProviderAccessMu.RUnlock()
+	gs.orgUnitConfigsMu.RLock()
+	for _, configs := range gs.orgUnitConfigsByOrgUnitID {
+		rows.orgUnitAllowedModelConfigs = append(rows.orgUnitAllowedModelConfigs, configs...)
+	}
+	gs.orgUnitConfigsMu.RUnlock()
+	gs.orgUnitProviderAccessMu.RLock()
+	for _, access := range gs.orgUnitProviderAccessByOrgUnitID {
+		rows.orgUnitProviderAccess = append(rows.orgUnitProviderAccess, access...)
+	}
+	gs.orgUnitProviderAccessMu.RUnlock()
+	gs.userConfigsMu.RLock()
+	for _, configs := range gs.userConfigsByUserID {
+		rows.userAllowedModelConfigs = append(rows.userAllowedModelConfigs, configs...)
+	}
+	gs.userConfigsMu.RUnlock()
+	gs.userProviderAccessMu.RLock()
+	for _, access := range gs.userProviderAccessByUserID {
+		rows.userProviderAccess = append(rows.userProviderAccess, access...)
+	}
+	gs.userProviderAccessMu.RUnlock()
+	return rows
 }
 
 // LoadBudget loads a budget by its ID from the local store.
@@ -2584,6 +2821,9 @@ func (gs *LocalGovernanceStore) DumpBudgets(ctx context.Context, baselines map[s
 
 // loadFromDatabase loads all governance data from the database into memory
 func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
+	gs.spendMu.Lock()
+	defer gs.spendMu.Unlock()
+	readStartedAt := time.Now().UTC()
 	// Load organizations for hierarchy walks
 	organizations, err := gs.configStore.GetOrganizations(ctx)
 	if err != nil {
@@ -2692,7 +2932,7 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 	}
 
 	// Rebuild in-memory structures (lock-free)
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess, orgUnitAllowedModelConfigs, orgUnitProviderAccess, userAllowedModelConfigs, userProviderAccess)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, budgetUsages, accounts, wallets, orgUnits, userOrgUnits, rateLimits, modelConfigs, providers, configModels, routingRules, orgAllowedModelConfigs, orgProviderAccess, orgUnitAllowedModelConfigs, orgUnitProviderAccess, userAllowedModelConfigs, userProviderAccess, false)
 	gs.loadModelCards(ctx)
 
 	alertThresholds, err := gs.configStore.GetAlertThresholds(ctx)
@@ -2704,11 +2944,57 @@ func (gs *LocalGovernanceStore) loadFromDatabase(ctx context.Context) error {
 		return fmt.Errorf("failed to load alert notifications: %w", err)
 	}
 	gs.replaceAlertCache(alertThresholds, alertNotifications)
+	gs.spendWatermark = readStartedAt
 
 	gs.refreshMu.Lock()
 	gs.lastRefreshAt = time.Now().UTC()
 	gs.refreshMu.Unlock()
 
+	return nil
+}
+
+// RefreshBudgetUsagesFromDatabase reads BudgetUsage spend back from the tenant
+// database. MPilot Rating prices each request and writes current_usage there;
+// the gateway never adds spend itself, so this is how budget enforcement sees
+// it. Only rows changed since the last read are fetched (one small query),
+// with RefreshOverlap to tolerate clock skew. With no watermark yet it does
+// one full read. It touches nothing but the BudgetUsage map.
+func (gs *LocalGovernanceStore) RefreshBudgetUsagesFromDatabase(ctx context.Context) error {
+	if gs.configStore == nil {
+		return nil
+	}
+	gs.spendMu.Lock()
+	defer gs.spendMu.Unlock()
+
+	readStartedAt := time.Now().UTC()
+	if gs.spendWatermark.IsZero() {
+		usages, err := gs.configStore.GetBudgetUsages(ctx)
+		if err != nil {
+			return err
+		}
+		before := syncMapContents(&gs.budgetUsages)
+		for i := range usages {
+			gs.SyncBudgetUsageFromDatabase(ctx, usages[i].ID, &usages[i])
+		}
+		sweepStaleSyncMap(&gs.budgetUsages, before)
+		gs.spendWatermark = readStartedAt
+		return nil
+	}
+
+	since := configstore.NormalizeRefreshSince(gs.spendWatermark).Add(-configstore.RefreshOverlap)
+	usages, err := gs.configStore.GetBudgetUsagesChangedSince(ctx, since)
+	if err != nil {
+		return err
+	}
+	for i := range usages {
+		usage := &usages[i]
+		if usage.Deleted {
+			gs.DeleteBudgetUsage(ctx, usage.ID)
+			continue
+		}
+		gs.SyncBudgetUsageFromDatabase(ctx, usage.ID, usage)
+	}
+	gs.spendWatermark = readStartedAt
 	return nil
 }
 
@@ -2906,27 +3192,69 @@ func (gs *LocalGovernanceStore) loadFromConfigMemory(ctx context.Context, config
 	// Rebuild in-memory structures (lock-free).
 	// Org-level allowed model configs and provider access are not available from config.json — pass nil.
 	// BudgetUsage and accounts are DB-backed (budgetusage__m / account__m); config.json path has none.
-	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, nil, nil, nil, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil, nil, nil, nil, nil)
+	gs.rebuildInMemoryStructures(ctx, organizations, virtualKeys, budgets, nil, nil, nil, nil, nil, rateLimits, modelConfigs, providers, nil, routingRules, nil, nil, nil, nil, nil, nil, false)
 
 	return nil
 }
 
+// syncMapContents copies a sync.Map's current entries.
+func syncMapContents(m *sync.Map) map[any]any {
+	out := make(map[any]any)
+	m.Range(func(key, value any) bool {
+		out[key] = value
+		return true
+	})
+	return out
+}
+
+// sweepStaleSyncMap deletes the keys of before that were not re-stored since
+// before was taken. Rebuilds store fresh values first and sweep afterwards, so
+// a concurrent reader never sees a key that exists in both the old and the new
+// view go missing (the old clear-then-fill did, which turned live virtual keys
+// into transient "not found" errors).
+func sweepStaleSyncMap(m *sync.Map, before map[any]any) {
+	for key, old := range before {
+		if current, ok := m.Load(key); ok && sameStoredValue(current, old) {
+			m.Delete(key)
+		}
+	}
+}
+
+// sameStoredValue reports whether a and b are the identical stored value.
+// Values are pointers or slices of pointers; slices are not comparable with ==.
+func sameStoredValue(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if !va.IsValid() || !vb.IsValid() || va.Type() != vb.Type() {
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return va.Pointer() == vb.Pointer()
+	case reflect.Slice:
+		return va.Pointer() == vb.Pointer() && va.Len() == vb.Len()
+	}
+	if va.Type().Comparable() {
+		return a == b
+	}
+	return false
+}
+
 // rebuildInMemoryStructures rebuilds all in-memory data structures (lock-free)
-func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess, orgUnitAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgUnitProviderAccessRows []configstoreTables.TableProviderAccess, userAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, userProviderAccessRows []configstoreTables.TableProviderAccess) {
-	// Clear existing data by creating new sync.Maps
-	gs.virtualKeys = sync.Map{}
-	gs.organizations = sync.Map{}
-	gs.budgets = sync.Map{}
-	gs.budgetUsages = sync.Map{}
-	gs.accounts = sync.Map{}
-	gs.wallets = sync.Map{}
-	gs.orgUnits = sync.Map{}
-	gs.userOrgUnits = sync.Map{}
-	gs.rateLimits = sync.Map{}
-	gs.modelConfigs = sync.Map{}
-	gs.configModels = sync.Map{}
-	gs.providers = sync.Map{}
-	gs.routingRules = sync.Map{}
+func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, organizations []configstoreTables.TableOrganization, virtualKeys []configstoreTables.TableVirtualKey, budgets []configstoreTables.TableBudget, budgetUsages []configstoreTables.TableBudgetUsage, accounts []configstoreTables.TableAccount, wallets []configstoreTables.TableWallet, orgUnits []configstoreTables.TableOrgUnit, userOrgUnits []configstoreTables.TableUserOrgUnit, rateLimits []configstoreTables.TableRateLimit, modelConfigs []configstoreTables.TableModelConfig, providers []configstoreTables.TableProvider, configModels []configstoreTables.TableModel, routingRules []configstoreTables.TableRoutingRule, orgAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgProviderAccessRows []configstoreTables.TableProviderAccess, orgUnitAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, orgUnitProviderAccessRows []configstoreTables.TableProviderAccess, userAllowedModelConfigs []configstoreTables.TableAllowedModelConfig, userProviderAccessRows []configstoreTables.TableProviderAccess, carryRateLimitCounters bool) {
+	// Store the new view first and sweep stale keys at the end (see sweepStaleSyncMap).
+	beforeVirtualKeys := syncMapContents(&gs.virtualKeys)
+	beforeOrganizations := syncMapContents(&gs.organizations)
+	beforeBudgets := syncMapContents(&gs.budgets)
+	beforeBudgetUsages := syncMapContents(&gs.budgetUsages)
+	beforeAccounts := syncMapContents(&gs.accounts)
+	beforeWallets := syncMapContents(&gs.wallets)
+	beforeOrgUnits := syncMapContents(&gs.orgUnits)
+	beforeUserOrgUnits := syncMapContents(&gs.userOrgUnits)
+	beforeRateLimits := syncMapContents(&gs.rateLimits)
+	beforeModelConfigs := syncMapContents(&gs.modelConfigs)
+	beforeConfigModels := syncMapContents(&gs.configModels)
+	beforeProviders := syncMapContents(&gs.providers)
+	beforeRoutingRules := syncMapContents(&gs.routingRules)
 
 	providerNameByID := make(map[string]string, len(providers))
 	for i := range providers {
@@ -2987,6 +3315,10 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	// Build rate limits map
 	for i := range rateLimits {
 		rateLimit := &rateLimits[i]
+		if carryRateLimitCounters {
+			gs.storeRateLimitKeepingCounters(rateLimit)
+			continue
+		}
 		gs.rateLimits.Store(rateLimit.ID, rateLimit)
 	}
 
@@ -3073,6 +3405,20 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 		})
 		gs.routingRules.Store(key, rules)
 	}
+
+	sweepStaleSyncMap(&gs.virtualKeys, beforeVirtualKeys)
+	sweepStaleSyncMap(&gs.organizations, beforeOrganizations)
+	sweepStaleSyncMap(&gs.budgets, beforeBudgets)
+	sweepStaleSyncMap(&gs.budgetUsages, beforeBudgetUsages)
+	sweepStaleSyncMap(&gs.accounts, beforeAccounts)
+	sweepStaleSyncMap(&gs.wallets, beforeWallets)
+	sweepStaleSyncMap(&gs.orgUnits, beforeOrgUnits)
+	sweepStaleSyncMap(&gs.userOrgUnits, beforeUserOrgUnits)
+	sweepStaleSyncMap(&gs.rateLimits, beforeRateLimits)
+	sweepStaleSyncMap(&gs.modelConfigs, beforeModelConfigs)
+	sweepStaleSyncMap(&gs.configModels, beforeConfigModels)
+	sweepStaleSyncMap(&gs.providers, beforeProviders)
+	sweepStaleSyncMap(&gs.routingRules, beforeRoutingRules)
 
 	// Pre-compile all routing rule programs to avoid first-request latency
 	gs.routingRules.Range(func(key, value interface{}) bool {

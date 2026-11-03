@@ -46,6 +46,7 @@ type UsageTracker struct {
 	alertTicker   *time.Ticker
 	done          chan struct{}
 	wg            sync.WaitGroup
+	stopOnce      sync.Once
 
 	alertMu        sync.RWMutex
 	tenantID       string
@@ -370,21 +371,25 @@ func (t *UsageTracker) Cleanup() error {
 	if err := t.store.DumpRateLimits(context.Background(), nil, nil); err != nil {
 		t.logger.Error("final rate-limit dump on shutdown failed: %v", err)
 	}
-
-	// Stop background workers
-	if t.trackerCancel != nil {
-		t.trackerCancel()
-	}
-	close(t.done)
-	if t.resetTicker != nil {
-		t.resetTicker.Stop()
-	}
-	if t.alertTicker != nil {
-		t.alertTicker.Stop()
-	}
-	// Wait for workers to finish
-	t.wg.Wait()
-
+	t.Stop()
 	t.logger.Debug("usage tracker cleanup completed")
 	return nil
+}
+
+// Stop halts the background workers without flushing counters to the
+// database. Safe to call more than once and after Cleanup.
+func (t *UsageTracker) Stop() {
+	t.stopOnce.Do(func() {
+		if t.trackerCancel != nil {
+			t.trackerCancel()
+		}
+		close(t.done)
+		if t.resetTicker != nil {
+			t.resetTicker.Stop()
+		}
+		if t.alertTicker != nil {
+			t.alertTicker.Stop()
+		}
+		t.wg.Wait()
+	})
 }

@@ -109,6 +109,15 @@ func (r *TenantConfigRegistry) GetStoreForTenant(ctx context.Context, tenantID s
 	return store
 }
 
+// TouchTenant records hot-path activity for an open tenant pool (see
+// TenantDBManager.Touch).
+func (r *TenantConfigRegistry) TouchTenant(tenantID string) {
+	if r == nil || r.manager == nil {
+		return
+	}
+	r.manager.Touch(tenantID)
+}
+
 // PeekStoreForTenant returns the open ConfigStore for tenantID without opening
 // a pool or refreshing lastUsed.
 func (r *TenantConfigRegistry) PeekStoreForTenant(tenantID string) configstore.ConfigStore {

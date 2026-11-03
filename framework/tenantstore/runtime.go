@@ -215,6 +215,22 @@ func (m *TenantDBManager) PeekStore(tenantID string) configstore.ConfigStore {
 	return entry.store
 }
 
+// Touch marks an already-open tenant pool as in use without opening one. The
+// governance hot path serves requests from memory and never calls GetStore, so
+// it calls this to keep a busy tenant's pool (and the governance components
+// released with it) from being evicted as idle.
+func (m *TenantDBManager) Touch(tenantID string) {
+	if m == nil || tenantID == "" {
+		return
+	}
+	m.mu.RLock()
+	entry := m.stores[tenantID]
+	m.mu.RUnlock()
+	if entry != nil {
+		entry.touch()
+	}
+}
+
 func (m *TenantDBManager) storeIfOpen(tenantID string) configstore.ConfigStore {
 	m.mu.RLock()
 	entry, exists := m.stores[tenantID]
