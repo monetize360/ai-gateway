@@ -11,10 +11,26 @@ Gateway lookup order is:
 2. Redis entity hashes for the tenant;
 3. tenant Postgres only when a tenant has no Redis namespace yet.
 
-The Gateway checks the Redis tenant version when it uses an LRU snapshot, so a
-missed pub/sub notification is recovered on the next request. A notification
-evicts the tenant's local components; the next request hydrates the rebuilt
-snapshot from Redis.
+A notification refreshes the tenant's warm in-memory store from Redis. Every
+`tenant_store.refresh_interval_seconds` (default 10s) the Gateway also compares
+each warm tenant's applied version with Redis in one `MGET` and refreshes any
+tenant that is behind, so a notification lost during a reconnect or failover is
+applied within one interval. A snapshot whose version is already applied is not
+rebuilt.
+
+Redis does not carry user org-unit mappings, org/org-unit/user allowed-model
+configs and provider access, or billing alert thresholds. Those are read from
+the tenant database whenever a new Redis version is applied.
+
+Rate-limit counters are owned by each Gateway process and carried across Redis
+refreshes; Redis values never overwrite them.
+
+Budget spend (`BudgetUsage.current_usage`) is written to Postgres by MPilot
+Rating. Every `tenant_store.refresh_interval_seconds` the Gateway reads back
+only the budget usage rows changed since its last read (one small query per
+warm tenant), so budgets enforce whether or not MPilot bumps the Redis version
+after rating. When a Redis version is applied, spend is taken from Postgres,
+not from the Redis copy.
 
 Configuration lives at `tenant_store.governance_cache`:
 

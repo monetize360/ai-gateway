@@ -1,11 +1,14 @@
 package governance
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -41,9 +44,19 @@ type governanceCacheEvent struct {
 // governanceSnapshotCache is the configuration cache consulted before Postgres.
 // *redisGovernanceCache is the production implementation.
 type governanceSnapshotCache interface {
+	// load returns a freshly decoded snapshot (callers may mutate it), or nil
+	// when the tenant has no Redis namespace yet.
 	load(ctx context.Context, tenantID string) (*redisGovernanceSnapshot, error)
+	// versions returns the published version per tenant; 0 means not seeded.
+	versions(ctx context.Context, tenantIDs []string) (map[string]int64, error)
 	start(parent context.Context, onChanged func(string, int64))
 	stop()
+}
+
+// redisGovernanceEntityKinds is the fixed set of entity hashes MPilot writes per tenant.
+var redisGovernanceEntityKinds = []string{
+	"organizations", "virtual_keys", "budgets", "budget_usages", "accounts", "wallets",
+	"org_units", "rate_limits", "providers", "models", "routing_rules",
 }
 
 // redisGovernanceCache reads the entity hashes written by MPilot. Pub/sub is an
@@ -75,6 +88,15 @@ type redisGovernanceSnapshot struct {
 	Providers     []configstoreTables.TableProvider
 	ConfigModels  []configstoreTables.TableModel
 	RoutingRules  []configstoreTables.TableRoutingRule
+}
+
+// redisGovernanceRaw is what the LRU keeps: the JSON array per entity kind.
+// The live store keeps pointers into the slices it is given and mutates them
+// (usage counters, reverse-FK attachments), so every load decodes a fresh copy
+// instead of sharing one decoded snapshot.
+type redisGovernanceRaw struct {
+	Version  int64
+	Entities map[string][]byte
 }
 
 func newRedisGovernanceCache(cfg RedisCacheConfig, logger interface {
@@ -124,32 +146,40 @@ func (c *redisGovernanceCache) start(parent context.Context, onChanged func(stri
 	c.onChanged = onChanged
 	go func() {
 		for ctx.Err() == nil {
-			subscription := c.client.Subscribe(ctx, c.channel)
-			channel := subscription.Channel()
-			for {
-				select {
-				case <-ctx.Done():
-					_ = subscription.Close()
-					return
-				case message, ok := <-channel:
-					if !ok {
-						_ = subscription.Close()
-						time.Sleep(time.Second)
-						goto reconnect
-					}
-					var event governanceCacheEvent
-					if err := json.Unmarshal([]byte(message.Payload), &event); err != nil || event.TenantID == "" {
-						continue
-					}
-					c.local.remove(event.TenantID)
-					if c.onChanged != nil {
-						c.onChanged(event.TenantID, event.Version)
-					}
-				}
+			c.consume(ctx)
+			// The subscription closed. Back off before resubscribing; the
+			// reconcile loop recovers anything published in the gap.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
 			}
-		reconnect:
 		}
 	}()
+}
+
+func (c *redisGovernanceCache) consume(ctx context.Context) {
+	subscription := c.client.Subscribe(ctx, c.channel)
+	defer subscription.Close()
+	channel := subscription.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message, ok := <-channel:
+			if !ok {
+				return
+			}
+			var event governanceCacheEvent
+			if err := json.Unmarshal([]byte(message.Payload), &event); err != nil || event.TenantID == "" {
+				continue
+			}
+			c.local.remove(event.TenantID)
+			if c.onChanged != nil {
+				c.onChanged(event.TenantID, event.Version)
+			}
+		}
+	}
 }
 
 func (c *redisGovernanceCache) stop() {
@@ -162,89 +192,134 @@ func (c *redisGovernanceCache) stop() {
 	_ = c.client.Close()
 }
 
+func (c *redisGovernanceCache) versionKey(tenantID string) string {
+	return c.prefix + ":tenant:" + tenantID + ":version"
+}
+
 func (c *redisGovernanceCache) load(ctx context.Context, tenantID string) (*redisGovernanceSnapshot, error) {
-	if cached, ok := c.local.get(tenantID); ok {
-		version, err := c.version(ctx, tenantID)
-		if err == nil && version == cached.Version {
-			return cached, nil
-		}
-		c.local.remove(tenantID)
-	}
 	version, err := c.version(ctx, tenantID)
 	if err != nil {
+		// Keep the cached copy: Redis being unreachable is not a reason to drop it.
 		return nil, err
 	}
 	if version == 0 {
+		c.local.remove(tenantID)
 		return nil, nil
 	}
-	snapshot := &redisGovernanceSnapshot{Version: version}
-	if err := c.readEntities(ctx, tenantID, "organizations", &snapshot.Organizations); err != nil {
-		return nil, err
+	if cached, ok := c.local.get(tenantID); ok && cached.Version == version {
+		return decodeGovernanceSnapshot(cached)
 	}
-	if err := c.readEntities(ctx, tenantID, "virtual_keys", &snapshot.VirtualKeys); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "budgets", &snapshot.Budgets); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "budget_usages", &snapshot.BudgetUsages); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "accounts", &snapshot.Accounts); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "wallets", &snapshot.Wallets); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "org_units", &snapshot.OrgUnits); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "rate_limits", &snapshot.RateLimits); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "providers", &snapshot.Providers); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "models", &snapshot.ConfigModels); err != nil {
-		return nil, err
-	}
-	if err := c.readEntities(ctx, tenantID, "routing_rules", &snapshot.RoutingRules); err != nil {
-		return nil, err
-	}
-	for _, model := range snapshot.ConfigModels {
-		snapshot.ModelConfigs = append(snapshot.ModelConfigs, *configstoreTables.ModelConfigFromTableModel(&model, nil))
-	}
-	c.local.put(tenantID, snapshot)
-	return snapshot, nil
-}
-
-func (c *redisGovernanceCache) version(ctx context.Context, tenantID string) (int64, error) {
-	return c.client.Get(ctx, c.prefix+":tenant:"+tenantID+":version").Int64()
-}
-
-func (c *redisGovernanceCache) readEntities(ctx context.Context, tenantID, kind string, target any) error {
-	values, err := c.client.HVals(ctx, c.prefix+":tenant:"+tenantID+":entities:"+kind).Result()
-	if err == redis.Nil {
-		return nil
-	}
+	raw, err := c.readEntities(ctx, tenantID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	records := make([]json.RawMessage, 0, len(values))
-	for _, value := range values {
-		var envelope struct {
-			Data json.RawMessage `json:"data"`
+	raw.Version = version
+	c.local.put(tenantID, raw)
+	return decodeGovernanceSnapshot(raw)
+}
+
+// version returns 0 when the tenant has not been seeded (redis.Nil).
+func (c *redisGovernanceCache) version(ctx context.Context, tenantID string) (int64, error) {
+	version, err := c.client.Get(ctx, c.versionKey(tenantID)).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	return version, err
+}
+
+func (c *redisGovernanceCache) versions(ctx context.Context, tenantIDs []string) (map[string]int64, error) {
+	out := make(map[string]int64, len(tenantIDs))
+	if len(tenantIDs) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(tenantIDs))
+	for i, tenantID := range tenantIDs {
+		keys[i] = c.versionKey(tenantID)
+	}
+	values, err := c.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+	for i, value := range values {
+		var version int64
+		switch v := value.(type) {
+		case string:
+			version, _ = strconv.ParseInt(v, 10, 64)
+		case int64:
+			version = v
 		}
-		if err := json.Unmarshal([]byte(value), &envelope); err != nil || len(envelope.Data) == 0 {
+		out[tenantIDs[i]] = version
+	}
+	return out, nil
+}
+
+// readEntities fetches every entity hash in one pipelined round trip and turns
+// each into a JSON array of the envelope "data" payloads.
+func (c *redisGovernanceCache) readEntities(ctx context.Context, tenantID string) (*redisGovernanceRaw, error) {
+	pipe := c.client.Pipeline()
+	commands := make([]*redis.StringSliceCmd, len(redisGovernanceEntityKinds))
+	for i, kind := range redisGovernanceEntityKinds {
+		commands[i] = pipe.HVals(ctx, c.prefix+":tenant:"+tenantID+":entities:"+kind)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	raw := &redisGovernanceRaw{Entities: make(map[string][]byte, len(commands))}
+	for i, kind := range redisGovernanceEntityKinds {
+		values, err := commands[i].Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, err
+		}
+		var buf bytes.Buffer
+		buf.WriteByte('[')
+		count := 0
+		for _, value := range values {
+			var envelope struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(value), &envelope); err != nil || len(envelope.Data) == 0 {
+				continue
+			}
+			if count > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(envelope.Data)
+			count++
+		}
+		buf.WriteByte(']')
+		raw.Entities[kind] = buf.Bytes()
+	}
+	return raw, nil
+}
+
+func decodeGovernanceSnapshot(raw *redisGovernanceRaw) (*redisGovernanceSnapshot, error) {
+	snapshot := &redisGovernanceSnapshot{Version: raw.Version}
+	targets := map[string]any{
+		"organizations": &snapshot.Organizations,
+		"virtual_keys":  &snapshot.VirtualKeys,
+		"budgets":       &snapshot.Budgets,
+		"budget_usages": &snapshot.BudgetUsages,
+		"accounts":      &snapshot.Accounts,
+		"wallets":       &snapshot.Wallets,
+		"org_units":     &snapshot.OrgUnits,
+		"rate_limits":   &snapshot.RateLimits,
+		"providers":     &snapshot.Providers,
+		"models":        &snapshot.ConfigModels,
+		"routing_rules": &snapshot.RoutingRules,
+	}
+	for kind, target := range targets {
+		body := raw.Entities[kind]
+		if len(body) == 0 {
 			continue
 		}
-		records = append(records, envelope.Data)
+		if err := json.Unmarshal(body, target); err != nil {
+			return nil, fmt.Errorf("decode governance %s: %w", kind, err)
+		}
 	}
-	body, err := json.Marshal(records)
-	if err != nil {
-		return err
+	for i := range snapshot.ConfigModels {
+		snapshot.ModelConfigs = append(snapshot.ModelConfigs, *configstoreTables.ModelConfigFromTableModel(&snapshot.ConfigModels[i], nil))
 	}
-	return json.Unmarshal(body, target)
+	return snapshot, nil
 }
 
 type tenantSnapshotLRU struct {
@@ -257,7 +332,7 @@ type tenantSnapshotLRU struct {
 
 type tenantSnapshotEntry struct {
 	tenantID string
-	snapshot *redisGovernanceSnapshot
+	snapshot *redisGovernanceRaw
 	expires  time.Time
 }
 
@@ -265,7 +340,7 @@ func newTenantSnapshotLRU(capacity int, ttl time.Duration) *tenantSnapshotLRU {
 	return &tenantSnapshotLRU{capacity: capacity, ttl: ttl, items: make(map[string]*list.Element), order: list.New()}
 }
 
-func (l *tenantSnapshotLRU) get(tenantID string) (*redisGovernanceSnapshot, bool) {
+func (l *tenantSnapshotLRU) get(tenantID string) (*redisGovernanceRaw, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	element, ok := l.items[tenantID]
@@ -282,7 +357,7 @@ func (l *tenantSnapshotLRU) get(tenantID string) (*redisGovernanceSnapshot, bool
 	return entry.snapshot, true
 }
 
-func (l *tenantSnapshotLRU) put(tenantID string, snapshot *redisGovernanceSnapshot) {
+func (l *tenantSnapshotLRU) put(tenantID string, snapshot *redisGovernanceRaw) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if existing, ok := l.items[tenantID]; ok {

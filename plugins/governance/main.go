@@ -126,6 +126,33 @@ type tenantGovernanceComponents struct {
 	resolver *BudgetResolver
 	tracker  *UsageTracker
 	engine   *RoutingEngine
+
+	// lastServedAt is when this pod last served a request for the tenant
+	// (unix nanos, written at most once per second). spendRefreshedAt is when
+	// the last spend refresh for the tenant started. A tenant not served since
+	// its last spend refresh is skipped: spend only matters to a pod when it
+	// enforces a budget, and the watermark makes the next read catch up.
+	lastServedAt     atomic.Int64
+	spendRefreshedAt atomic.Int64
+}
+
+// markServed records request activity. It writes at most once per second so
+// concurrent requests do not all contend on the same atomic, and always when
+// the recorded time predates the last spend refresh, so the first request
+// after a refresh is never missed.
+func (c *tenantGovernanceComponents) markServed() {
+	now := time.Now().UnixNano()
+	last := c.lastServedAt.Load()
+	if now-last >= int64(time.Second) || last < c.spendRefreshedAt.Load() {
+		c.lastServedAt.Store(now)
+	}
+}
+
+// needsSpendRefresh reports whether the tenant was served since its last
+// spend refresh (or has never had one).
+func (c *tenantGovernanceComponents) needsSpendRefresh() bool {
+	refreshed := c.spendRefreshedAt.Load()
+	return refreshed == 0 || c.lastServedAt.Load() >= refreshed
 }
 
 type tenantRefreshCall struct {
@@ -163,6 +190,8 @@ type GovernancePlugin struct {
 
 	tenantComponents sync.Map // string (tenantID) → *tenantGovernanceComponents
 	tenantRefreshes  sync.Map // string (tenantID) → *tenantRefreshCall
+	tenantInits      sync.Map // string (tenantID) → *tenantInitCall
+	vkMisses         sync.Map // string (tenantID + "\x00" + vkID) → vkMissEntry
 	tenantSyncOnce   sync.Once
 	tenantSyncCancel context.CancelFunc
 	redisCache       governanceSnapshotCache
@@ -316,11 +345,15 @@ func Init(
 // updates. Every warm tenant replaces its in-memory snapshot directly from
 // Redis, keeping all gateway instances coherent without request-path database
 // reads. Cold tenants remain cold until their first authenticated request.
-func (p *GovernancePlugin) StartRedisGovernanceCache() {
+//
+// reconcileInterval > 0 also starts a loop that compares each warm tenant's
+// applied version with Redis (one MGET), so a notification lost during a
+// reconnect or failover is applied within one interval instead of never.
+func (p *GovernancePlugin) StartRedisGovernanceCache(reconcileInterval time.Duration) {
 	if p == nil || p.redisCache == nil {
 		return
 	}
-	p.redisCache.start(p.ctx, func(tenantID string, _ int64) {
+	p.redisCache.start(p.ctx, func(tenantID string, version int64) {
 		raw, ok := p.tenantComponents.Load(tenantID)
 		if !ok {
 			return
@@ -332,17 +365,26 @@ func (p *GovernancePlugin) StartRedisGovernanceCache() {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			loaded, err := p.refreshTenantFromRedis(p.ctx, tenantID, comp)
-			if err != nil {
-				p.logger.Warn("failed to apply Redis governance update for tenant %s: %v", tenantID, err)
-				return
-			}
-			if !loaded {
-				p.logger.Warn("Redis governance update for tenant %s has no snapshot", tenantID)
-			}
+			p.refreshTenantToVersion(tenantID, comp, version)
 		}()
 	})
-	p.logger.Info("tenant governance Redis cache subscriber started")
+	if reconcileInterval > 0 {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			ticker := time.NewTicker(reconcileInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-p.ctx.Done():
+					return
+				case <-ticker.C:
+					p.reconcileRedisVersions()
+				}
+			}
+		}()
+	}
+	p.logger.Info("tenant governance Redis cache subscriber started (reconcile=%s)", reconcileInterval)
 }
 
 func (p *GovernancePlugin) HasRedisGovernanceCache() bool {
@@ -1788,6 +1830,14 @@ func (p *GovernancePlugin) PostLLMHook(ctx *schemas.BifrostContext, result *sche
 		// A failed attempt that will be retried must not emit an InferenceUsage event.
 		publishUsage := !failedAttemptWillBeRetried(ctx, err)
 
+		// Non-final stream chunks only record time-to-first-token. Do it inline:
+		// building a usage snapshot and a goroutine per chunk is pure overhead.
+		if !isFinalChunk && bifrost.IsStreamRequestType(requestType) {
+			if comp.tracker != nil {
+				p.rememberStreamTTFT(requestID, responseLatencyMs(result))
+			}
+			return result, err, nil
+		}
 		// Copy every value the worker needs before returning. The goroutine runs
 		// after fasthttp has released RequestCtx, so it must not read ctx or result.
 		snap := snapshotInferenceUsage(ctx, result, provider, requestedModel, requestType, effectiveVK, requestID, userID, isFinalChunk, publishUsage)

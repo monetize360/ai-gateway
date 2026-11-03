@@ -102,6 +102,18 @@ func (c *scriptedGovernanceCache) start(_ context.Context, onChanged func(string
 
 func (c *scriptedGovernanceCache) stop() {}
 
+func (c *scriptedGovernanceCache) versions(_ context.Context, tenantIDs []string) (map[string]int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int64, len(tenantIDs))
+	for _, tenantID := range tenantIDs {
+		if c.snapshot != nil {
+			out[tenantID] = c.snapshot.Version
+		}
+	}
+	return out, c.err
+}
+
 func (c *scriptedGovernanceCache) publish(tenantID string, version int64) {
 	c.mu.Lock()
 	fn := c.onChanged
@@ -270,7 +282,7 @@ func TestStartRedisGovernanceCache_UpdatesWarmSnapshotWithoutPostgres(t *testing
 		VirtualKeys: []configstoreTables.TableVirtualKey{*stale},
 	}}
 	plugin, store := newHotPathPlugin(t, []configstoreTables.TableVirtualKey{*stale}, db, cache)
-	plugin.StartRedisGovernanceCache()
+	plugin.StartRedisGovernanceCache(0)
 
 	cache.setSnapshot(&redisGovernanceSnapshot{
 		Version:     2,

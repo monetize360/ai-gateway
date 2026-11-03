@@ -9,12 +9,12 @@ import (
 
 func TestTenantSnapshotLRUEvictsLeastRecentlyUsedTenant(t *testing.T) {
 	cache := newTenantSnapshotLRU(2, time.Minute)
-	cache.put("tenant-a", &redisGovernanceSnapshot{Version: 1})
-	cache.put("tenant-b", &redisGovernanceSnapshot{Version: 2})
+	cache.put("tenant-a", &redisGovernanceRaw{Version: 1})
+	cache.put("tenant-b", &redisGovernanceRaw{Version: 2})
 	_, ok := cache.get("tenant-a")
 	require.True(t, ok)
 
-	cache.put("tenant-c", &redisGovernanceSnapshot{Version: 3})
+	cache.put("tenant-c", &redisGovernanceRaw{Version: 3})
 	_, ok = cache.get("tenant-b")
 	require.False(t, ok)
 	snapshot, ok := cache.get("tenant-a")
@@ -24,7 +24,7 @@ func TestTenantSnapshotLRUEvictsLeastRecentlyUsedTenant(t *testing.T) {
 
 func TestTenantSnapshotLRUExpiresEntries(t *testing.T) {
 	cache := newTenantSnapshotLRU(1, time.Millisecond)
-	cache.put("tenant-a", &redisGovernanceSnapshot{Version: 1})
+	cache.put("tenant-a", &redisGovernanceRaw{Version: 1})
 	time.Sleep(2 * time.Millisecond)
 
 	_, ok := cache.get("tenant-a")

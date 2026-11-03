@@ -1469,7 +1469,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			if !govPlugin.HasRedisGovernanceCache() {
 				return fmt.Errorf("tenant_store.governance_cache is required")
 			}
-			govPlugin.StartRedisGovernanceCache()
+			syncInterval := lib.TenantGovernanceSyncInterval(s.Config.TenantStoreConfig)
+			govPlugin.StartRedisGovernanceCache(syncInterval)
+			// Budget spend is written to Postgres by MPilot Rating; read it back
+			// on the same cadence, independent of Redis version bumps.
+			govPlugin.StartTenantSpendRefresh(syncInterval)
 		}
 		if s.Config.TenantStore != nil && s.Config.TenantStore.Manager != nil {
 			// Governance caches per-tenant components holding a reference to the tenant

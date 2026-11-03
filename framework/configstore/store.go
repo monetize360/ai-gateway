@@ -240,6 +240,9 @@ type ConfigStore interface {
 
 	// BudgetUsage (billing budgetusage__m — PreLLM spend scopes)
 	GetBudgetUsages(ctx context.Context) ([]tables.TableBudgetUsage, error)
+	// GetBudgetUsagesChangedSince returns BudgetUsage rows updated at or after since,
+	// including soft-deleted rows (Deleted=true) so callers can drop them.
+	GetBudgetUsagesChangedSince(ctx context.Context, since time.Time) ([]tables.TableBudgetUsage, error)
 	// Accounts (billing account__m — PreLLM account hierarchy walk)
 	GetAccounts(ctx context.Context) ([]tables.TableAccount, error)
 	GetWallets(ctx context.Context) ([]tables.TableWallet, error)
