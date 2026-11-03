@@ -243,6 +243,37 @@ func TestReconcileRedisVersions_AppliesMissedUpdate(t *testing.T) {
 	assert.EqualValues(t, 2, store.RedisVersion())
 }
 
+func TestReconcileRedisVersions_FailedSnapshotReadKeepsVersionAndRetries(t *testing.T) {
+	vk := buildVirtualKey("vk-1", "vk-1", "v1", true)
+	cache := &scriptedGovernanceCache{snapshot: &redisGovernanceSnapshot{Version: 1, VirtualKeys: []configstoreTables.TableVirtualKey{*vk}}}
+	plugin, store := newHotPathPlugin(t, []configstoreTables.TableVirtualKey{*vk}, &virtualKeyCounter{}, cache)
+	plugin.refreshTenantToVersion(testTenantID, plugin.loadTenantComponents(testTenantID), 1)
+
+	// Version 2 is published, but its entity hashes cannot be fully decoded.
+	cache.setSnapshot(&redisGovernanceSnapshot{Version: 2, VirtualKeys: []configstoreTables.TableVirtualKey{
+		*buildVirtualKey(vk.ID, vk.Value, "v2", true),
+	}})
+	cache.mu.Lock()
+	cache.loadErr = errors.New("decode governance virtual_keys entry: bad")
+	cache.mu.Unlock()
+	plugin.reconcileRedisVersions()
+
+	assert.EqualValues(t, 1, store.RedisVersion(), "a failed read must not commit the new version")
+	kept, ok := store.GetVirtualKey(context.Background(), vk.ID)
+	require.True(t, ok, "entities must survive a failed read")
+	assert.Equal(t, "v1", kept.Name)
+
+	// Once Redis reads cleanly, the next reconcile applies it.
+	cache.mu.Lock()
+	cache.loadErr = nil
+	cache.mu.Unlock()
+	plugin.reconcileRedisVersions()
+	assert.EqualValues(t, 2, store.RedisVersion())
+	current, ok := store.GetVirtualKey(context.Background(), vk.ID)
+	require.True(t, ok)
+	assert.Equal(t, "v2", current.Name)
+}
+
 func TestReplaceFromRedisSnapshot_PreservesLocalCountersAndDatabaseOnlyRows(t *testing.T) {
 	limit := int64(1000)
 	store, err := newEmptyLocalGovernanceStore(NewMockLogger(), nil, nil)

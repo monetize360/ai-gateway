@@ -76,6 +76,7 @@ type scriptedGovernanceCache struct {
 	loads     atomic.Int32
 	snapshot  *redisGovernanceSnapshot
 	err       error
+	loadErr   error // fails load only, leaving versions answering
 	block     chan struct{}
 	onChanged func(string, int64)
 }
@@ -91,6 +92,9 @@ func (c *scriptedGovernanceCache) load(ctx context.Context, _ string) (*redisGov
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.loadErr != nil {
+		return nil, c.loadErr
+	}
 	return c.snapshot, c.err
 }
 

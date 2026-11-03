@@ -270,26 +270,40 @@ func (c *redisGovernanceCache) readEntities(ctx context.Context, tenantID string
 		if err != nil && !errors.Is(err, redis.Nil) {
 			return nil, err
 		}
-		var buf bytes.Buffer
-		buf.WriteByte('[')
-		count := 0
-		for _, value := range values {
-			var envelope struct {
-				Data json.RawMessage `json:"data"`
-			}
-			if err := json.Unmarshal([]byte(value), &envelope); err != nil || len(envelope.Data) == 0 {
-				continue
-			}
-			if count > 0 {
-				buf.WriteByte(',')
-			}
-			buf.Write(envelope.Data)
-			count++
+		body, err := joinEntityEnvelopes(kind, values)
+		if err != nil {
+			return nil, err
 		}
-		buf.WriteByte(']')
-		raw.Entities[kind] = buf.Bytes()
+		raw.Entities[kind] = body
 	}
 	return raw, nil
+}
+
+// joinEntityEnvelopes turns one entity hash's values into a JSON array of their
+// envelope "data" payloads. Any value that cannot be decoded fails the whole
+// read: applying a snapshot with entities missing would commit its version as
+// current, so reconcile would never retry while the sweep dropped the omitted
+// entities from memory. Failing keeps the current view until a clean read.
+func joinEntityEnvelopes(kind string, values []string) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, value := range values {
+		var envelope struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(value), &envelope); err != nil {
+			return nil, fmt.Errorf("decode governance %s entry: %w", kind, err)
+		}
+		if len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+			return nil, fmt.Errorf("decode governance %s entry: missing data payload", kind)
+		}
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(envelope.Data)
+	}
+	buf.WriteByte(']')
+	return buf.Bytes(), nil
 }
 
 func decodeGovernanceSnapshot(raw *redisGovernanceRaw) (*redisGovernanceSnapshot, error) {
