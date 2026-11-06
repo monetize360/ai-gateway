@@ -280,9 +280,39 @@ spec:
               subPath: config.yaml
               readOnly: true
             {{- end }}
+            {{- if and .Values.nemoGuardrails .Values.nemoGuardrails.enabled }}
+            - name: nemo-configs
+              mountPath: /nemo-configs
+            {{- end }}
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+        {{- if and .Values.nemoGuardrails .Values.nemoGuardrails.enabled }}
+        - name: nemo-guardrails
+          image: "{{ .Values.nemoGuardrails.image.repository }}:{{ .Values.nemoGuardrails.image.tag }}"
+          imagePullPolicy: {{ .Values.nemoGuardrails.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp -RL /shipped/config.py /shipped/starter-input-output /shipped/starter-jailbreak /configs/ && exec /watch.sh"]
+          ports:
+            - name: nemo
+              containerPort: 8084
+          env:
+            - name: M360_GATEWAY_URL
+              value: {{ .Values.nemoGuardrails.gatewayUrl | quote }}
+          volumeMounts:
+            - name: nemo-guardrails-config
+              mountPath: /shipped
+              readOnly: true
+            - name: nemo-configs
+              mountPath: /configs
+        {{- end }}
+        {{- if and .Values.presidioAnalyzer .Values.presidioAnalyzer.enabled }}
+        - name: presidio-analyzer
+          image: "{{ .Values.presidioAnalyzer.image.repository }}:{{ .Values.presidioAnalyzer.image.tag }}"
+          imagePullPolicy: {{ .Values.presidioAnalyzer.image.pullPolicy }}
+          ports:
+            - name: presidio
+              containerPort: 3000
+        {{- end }}
       volumes:
         - name: config
           {{- if .Values.bifrost.existingConfigSecret }}
@@ -296,6 +326,24 @@ spec:
         - name: semantic-router-recipe
           configMap:
             name: {{ include "bifrost.fullname" . }}-semantic-router-recipe
+        {{- end }}
+        {{- if and .Values.nemoGuardrails .Values.nemoGuardrails.enabled }}
+        - name: nemo-guardrails-config
+          configMap:
+            name: {{ include "bifrost.fullname" . }}-nemo-guardrails
+            items:
+              - key: config.py
+                path: config.py
+              - key: starter-input-output-config.yml
+                path: starter-input-output/config.yml
+              - key: starter-input-output-rails.co
+                path: starter-input-output/rails.co
+              - key: starter-jailbreak-config.yml
+                path: starter-jailbreak/config.yml
+              - key: starter-jailbreak-rails.co
+                path: starter-jailbreak/rails.co
+        - name: nemo-configs
+          emptyDir: {}
         {{- end }}
         {{- if eq .Values.storage.mode "sqlite" }}
         - name: data

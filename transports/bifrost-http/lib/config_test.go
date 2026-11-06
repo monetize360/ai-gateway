@@ -1299,6 +1299,18 @@ func (m *MockConfigStore) DeleteOrphanedOauthUserTokens(ctx context.Context, old
 }
 
 // Routing rules
+func (m *MockConfigStore) GetGuardrailPolicies(ctx context.Context) ([]tables.TableGuardrailPolicy, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetGuardrailBindings(ctx context.Context) ([]tables.TableGuardrailBinding, error) {
+	return nil, nil
+}
+
+func (m *MockConfigStore) GetGuardrailNemoConfigs(ctx context.Context) ([]tables.TableGuardrailNemoConfig, error) {
+	return nil, nil
+}
+
 func (m *MockConfigStore) GetRoutingRules(ctx context.Context) ([]tables.TableRoutingRule, error) {
 	return nil, nil
 }

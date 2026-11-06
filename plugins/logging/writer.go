@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/logstore"
 )
@@ -528,5 +529,17 @@ func applyOutputFieldsToEntry(
 	}
 	if len(attemptTrail) > 0 {
 		entry.AttemptTrailParsed = attemptTrail
+	}
+}
+
+func applyGuardrailFields(ctx *schemas.BifrostContext, entry *logstore.Log) {
+	if ctx == nil || entry == nil {
+		return
+	}
+	if decision := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGuardrailDecision); decision != "" {
+		entry.GuardrailDecision = &decision
+	}
+	if details := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGuardrailDetails); details != "" {
+		entry.GuardrailDetails = &details
 	}
 }

@@ -210,6 +210,7 @@ func (h *LoggingHandler) shouldHideDeletedVirtualKeysInFilters() bool {
 
 // RegisterRoutes registers all logging-related routes
 func (h *LoggingHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.GET("/api/logs", lib.ChainMiddlewares(h.getLogs, middlewares...))
 	// MCP Tool Log retrieval with filtering, search, and pagination
 	r.GET("/api/mcp-logs", lib.ChainMiddlewares(h.getMCPLogs, middlewares...))
 	r.GET("/api/mcp-logs/stats", lib.ChainMiddlewares(h.getMCPLogsStats, middlewares...))
@@ -437,6 +438,20 @@ func (h *LoggingHandler) getLogs(ctx *fasthttp.RequestCtx) {
 	}
 	if contentSearch := string(ctx.QueryArgs().Peek("content_search")); contentSearch != "" {
 		filters.ContentSearch = contentSearch
+	}
+	if decisions := string(ctx.QueryArgs().Peek("guardrail_decisions")); decisions != "" {
+		filters.GuardrailDecisions = parseCommaSeparated(decisions)
+	}
+	if policy := string(ctx.QueryArgs().Peek("guardrail_policy")); policy != "" {
+		filters.GuardrailPolicy = policy
+	}
+	if only := string(ctx.QueryArgs().Peek("guardrail_only")); only != "" {
+		if val, err := strconv.ParseBool(only); err == nil {
+			filters.GuardrailOnly = val
+		}
+	}
+	if orgIDs := string(ctx.QueryArgs().Peek("scope_org_ids")); orgIDs != "" {
+		filters.ScopeOrgIDs = parseCommaSeparated(orgIDs)
 	}
 	parseMetadataFilters(ctx, filters)
 

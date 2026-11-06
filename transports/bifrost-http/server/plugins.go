@@ -10,6 +10,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/plugins/governance"
+	"github.com/maximhq/bifrost/plugins/guardrails"
 	"github.com/maximhq/bifrost/plugins/kafka"
 	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/plugins/maxim"
@@ -119,6 +120,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, err
 		}
 		return governancePlugin, nil
+
+	case guardrails.PluginName:
+		guardrailConfig, err := MarshalPluginConfig[guardrails.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal guardrails plugin config: %w", err)
+		}
+		return guardrails.Init(ctx, guardrailConfig, logger, bifrostConfig.Registry())
 
 	case semanticrouter.PluginName:
 		srConfig, err := MarshalPluginConfig[semanticrouter.Config](pluginConfig)
@@ -285,6 +293,17 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 		s.markPluginDisabled(governance.PluginName)
 	}
 	s.Config.SetPluginOrderInfo(governance.PluginName, builtinPlacement, schemas.Ptr(4))
+
+	// Guardrails run after governance and the semantic router so virtual key, org,
+	// org unit, provider, and model are already resolved. Order 40 sits after the
+	// semantic router (35) and before later observability plugins in post-hook reverse.
+	guardrailCfg := s.getPluginConfig(guardrails.PluginName)
+	if guardrailCfg != nil && guardrailCfg.Enabled {
+		s.registerPluginWithStatus(ctx, guardrails.PluginName, nil, guardrailCfg.Config, false)
+	} else {
+		s.markPluginDisabled(guardrails.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(guardrails.PluginName, builtinPlacement, schemas.Ptr(40))
 
 	// 5. OTEL (if configured in PluginConfigs)
 	otelConfig := s.getPluginConfig(otel.PluginName)
