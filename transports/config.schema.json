@@ -1740,6 +1740,103 @@
             "if": {
               "properties": {
                 "name": {
+                  "const": "billing-reservation"
+                }
+              }
+            },
+            "then": {
+              "required": ["config"],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "description": "MPilot centralized balance reservation. One call reserves the estimated amount and marks the hold in progress before provider dispatch. MPilot Rating settles it from the existing Kafka InferenceUsage request ID.",
+                  "properties": {
+                    "base_url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Absolute MPilot API base URL for the reservation service."
+                    },
+                    "reserve_path": {
+                      "type": "string",
+                      "pattern": "^/",
+                      "default": "/api/v1/balance/reservations",
+                      "description": "Relative MPilot reservation path."
+                    },
+                    "timeout_ms": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5000,
+                      "default": 500,
+                      "description": "Bounded HTTP timeout for MPilot reservation calls."
+                    },
+                    "fail_closed": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Reject provider calls when reservation, tenant identity, or a usable estimate is unavailable."
+                    },
+                    "default_input_tokens": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 0,
+                      "description": "Conservative input-token allowance when prompt tokenization is unavailable. When 0/unset, the plugin holds output_cost_per_token * 10000 for input."
+                    },
+                    "default_max_output_tokens": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 10000,
+                      "description": "Fallback output-token bound when the request and model estimate omit one. Defaults to 10000 when unset."
+                    },
+                    "authorization": {
+                      "description": "Optional Authorization header value (plain string or env var reference).",
+                      "oneOf": [
+                        { "type": "string" },
+                        { "$ref": "#/$defs/env_var" }
+                      ]
+                    },
+                    "additional_headers": {
+                      "type": "object",
+                      "additionalProperties": { "type": "string" },
+                      "description": "Additional static headers sent only to MPilot."
+                    },
+                    "model_estimates": {
+                      "type": "object",
+                      "description": "Optional pricing/output limits keyed by provider/model, overriding the embedded catalog.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "input_cost_per_token": { "type": "number", "minimum": 0 },
+                          "output_cost_per_token": { "type": "number", "minimum": 0 },
+                          "max_output_tokens": { "type": "integer", "minimum": 0 }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "tenant_funding": {
+                      "type": "object",
+                      "description": "Tenant ID to authoritative MPilot customer-wallet mapping. Required for every tenant using the plugin.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "account_id": { "type": "string", "format": "uuid" },
+                          "wallet_id": { "type": "string", "format": "uuid" },
+                          "currency_id": { "type": "string", "format": "uuid" },
+                          "pricing_version": { "type": "string" }
+                        },
+                        "required": ["account_id", "wallet_id", "currency_id"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["base_url"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
                   "const": "maxim"
                 }
               }

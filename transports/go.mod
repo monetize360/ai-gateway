@@ -15,6 +15,7 @@ require (
 	github.com/mark3labs/mcp-go v0.43.2
 	github.com/maximhq/bifrost/core v1.5.12
 	github.com/maximhq/bifrost/framework v1.3.12
+	github.com/maximhq/bifrost/plugins/billingreservation v0.0.0
 	github.com/maximhq/bifrost/plugins/compat v0.1.11
 	github.com/maximhq/bifrost/plugins/governance v1.5.12
 	github.com/maximhq/bifrost/plugins/kafka v0.1.0
@@ -39,6 +40,8 @@ require (
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )
+
+replace github.com/maximhq/bifrost/plugins/billingreservation => ../plugins/billingreservation
 
 require (
 	cel.dev/expr v0.25.2 // indirect
