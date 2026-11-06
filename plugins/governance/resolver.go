@@ -341,9 +341,14 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 			Reason:   "Virtual key is inactive",
 		}
 	}
+	// A guardrail's own model call uses the provider and model the policy author chose. The
+	// caller's provider and model rules decide what the caller may request, not which model
+	// protects them, so they are skipped for that call. The key must still be active, within
+	// its budgets and rate limits, and use its own provider keys, and the spend lands on it.
+	skipCallerAccessRules := schemas.IsGuardrailInternalCall(ctx)
 	// 2a. Check provider access policy (org → org-unit → user → VK)
 	var scopedPolicies scopedAccessPolicies
-	if requestType != schemas.MCPToolExecutionRequest {
+	if requestType != schemas.MCPToolExecutionRequest && !skipCallerAccessRules {
 		scopedPolicies = r.resolveScopedAccess(ctx, vk)
 		if allowed, reason := isProviderAllowedByAccessPolicy(vk, provider, scopedPolicies.orgUnitProviderPolicy, scopedPolicies.userProviderPolicy); !allowed {
 			return &EvaluationResult{
@@ -354,7 +359,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 		}
 	}
 	// 2b. Check provider filtering (legacy provider config check)
-	if requestType != schemas.MCPToolExecutionRequest && !r.isProviderAllowed(vk, provider) {
+	if requestType != schemas.MCPToolExecutionRequest && !skipCallerAccessRules && !r.isProviderAllowed(vk, provider) {
 		return &EvaluationResult{
 			Decision:   DecisionProviderBlocked,
 			Reason:     fmt.Sprintf("Provider '%s' is not allowed for this virtual key", provider),
@@ -363,7 +368,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	}
 	// 3. Check model filtering. The reason names the layer that denied the model
 	// (organization, organizational unit, user, or virtual key).
-	if r.isModelRequired(requestType) {
+	if !skipCallerAccessRules && r.isModelRequired(requestType) {
 		if reason := r.modelDenialReason(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs); reason != "" {
 			return &EvaluationResult{
 				Decision:   DecisionModelBlocked,

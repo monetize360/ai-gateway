@@ -1,0 +1,20 @@
+{{- if and .Values.nemoGuardrails .Values.nemoGuardrails.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bifrost.fullname" . }}-nemo-guardrails
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bifrost.labels" . | nindent 4 }}
+data:
+  config.py: |
+{{ .Files.Get "files/nemo/config.py" | nindent 4 }}
+  starter-input-output-config.yml: |
+{{ .Files.Get "files/nemo/starter-input-output/config.yml" | nindent 4 }}
+  starter-input-output-rails.co: |
+{{ .Files.Get "files/nemo/starter-input-output/rails.co" | nindent 4 }}
+  starter-jailbreak-config.yml: |
+{{ .Files.Get "files/nemo/starter-jailbreak/config.yml" | nindent 4 }}
+  starter-jailbreak-rails.co: |
+{{ .Files.Get "files/nemo/starter-jailbreak/rails.co" | nindent 4 }}
+{{- end }}

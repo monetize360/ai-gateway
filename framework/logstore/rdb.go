@@ -117,6 +117,19 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 	if len(filters.VirtualKeyIDs) > 0 {
 		baseQuery = baseQuery.Where("virtual_key_id IN ?", filters.VirtualKeyIDs)
 	}
+	if len(filters.ScopeOrgIDs) > 0 {
+		baseQuery = baseQuery.Where("scope_org_id IN ?", filters.ScopeOrgIDs)
+	}
+	if len(filters.GuardrailDecisions) > 0 {
+		baseQuery = baseQuery.Where("guardrail_decision IN ?", filters.GuardrailDecisions)
+	}
+	if filters.GuardrailOnly {
+		baseQuery = baseQuery.Where("guardrail_decision IS NOT NULL AND guardrail_decision <> ''")
+	}
+	if policy := strings.TrimSpace(filters.GuardrailPolicy); policy != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(policy)
+		baseQuery = baseQuery.Where("LOWER(guardrail_details) LIKE ? ESCAPE '\\'", "%"+strings.ToLower(escaped)+"%")
+	}
 	if len(filters.RoutingRuleIDs) > 0 {
 		baseQuery = baseQuery.Where("routing_rule_id IN ?", filters.RoutingRuleIDs)
 	}

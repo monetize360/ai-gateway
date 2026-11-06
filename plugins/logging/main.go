@@ -60,6 +60,8 @@ type UpdateLogData struct {
 	RawResponse            any
 	IsLargePayloadRequest  bool // When true, RawRequest is a truncated preview string (skip sonic.Marshal)
 	IsLargePayloadResponse bool // When true, RawResponse is a truncated preview string (skip sonic.Marshal)
+	GuardrailDecision      string
+	GuardrailDetails       string
 }
 
 // applyLargePayloadPreviews reads large payload/response preview strings from context
@@ -868,6 +870,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 				entry.ClusterNodeID = &nodeID
 			}
 			applyVirtualKeyOrgToEntry(entry, virtualKeyID, governanceOrgID)
+			applyGuardrailFields(ctx, entry)
 			applyLargePayloadPreviewsToEntry(ctx, entry, contentLoggingEnabled)
 			p.storeOrEnqueueEntry(ctx, entry, p.makePostWriteCallback(nil))
 		} else {
@@ -934,6 +937,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 		}
 	}
 	applyOutputFieldsToEntry(entry, selectedKeyID, selectedKeyName, virtualKeyID, virtualKeyName, governanceOrgID, routingRuleID, routingRuleName, routingQueryParams, routingSourceProviderID, routingSourceModelID, governanceDecision, selectedPromptID, selectedPromptName, selectedPromptVersion, numberOfRetries, latency, attemptTrail)
+	applyGuardrailFields(ctx, entry)
 	// Attach cluster governance metadata for disconnected node usage recovery
 	if nodeID, _ := p.clusterNodeID.Load().(string); nodeID != "" {
 		entry.ClusterNodeID = &nodeID

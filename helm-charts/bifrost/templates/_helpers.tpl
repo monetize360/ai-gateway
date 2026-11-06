@@ -1047,6 +1047,12 @@ false
 {{- if hasKey .Values.bifrost.plugins.governance "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.governance.version | int) }}{{- end }}
 {{- $plugins = append $plugins $plugin }}
 {{- end }}
+{{- if and .Values.bifrost.plugins.guardrails .Values.bifrost.plugins.guardrails.enabled }}
+{{- $guardrailConfig := .Values.bifrost.plugins.guardrails.config | default dict }}
+{{- $plugin := dict "enabled" true "name" "guardrails" "config" $guardrailConfig }}
+{{- if hasKey .Values.bifrost.plugins.guardrails "version" }}{{- $_ := set $plugin "version" (.Values.bifrost.plugins.guardrails.version | int) }}{{- end }}
+{{- $plugins = append $plugins $plugin }}
+{{- end }}
 {{- if .Values.bifrost.plugins.maxim.enabled }}
 {{- $maximConfig := dict }}
 {{- if and .Values.bifrost.plugins.maxim.secretRef .Values.bifrost.plugins.maxim.secretRef.name }}

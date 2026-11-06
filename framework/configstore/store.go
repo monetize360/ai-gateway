@@ -266,6 +266,11 @@ type ConfigStore interface {
 	UpdateRoutingRule(ctx context.Context, rule *tables.TableRoutingRule, tx ...*gorm.DB) error
 	DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error
 
+	// Guardrails (read-only; MPilot owns writes)
+	GetGuardrailPolicies(ctx context.Context) ([]tables.TableGuardrailPolicy, error)
+	GetGuardrailBindings(ctx context.Context) ([]tables.TableGuardrailBinding, error)
+	GetGuardrailNemoConfigs(ctx context.Context) ([]tables.TableGuardrailNemoConfig, error)
+
 	// Model config CRUD
 	GetModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error)
 	GetModelConfigsPaginated(ctx context.Context, params ModelConfigsQueryParams) ([]tables.TableModelConfig, int64, error)
