@@ -22,6 +22,14 @@ const (
 	PluginName = "billing-reservation"
 
 	reservationContextKey schemas.BifrostContextKey = "mpilot-billing-reservation"
+
+	// defaultInputTokenAllowance is used when default_input_tokens is unset and the
+	// prompt is not tokenized. The hold prices that allowance at the model's output
+	// rate so a large prompt cannot pass a reservation sized only for completion tokens.
+	defaultInputTokenAllowance = 10_000
+	// defaultMaxOutputTokenAllowance is used when the request, model estimate, and
+	// default_max_output_tokens are all unset.
+	defaultMaxOutputTokenAllowance = 10_000
 )
 
 // Config configures the MPilot balance-reservation API.
@@ -113,6 +121,9 @@ func Init(config *Config, catalog *modelcatalog.ModelCatalog, logger schemas.Log
 	}
 	if normalized.TimeoutMS > 5000 {
 		return nil, fmt.Errorf("timeout_ms must not exceed 5000")
+	}
+	if normalized.DefaultMaxOutputTokens <= 0 {
+		normalized.DefaultMaxOutputTokens = defaultMaxOutputTokenAllowance
 	}
 	if normalized.ModelEstimates == nil {
 		normalized.ModelEstimates = make(map[string]ModelEstimate)
@@ -282,7 +293,16 @@ func (p *Plugin) estimate(req *schemas.BifrostRequest, provider schemas.ModelPro
 	if p.config.DefaultInputTokens < 0 || outputTokens < 0 {
 		return estimate{}, fmt.Errorf("token estimates cannot be negative")
 	}
-	return estimate{inputTokens: p.config.DefaultInputTokens, outputTokens: outputTokens, inputCostPerToken: *inputRate, outputCostPerToken: *outputRate}, nil
+	inputTokens := p.config.DefaultInputTokens
+	inputCostPerToken := *inputRate
+	if inputTokens == 0 {
+		// Prompt inspection is unavailable here; reserve a conservative input
+		// floor of output_cost_per_token * 10_000 so settlement cannot exceed a
+		// hold that ignored prompt size.
+		inputTokens = defaultInputTokenAllowance
+		inputCostPerToken = *outputRate
+	}
+	return estimate{inputTokens: inputTokens, outputTokens: outputTokens, inputCostPerToken: inputCostPerToken, outputCostPerToken: *outputRate}, nil
 }
 
 func requestedMaxOutputTokens(req *schemas.BifrostRequest) int {

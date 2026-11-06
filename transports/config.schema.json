@@ -1778,12 +1778,13 @@
                       "type": "integer",
                       "minimum": 0,
                       "default": 0,
-                      "description": "Conservative input-token allowance when prompt tokenization is unavailable."
+                      "description": "Conservative input-token allowance when prompt tokenization is unavailable. When 0/unset, the plugin holds output_cost_per_token * 10000 for input."
                     },
                     "default_max_output_tokens": {
                       "type": "integer",
                       "minimum": 0,
-                      "description": "Fallback output-token bound when the request and model estimate omit one."
+                      "default": 10000,
+                      "description": "Fallback output-token bound when the request and model estimate omit one. Defaults to 10000 when unset."
                     },
                     "authorization": {
                       "description": "Optional Authorization header value (plain string or env var reference).",

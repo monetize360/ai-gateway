@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	bifrost "github.com/maximhq/bifrost/core"
@@ -61,14 +62,88 @@ func TestPluginReservesWithRequestIdempotency(t *testing.T) {
 	if _, shortCircuit, err := plugin.PreLLMHook(ctx, req); err != nil || shortCircuit != nil {
 		t.Fatalf("PreLLMHook() = shortCircuit %v, err %v", shortCircuit, err)
 	}
-	if reserve.RequestID != "request-1" || reserve.Amount == "" || reserve.Metadata["estimatedOutputTokens"] != float64(40) {
-		t.Fatalf("reserve = %+v", reserve)
+	// Unset default_input_tokens holds output_cost_per_token * 10_000 for input.
+	wantAmount := strconv.FormatFloat(10_000*outputRate+40*outputRate, 'f', 8, 64)
+	if reserve.RequestID != "request-1" || reserve.Amount != wantAmount ||
+		reserve.Metadata["estimatedInputTokens"] != float64(10_000) ||
+		reserve.Metadata["estimatedOutputTokens"] != float64(40) {
+		t.Fatalf("reserve = %+v, want amount %s", reserve, wantAmount)
 	}
 	if _, _, err := plugin.PostLLMHook(ctx, &schemas.BifrostResponse{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := plugin.Cleanup(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEstimateDefaultsInputHoldToOutputCostTimesAllowance(t *testing.T) {
+	t.Parallel()
+
+	inputRate, outputRate := 0.001, 0.002
+	plugin, err := Init(&Config{
+		BaseURL: "https://mpilot.example",
+		ModelEstimates: map[string]ModelEstimate{"openai/test-model": {
+			InputCostPerToken:  &inputRate,
+			OutputCostPerToken: &outputRate,
+			MaxOutputTokens:    10,
+		}},
+	}, nil, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := plugin.estimate(&schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{
+		Provider: schemas.OpenAI,
+		Model:    "test-model",
+	}}, schemas.OpenAI, "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.inputTokens != 10_000 || got.inputCostPerToken != outputRate || got.amount() != strconv.FormatFloat(10_000*outputRate+10*outputRate, 'f', 8, 64) {
+		t.Fatalf("estimate = %+v amount=%s", got, got.amount())
+	}
+
+	plugin.config.DefaultInputTokens = 1_000
+	got, err = plugin.estimate(&schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{
+		Provider: schemas.OpenAI,
+		Model:    "test-model",
+	}}, schemas.OpenAI, "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.inputTokens != 1_000 || got.inputCostPerToken != inputRate || got.amount() != strconv.FormatFloat(1_000*inputRate+10*outputRate, 'f', 8, 64) {
+		t.Fatalf("explicit default_input_tokens estimate = %+v amount=%s", got, got.amount())
+	}
+
+	plugin.config.DefaultInputTokens = 0
+	plugin.config.DefaultMaxOutputTokens = 10_000
+	got, err = plugin.estimate(&schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{
+		Provider: schemas.OpenAI,
+		Model:    "test-model",
+	}}, schemas.OpenAI, "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model estimate MaxOutputTokens=10 still wins over the 10k default.
+	if got.outputTokens != 10 {
+		t.Fatalf("outputTokens = %d, want model estimate 10", got.outputTokens)
+	}
+
+	plugin.config.ModelEstimates = map[string]ModelEstimate{"openai/test-model": {
+		InputCostPerToken:  &inputRate,
+		OutputCostPerToken: &outputRate,
+	}}
+	got, err = plugin.estimate(&schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{
+		Provider: schemas.OpenAI,
+		Model:    "test-model",
+	}}, schemas.OpenAI, "test-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.inputTokens != 10_000 || got.outputTokens != 10_000 ||
+		got.amount() != strconv.FormatFloat(10_000*outputRate+10_000*outputRate, 'f', 8, 64) {
+		t.Fatalf("default output estimate = %+v amount=%s", got, got.amount())
 	}
 }
 
