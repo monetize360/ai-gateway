@@ -269,7 +269,7 @@ func (mc *ModelCatalog) SeedForTest(logger schemas.Logger, models []TestModel) {
 			SupportsPDFInput:   model.SupportsPDFInput,
 			SupportsAudioInput: model.SupportsAudioInput,
 			Categories:         append([]string(nil), model.Categories...),
-			CapabilityTier:    string(model.CapabilityTier),
+			CapabilityTier:     string(model.CapabilityTier),
 			SupportsReasoning:  model.SupportsReasoning,
 			Status:             string(model.Status),
 		}
@@ -284,4 +284,24 @@ func (mc *ModelCatalog) SeedForTest(logger schemas.Logger, models []TestModel) {
 			mc.unfilteredModelPool[model.Provider] = append(mc.unfilteredModelPool[model.Provider], model.Model)
 		}
 	}
+}
+
+// SeedPricingForTest stores one catalog row, including unit rates SeedForTest does
+// not carry. mode is the datasheet mode, for example "embedding" or "image_generation".
+func (mc *ModelCatalog) SeedPricingForTest(logger schemas.Logger, provider, model, mode string, pricing configstoreTables.TableModelPricing) {
+	if mc == nil {
+		return
+	}
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if mc.logger == nil {
+		mc.logger = logger
+	}
+	if mc.pricingData == nil {
+		mc.pricingData = make(map[string]configstoreTables.TableModelPricing)
+	}
+	pricing.Provider = provider
+	pricing.Model = model
+	pricing.Mode = mode
+	mc.pricingData[makeKey(model, provider, mode)] = pricing
 }

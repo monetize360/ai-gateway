@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/billingreservation"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/kafka"
@@ -154,6 +155,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal kafka plugin config: %w", err)
 		}
 		return kafka.Init(ctx, kafkaConfig, logger)
+
+	case billingreservation.PluginName:
+		reservationConfig, err := MarshalPluginConfig[billingreservation.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal billing reservation plugin config: %w", err)
+		}
+		return billingreservation.Init(reservationConfig, bifrostConfig.ModelCatalog, logger)
 
 	case compat.PluginName:
 		compatConfig, err := MarshalPluginConfig[compat.Config](pluginConfig)
@@ -332,6 +340,16 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 		s.markPluginDisabled(kafka.PluginName)
 	}
 	s.Config.SetPluginOrderInfo(kafka.PluginName, builtinPlacement, schemas.Ptr(9))
+
+	// 10. MPilot wallet holds. It runs after governance and semantic cache:
+	// one call reserves an ACTIVE hold before provider dispatch.
+	reservationPluginConfig := s.getPluginConfig(billingreservation.PluginName)
+	if reservationPluginConfig != nil && reservationPluginConfig.Enabled {
+		s.registerPluginWithStatus(ctx, billingreservation.PluginName, nil, reservationPluginConfig.Config, false)
+	} else {
+		s.markPluginDisabled(billingreservation.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(billingreservation.PluginName, builtinPlacement, schemas.Ptr(10))
 
 	return nil
 }

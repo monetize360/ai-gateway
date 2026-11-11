@@ -1168,14 +1168,239 @@ func populateOutputImageCount(imageUsage *schemas.ImageUsage, dataLen int) {
 
 // GetChatTokenRates returns chat input/output per-token rates from the embedded catalog.
 func (mc *ModelCatalog) GetChatTokenRates(provider, modelName string) (inputCost, outputCost *float64) {
-	if mc == nil || modelName == "" {
-		return nil, nil
-	}
-	pricing := mc.resolvePricing(provider, modelName, modelName, schemas.ChatCompletionRequest)
+	pricing := mc.ResolvePricing(provider, modelName, schemas.ChatCompletionRequest)
 	if pricing == nil {
 		return nil, nil
 	}
 	return pricing.InputCostPerToken, pricing.OutputCostPerToken
+}
+
+// ResolvePricing returns the catalog row CalculateCost would use for this
+// operation. The result is a copy safe for the caller to overlay.
+func (mc *ModelCatalog) ResolvePricing(provider, modelName string, requestType schemas.RequestType) *configstoreTables.TableModelPricing {
+	if mc == nil || modelName == "" {
+		return nil
+	}
+	return mc.resolvePricing(provider, modelName, modelName, requestType)
+}
+
+// OperationBound is a pre-call ceiling for one non-chat operation. Quantities are
+// already resolved by the caller. EstimateResolvedCost applies the same unit
+// order as CalculateCost and returns the larger of the alternatives settlement
+// might choose (tokens versus seconds, tokens versus images).
+type OperationBound struct {
+	InputTokens     int
+	OutputTokens    int
+	InputCharacters int
+	AudioSeconds    int
+	OutputImages    int
+	InputImages     int
+	ImageSize       string
+	ImageQuality    string
+}
+
+// EstimateResolvedCost prices a resolved catalog row for a reservation.
+// ok is false when the row has no positive rate for the request type.
+func EstimateResolvedCost(pricing *configstoreTables.TableModelPricing, requestType schemas.RequestType, bound OperationBound) (float64, bool) {
+	if pricing == nil {
+		return 0, false
+	}
+	var cost float64
+	switch requestType {
+	case schemas.EmbeddingRequest:
+		cost = estimateEmbeddingCost(pricing, bound)
+	case schemas.SpeechRequest, schemas.SpeechStreamRequest:
+		cost = estimateSpeechCost(pricing, bound)
+	case schemas.TranscriptionRequest, schemas.TranscriptionStreamRequest:
+		cost = estimateTranscriptionCost(pricing, bound)
+	case schemas.ImageGenerationRequest, schemas.ImageGenerationStreamRequest,
+		schemas.ImageEditRequest, schemas.ImageEditStreamRequest, schemas.ImageVariationRequest:
+		cost = estimateImageCost(pricing, bound)
+	default:
+		return 0, false
+	}
+	return cost, cost > 0
+}
+
+func estimateEmbeddingCost(pricing *configstoreTables.TableModelPricing, bound OperationBound) float64 {
+	tokens := bound.InputTokens
+	if tokens < 0 {
+		tokens = 0
+	}
+	if rate := tieredInputRate(pricing, tokens, serviceTier{}); rate > 0 && tokens > 0 {
+		return float64(tokens) * rate
+	}
+	if ratePositive(pricing.InputCostPerCharacter) && bound.InputCharacters > 0 {
+		return float64(bound.InputCharacters) * *pricing.InputCostPerCharacter
+	}
+	return 0
+}
+
+func estimateSpeechCost(pricing *configstoreTables.TableModelPricing, bound OperationBound) float64 {
+	seconds := bound.AudioSeconds
+	if seconds < 0 {
+		seconds = 0
+	}
+	tokenUsage := &schemas.BifrostLLMUsage{
+		CompletionTokens: nonNegative(bound.OutputTokens),
+		TotalTokens:      nonNegative(bound.OutputTokens) + nonNegative(bound.InputCharacters),
+	}
+	tokenCost := computeSpeechCost(pricing, tokenUsage, nil, nonNegative(bound.InputCharacters), serviceTier{})
+	secondCost := computeSpeechCost(pricing, &schemas.BifrostLLMUsage{}, &seconds, nonNegative(bound.InputCharacters), serviceTier{})
+	if secondCost > tokenCost {
+		return secondCost
+	}
+	return tokenCost
+}
+
+func estimateTranscriptionCost(pricing *configstoreTables.TableModelPricing, bound OperationBound) float64 {
+	input := nonNegative(bound.InputTokens)
+	output := nonNegative(bound.OutputTokens)
+	tokenUsage := &schemas.BifrostLLMUsage{
+		PromptTokens:     input,
+		CompletionTokens: output,
+		TotalTokens:      input + output,
+	}
+	var details *schemas.TranscriptionUsageInputTokenDetails
+	if ratePositive(pricing.InputCostPerAudioToken) && (!ratePositive(pricing.InputCostPerToken) || *pricing.InputCostPerAudioToken > *pricing.InputCostPerToken) {
+		details = &schemas.TranscriptionUsageInputTokenDetails{AudioTokens: input}
+	}
+	tokenCost := computeTranscriptionCost(pricing, tokenUsage, nil, details, serviceTier{})
+	seconds := bound.AudioSeconds
+	if seconds < 0 {
+		seconds = 0
+	}
+	secondUsage := &schemas.BifrostLLMUsage{CompletionTokens: output, TotalTokens: output}
+	secondCost := computeTranscriptionCost(pricing, secondUsage, &seconds, nil, serviceTier{})
+	if secondCost > tokenCost {
+		return secondCost
+	}
+	return tokenCost
+}
+
+func estimateImageCost(pricing *configstoreTables.TableModelPricing, bound OperationBound) float64 {
+	images := bound.OutputImages
+	if images <= 0 {
+		images = 1
+	}
+	inputToken := imageInputTokenCost(pricing, nonNegative(bound.InputTokens))
+	outputToken := imageOutputTokenCost(pricing, nonNegative(bound.OutputTokens))
+	inputUnit := imageInputUnitCost(pricing, bound)
+	outputUnit := imageOutputUnitCost(pricing, bound, images)
+	if bound.InputImages == 0 && outputUnit == 0 && !hasPositiveOutputPrice(pricing) && ratePositive(pricing.InputCostPerImage) {
+		outputUnit = float64(images) * *pricing.InputCostPerImage
+	}
+	return larger(inputToken, inputUnit) + larger(outputToken, outputUnit)
+}
+
+func imageInputTokenCost(pricing *configstoreTables.TableModelPricing, tokens int) float64 {
+	if tokens <= 0 {
+		return 0
+	}
+	row := withoutOutputUnitRates(*pricing)
+	usage := &schemas.ImageUsage{InputTokens: tokens, TotalTokens: tokens}
+	if ratePositive(pricing.InputCostPerImageToken) && (!ratePositive(pricing.InputCostPerToken) || *pricing.InputCostPerImageToken > *pricing.InputCostPerToken) {
+		usage.InputTokensDetails = &schemas.ImageTokenDetails{ImageTokens: tokens}
+	}
+	return computeImageCost(&row, usage, "", "", serviceTier{})
+}
+
+func imageOutputTokenCost(pricing *configstoreTables.TableModelPricing, tokens int) float64 {
+	if tokens <= 0 {
+		return 0
+	}
+	usage := &schemas.ImageUsage{OutputTokens: tokens, TotalTokens: tokens}
+	if ratePositive(pricing.OutputCostPerImageToken) && (!ratePositive(pricing.OutputCostPerToken) || *pricing.OutputCostPerImageToken > *pricing.OutputCostPerToken) {
+		usage.OutputTokensDetails = &schemas.ImageTokenDetails{ImageTokens: tokens}
+	}
+	return computeImageCost(pricing, usage, "", "", serviceTier{})
+}
+
+func imageInputUnitCost(pricing *configstoreTables.TableModelPricing, bound OperationBound) float64 {
+	if bound.InputImages <= 0 {
+		return 0
+	}
+	row := withoutOutputUnitRates(*pricing)
+	usage := &schemas.ImageUsage{NumInputImages: bound.InputImages}
+	return computeImageCost(&row, usage, conservativeImageSize(pricing, bound.ImageSize), bound.ImageQuality, serviceTier{})
+}
+
+func imageOutputUnitCost(pricing *configstoreTables.TableModelPricing, bound OperationBound, images int) float64 {
+	usage := &schemas.ImageUsage{OutputTokensDetails: &schemas.ImageTokenDetails{NImages: images}}
+	return computeImageCost(pricing, usage, conservativeImageSize(pricing, bound.ImageSize), bound.ImageQuality, serviceTier{})
+}
+
+func withoutOutputUnitRates(pricing configstoreTables.TableModelPricing) configstoreTables.TableModelPricing {
+	pricing.OutputCostPerImage = nil
+	pricing.OutputCostPerPixel = nil
+	pricing.OutputCostPerImagePremiumImage = nil
+	pricing.OutputCostPerImageAbove512x512Pixels = nil
+	pricing.OutputCostPerImageAbove512x512PixelsPremium = nil
+	pricing.OutputCostPerImageAbove1024x1024Pixels = nil
+	pricing.OutputCostPerImageAbove1024x1024PixelsPremium = nil
+	pricing.OutputCostPerImageAbove2048x2048Pixels = nil
+	pricing.OutputCostPerImageAbove4096x4096Pixels = nil
+	pricing.OutputCostPerImageLowQuality = nil
+	pricing.OutputCostPerImageMediumQuality = nil
+	pricing.OutputCostPerImageHighQuality = nil
+	pricing.OutputCostPerImageAutoQuality = nil
+	return pricing
+}
+
+func hasPositiveOutputPrice(pricing *configstoreTables.TableModelPricing) bool {
+	return ratePositive(pricing.OutputCostPerToken) ||
+		ratePositive(pricing.OutputCostPerImageToken) ||
+		ratePositive(pricing.OutputCostPerImage) ||
+		ratePositive(pricing.OutputCostPerPixel) ||
+		ratePositive(pricing.OutputCostPerImagePremiumImage) ||
+		ratePositive(pricing.OutputCostPerImageAbove512x512Pixels) ||
+		ratePositive(pricing.OutputCostPerImageAbove512x512PixelsPremium) ||
+		ratePositive(pricing.OutputCostPerImageAbove1024x1024Pixels) ||
+		ratePositive(pricing.OutputCostPerImageAbove1024x1024PixelsPremium) ||
+		ratePositive(pricing.OutputCostPerImageAbove2048x2048Pixels) ||
+		ratePositive(pricing.OutputCostPerImageAbove4096x4096Pixels) ||
+		ratePositive(pricing.OutputCostPerImageLowQuality) ||
+		ratePositive(pricing.OutputCostPerImageMediumQuality) ||
+		ratePositive(pricing.OutputCostPerImageHighQuality) ||
+		ratePositive(pricing.OutputCostPerImageAutoQuality)
+}
+
+// conservativeImageSize picks a size that selects the highest configured
+// per-image tier when the request did not name a pixel size.
+func conservativeImageSize(pricing *configstoreTables.TableModelPricing, size string) string {
+	if parseImagePixels(size) > 0 {
+		return size
+	}
+	switch {
+	case ratePositive(pricing.OutputCostPerImageAbove4096x4096Pixels):
+		return "4096x4096"
+	case ratePositive(pricing.OutputCostPerImageAbove2048x2048Pixels):
+		return "2048x2048"
+	case ratePositive(pricing.OutputCostPerImageAbove1024x1024Pixels), ratePositive(pricing.OutputCostPerImageAbove1024x1024PixelsPremium):
+		return "1024x1024"
+	case ratePositive(pricing.OutputCostPerImageAbove512x512Pixels), ratePositive(pricing.OutputCostPerImageAbove512x512PixelsPremium):
+		return "512x512"
+	default:
+		return size
+	}
+}
+
+func ratePositive(rate *float64) bool {
+	return rate != nil && *rate > 0
+}
+
+func nonNegative(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func larger(left, right float64) float64 {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 // resolvePricing resolves the pricing entry for a model, trying deployment as fallback.

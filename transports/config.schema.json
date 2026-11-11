@@ -1740,6 +1740,114 @@
             "if": {
               "properties": {
                 "name": {
+                  "const": "billing-reservation"
+                }
+              }
+            },
+            "then": {
+              "required": ["config"],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "description": "MPilot wallet holds. One call reserves the estimated amount on the prepaid wallet before provider dispatch. MPilot Rating captures that ACTIVE hold from the existing Kafka InferenceUsage request ID.",
+                  "properties": {
+                    "base_url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Absolute MPilot API base URL for the wallet-hold service."
+                    },
+                    "reserve_path": {
+                      "type": "string",
+                      "pattern": "^/",
+                      "default": "/api/v1/wallet-holds",
+                      "description": "Relative MPilot wallet-hold path."
+                    },
+                    "hold_ttl_seconds": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 86400,
+                      "default": 3600,
+                      "description": "How long the ACTIVE hold stays reserved. MPilot expires every ACTIVE hold, including one whose provider call is still in flight, and returns the funds. Maximum is one day."
+                    },
+                    "timeout_ms": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5000,
+                      "default": 500,
+                      "description": "Bounded HTTP timeout for MPilot reservation calls."
+                    },
+                    "fail_closed": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Reject provider calls when reservation, tenant identity, or a usable estimate is unavailable."
+                    },
+                    "default_input_tokens": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 0,
+                      "description": "Conservative input-token allowance when prompt tokenization is unavailable. When 0/unset, the plugin holds output_cost_per_token * 10000 for input."
+                    },
+                    "default_max_output_tokens": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "default": 10000,
+                      "description": "Fallback output-token bound when the request and model estimate omit one. Defaults to 10000 when unset."
+                    },
+                    "authorization": {
+                      "description": "Optional Authorization header value (plain string or env var reference).",
+                      "oneOf": [
+                        { "type": "string" },
+                        { "$ref": "#/$defs/env_var" }
+                      ]
+                    },
+                    "additional_headers": {
+                      "type": "object",
+                      "additionalProperties": { "type": "string" },
+                      "description": "Additional static headers sent only to MPilot."
+                    },
+                    "model_estimates": {
+                      "type": "object",
+                      "description": "Optional pricing/output limits keyed by provider/model, overriding the embedded catalog.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "input_cost_per_token": { "type": "number", "minimum": 0 },
+                          "output_cost_per_token": { "type": "number", "minimum": 0 },
+                          "max_output_tokens": { "type": "integer", "minimum": 0 }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "tenant_funding": {
+                      "type": "object",
+                      "description": "Tenant ID to the prepaid wallet rating will charge. Required for every tenant using the plugin.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "account_id": { "type": "string", "format": "uuid" },
+                          "wallet_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Wallet rating will charge for this tenant. Use the service wallet when one exists; otherwise the account wallet with no service. A different wallet is ignored and the usage is direct-debited."
+                          },
+                          "currency_id": { "type": "string", "format": "uuid" },
+                          "pricing_version": { "type": "string" }
+                        },
+                        "required": ["account_id", "wallet_id"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["base_url"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
                   "const": "maxim"
                 }
               }

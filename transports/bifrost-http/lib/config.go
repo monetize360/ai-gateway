@@ -38,6 +38,7 @@ import (
 	"github.com/maximhq/bifrost/framework/oauth2"
 	plugins "github.com/maximhq/bifrost/framework/plugins"
 	"github.com/maximhq/bifrost/framework/vectorstore"
+	"github.com/maximhq/bifrost/plugins/billingreservation"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/kafka"
@@ -125,6 +126,7 @@ var builtinPluginNames = []string{
 	compat.PluginName,
 	maxim.PluginName,
 	kafka.PluginName,
+	billingreservation.PluginName,
 }
 
 func GetBuiltinPluginNames() []string {
