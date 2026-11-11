@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 )
 
@@ -31,6 +33,18 @@ const (
 	// defaultMaxOutputTokenAllowance is used when the request, model estimate, and
 	// default_max_output_tokens are all unset.
 	defaultMaxOutputTokenAllowance = 10_000
+	// minAudioBytesPerSecond is an 8 kHz 8-bit mono floor. Compressed audio is
+	// shorter than this bound, so a duration hold cannot settle above it.
+	minAudioBytesPerSecond = 8_000
+	// defaultAudioDurationSeconds covers a transcription whose bytes are not on the request.
+	defaultAudioDurationSeconds = 600
+	// maxAudioDurationSeconds caps a hold when the file or text implies a longer clip.
+	maxAudioDurationSeconds = 4 * 60 * 60
+	// speechCharsPerSecond is slower than typical speech, so per-second TTS holds
+	// cover the audio a character count can produce.
+	speechCharsPerSecond = 5
+	// maxImageCount limits how far a caller-supplied image count can scale a hold.
+	maxImageCount = 100
 	// defaultHoldTTLSeconds keeps an ACTIVE hold through a long provider call and the
 	// rating capture that follows. MPilot expires every ACTIVE hold, including one whose
 	// provider call is still in flight.
@@ -80,6 +94,9 @@ type estimate struct {
 	outputTokens       int
 	inputCostPerToken  float64
 	outputCostPerToken float64
+	// operationAmount is the full hold for embeddings, speech, transcription,
+	// and images. Text completions leave it nil and use the token fields.
+	operationAmount *float64
 }
 
 type reservation struct {
@@ -88,6 +105,9 @@ type reservation struct {
 	Amount    string
 	Resource  string
 	Released  bool
+	// OutputDelivered is set once a non-error response or stream chunk has passed
+	// through PostLLMHook. After that, core cannot start another fallback attempt.
+	OutputDelivered bool
 }
 
 type reserveRequest struct {
@@ -262,10 +282,22 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 // publishes that event. A terminal failure with no token usage is abandoned, so
 // the hold is released instead of waiting for expiry.
 func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
-	if ctx == nil || bifrostErr == nil || responseHasTokenUsage(result) || attemptWillBeRetried(ctx, bifrostErr) {
+	if ctx == nil {
 		return result, bifrostErr, nil
 	}
 	existing, _ := ctx.Value(reservationContextKey).(*reservation)
+	if bifrostErr == nil {
+		// A non-error response or stream chunk means the client has received output.
+		// Core only retries or falls back on setup and first-chunk errors, so any
+		// later error is terminal even when fallbacks remain.
+		if existing != nil && result != nil {
+			existing.OutputDelivered = true
+		}
+		return result, bifrostErr, nil
+	}
+	if responseHasTokenUsage(result) || attemptWillBeRetried(ctx, bifrostErr, existing != nil && existing.OutputDelivered) {
+		return result, bifrostErr, nil
+	}
 	if existing == nil || existing.Released || existing.ID == "" {
 		return result, bifrostErr, nil
 	}
@@ -360,9 +392,11 @@ func amountDelta(target, current string) (string, error) {
 
 // attemptWillBeRetried reports whether Bifrost will dispatch another fallback for
 // this failed attempt. PostLLMHook must not release the hold in that case.
-// A cancellation is terminal even when fallbacks remain.
-func attemptWillBeRetried(ctx context.Context, err *schemas.BifrostError) bool {
-	if err == nil {
+// A cancellation is terminal even when fallbacks remain, and so is any error after
+// output has started streaming: core only retries or falls back on setup and
+// first-chunk errors.
+func attemptWillBeRetried(ctx context.Context, err *schemas.BifrostError, outputDelivered bool) bool {
+	if err == nil || outputDelivered {
 		return false
 	}
 	if err.Error != nil && err.Error.Type != nil && *err.Error.Type == schemas.RequestCancelled {
@@ -405,10 +439,22 @@ func tokenCounts(result *schemas.BifrostResponse) (promptTokens, completionToken
 }
 
 func (p *Plugin) estimate(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
-	entry, ok := p.config.ModelEstimates[string(provider)+"/"+model]
-	if !ok {
-		entry = p.config.ModelEstimates[model]
+	switch billableRequestType(req) {
+	case schemas.EmbeddingRequest:
+		return p.estimateEmbedding(req, provider, model)
+	case schemas.SpeechRequest:
+		return p.estimateSpeech(req, provider, model)
+	case schemas.TranscriptionRequest:
+		return p.estimateTranscription(req, provider, model)
+	case schemas.ImageGenerationRequest, schemas.ImageEditRequest, schemas.ImageVariationRequest:
+		return p.estimateImage(req, provider, model)
+	default:
+		return p.estimateText(req, provider, model)
 	}
+}
+
+func (p *Plugin) estimateText(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
+	entry := p.modelEstimate(provider, model)
 	inputRate, outputRate := entry.InputCostPerToken, entry.OutputCostPerToken
 	if (inputRate == nil || outputRate == nil) && p.catalog != nil {
 		catalogInput, catalogOutput := p.catalog.GetChatTokenRates(string(provider), model)
@@ -447,6 +493,183 @@ func (p *Plugin) estimate(req *schemas.BifrostRequest, provider schemas.ModelPro
 	return estimate{inputTokens: inputTokens, outputTokens: outputTokens, inputCostPerToken: inputCostPerToken, outputCostPerToken: *outputRate}, nil
 }
 
+func (p *Plugin) estimateEmbedding(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
+	entry := p.modelEstimate(provider, model)
+	pricing, err := p.pricingRow(provider, model, schemas.EmbeddingRequest, entry)
+	if err != nil {
+		return estimate{}, err
+	}
+	tokens := embeddingTokenCount(req)
+	if tokens <= 0 {
+		tokens, err = p.inputTokenAllowance()
+		if err != nil {
+			return estimate{}, err
+		}
+	}
+	cost, ok := modelcatalog.EstimateResolvedCost(pricing, schemas.EmbeddingRequest, modelcatalog.OperationBound{
+		InputTokens:     tokens,
+		InputCharacters: embeddingCharacters(req),
+	})
+	if !ok {
+		return estimate{}, fmt.Errorf("pricing is unavailable for %s/%s", provider, model)
+	}
+	return operationEstimate(cost), nil
+}
+
+func (p *Plugin) estimateSpeech(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
+	entry := p.modelEstimate(provider, model)
+	pricing, err := p.pricingRow(provider, model, schemas.SpeechRequest, entry)
+	if err != nil {
+		return estimate{}, err
+	}
+	chars := speechCharacters(req)
+	if chars <= 0 {
+		chars, err = p.inputTokenAllowance()
+		if err != nil {
+			return estimate{}, err
+		}
+	}
+	outputTokens, err := p.outputTokenAllowance(entry, pricing)
+	if err != nil {
+		return estimate{}, err
+	}
+	cost, ok := modelcatalog.EstimateResolvedCost(pricing, schemas.SpeechRequest, modelcatalog.OperationBound{
+		OutputTokens:    outputTokens,
+		InputCharacters: chars,
+		AudioSeconds:    speechSeconds(chars),
+	})
+	if !ok {
+		return estimate{}, fmt.Errorf("pricing is unavailable for %s/%s", provider, model)
+	}
+	return operationEstimate(cost), nil
+}
+
+func (p *Plugin) estimateTranscription(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
+	entry := p.modelEstimate(provider, model)
+	pricing, err := p.pricingRow(provider, model, schemas.TranscriptionRequest, entry)
+	if err != nil {
+		return estimate{}, err
+	}
+	inputTokens, err := p.inputTokenAllowance()
+	if err != nil {
+		return estimate{}, err
+	}
+	outputTokens, err := p.outputTokenAllowance(entry, pricing)
+	if err != nil {
+		return estimate{}, err
+	}
+	var file []byte
+	if req != nil && req.TranscriptionRequest != nil && req.TranscriptionRequest.Input != nil {
+		file = req.TranscriptionRequest.Input.File
+	}
+	cost, ok := modelcatalog.EstimateResolvedCost(pricing, schemas.TranscriptionRequest, modelcatalog.OperationBound{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		AudioSeconds: transcriptionSeconds(file),
+	})
+	if !ok {
+		return estimate{}, fmt.Errorf("pricing is unavailable for %s/%s", provider, model)
+	}
+	return operationEstimate(cost), nil
+}
+
+func (p *Plugin) estimateImage(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
+	requestType := imageRequestType(req)
+	entry := p.modelEstimate(provider, model)
+	pricing, err := p.pricingRow(provider, model, requestType, entry)
+	if err != nil {
+		return estimate{}, err
+	}
+	outputImages, inputImages, size, quality := imageRequestBounds(req)
+	inputTokens, err := p.inputTokenAllowance()
+	if err != nil {
+		return estimate{}, err
+	}
+	outputTokens, err := p.outputTokenAllowance(entry, pricing)
+	if err != nil {
+		return estimate{}, err
+	}
+	cost, ok := modelcatalog.EstimateResolvedCost(pricing, requestType, modelcatalog.OperationBound{
+		InputTokens:  scaleAllowance(inputTokens, inputImages),
+		OutputTokens: scaleAllowance(outputTokens, outputImages),
+		OutputImages: outputImages,
+		InputImages:  inputImages,
+		ImageSize:    size,
+		ImageQuality: quality,
+	})
+	if !ok {
+		return estimate{}, fmt.Errorf("pricing is unavailable for %s/%s", provider, model)
+	}
+	return operationEstimate(cost), nil
+}
+
+func (p *Plugin) modelEstimate(provider schemas.ModelProvider, model string) ModelEstimate {
+	if entry, ok := p.config.ModelEstimates[string(provider)+"/"+model]; ok {
+		return entry
+	}
+	return p.config.ModelEstimates[model]
+}
+
+func (p *Plugin) pricingRow(provider schemas.ModelProvider, model string, requestType schemas.RequestType, entry ModelEstimate) (*configstoreTables.TableModelPricing, error) {
+	var pricing *configstoreTables.TableModelPricing
+	if p.catalog != nil {
+		pricing = p.catalog.ResolvePricing(string(provider), model, requestType)
+	}
+	pricing = overlayTokenRates(pricing, entry)
+	if pricing == nil {
+		return nil, fmt.Errorf("pricing is unavailable for %s/%s", provider, model)
+	}
+	return pricing, nil
+}
+
+func overlayTokenRates(pricing *configstoreTables.TableModelPricing, entry ModelEstimate) *configstoreTables.TableModelPricing {
+	if entry.InputCostPerToken == nil && entry.OutputCostPerToken == nil {
+		return pricing
+	}
+	row := configstoreTables.TableModelPricing{}
+	if pricing != nil {
+		row = *pricing
+	}
+	if entry.InputCostPerToken != nil {
+		row.InputCostPerToken = entry.InputCostPerToken
+	}
+	if entry.OutputCostPerToken != nil {
+		row.OutputCostPerToken = entry.OutputCostPerToken
+	}
+	return &row
+}
+
+func (p *Plugin) inputTokenAllowance() (int, error) {
+	if p.config.DefaultInputTokens < 0 {
+		return 0, fmt.Errorf("token estimates cannot be negative")
+	}
+	if p.config.DefaultInputTokens == 0 {
+		return defaultInputTokenAllowance, nil
+	}
+	return p.config.DefaultInputTokens, nil
+}
+
+func (p *Plugin) outputTokenAllowance(entry ModelEstimate, pricing *configstoreTables.TableModelPricing) (int, error) {
+	outputTokens := entry.MaxOutputTokens
+	if outputTokens <= 0 && pricing != nil && pricing.MaxOutputTokens != nil {
+		outputTokens = *pricing.MaxOutputTokens
+	}
+	if outputTokens <= 0 {
+		outputTokens = p.config.DefaultMaxOutputTokens
+	}
+	if outputTokens <= 0 {
+		outputTokens = defaultMaxOutputTokenAllowance
+	}
+	if outputTokens < 0 {
+		return 0, fmt.Errorf("token estimates cannot be negative")
+	}
+	return outputTokens, nil
+}
+
+func operationEstimate(cost float64) estimate {
+	return estimate{operationAmount: &cost}
+}
+
 func requestedMaxOutputTokens(req *schemas.BifrostRequest) int {
 	switch {
 	case req.ChatRequest != nil && req.ChatRequest.Params != nil && req.ChatRequest.Params.MaxCompletionTokens != nil:
@@ -463,8 +686,206 @@ func requestedMaxOutputTokens(req *schemas.BifrostRequest) int {
 func (e estimate) amount() string {
 	// MPilot accepts a decimal string as BigDecimal. Never send the binary floating-point
 	// representation used by the model catalog as the financial authorization amount.
-	return strconv.FormatFloat(float64(e.inputTokens)*e.inputCostPerToken+
-		float64(e.outputTokens)*e.outputCostPerToken, 'f', 8, 64)
+	value := float64(e.inputTokens)*e.inputCostPerToken + float64(e.outputTokens)*e.outputCostPerToken
+	if e.operationAmount != nil {
+		value = *e.operationAmount
+	}
+	return strconv.FormatFloat(value, 'f', 8, 64)
+}
+
+func billableRequestType(req *schemas.BifrostRequest) schemas.RequestType {
+	if req == nil {
+		return ""
+	}
+	if req.RequestType != "" {
+		return normalizeBillableRequestType(req.RequestType)
+	}
+	switch {
+	case req.TextCompletionRequest != nil:
+		return schemas.TextCompletionRequest
+	case req.ChatRequest != nil:
+		return schemas.ChatCompletionRequest
+	case req.ResponsesRequest != nil:
+		return schemas.ResponsesRequest
+	case req.EmbeddingRequest != nil:
+		return schemas.EmbeddingRequest
+	case req.SpeechRequest != nil:
+		return schemas.SpeechRequest
+	case req.TranscriptionRequest != nil:
+		return schemas.TranscriptionRequest
+	case req.ImageGenerationRequest != nil:
+		return schemas.ImageGenerationRequest
+	case req.ImageEditRequest != nil:
+		return schemas.ImageEditRequest
+	case req.ImageVariationRequest != nil:
+		return schemas.ImageVariationRequest
+	default:
+		return schemas.ChatCompletionRequest
+	}
+}
+
+func normalizeBillableRequestType(requestType schemas.RequestType) schemas.RequestType {
+	switch requestType {
+	case schemas.TextCompletionStreamRequest:
+		return schemas.TextCompletionRequest
+	case schemas.ChatCompletionStreamRequest:
+		return schemas.ChatCompletionRequest
+	case schemas.ResponsesStreamRequest, schemas.WebSocketResponsesRequest:
+		return schemas.ResponsesRequest
+	case schemas.SpeechStreamRequest:
+		return schemas.SpeechRequest
+	case schemas.TranscriptionStreamRequest:
+		return schemas.TranscriptionRequest
+	case schemas.ImageGenerationStreamRequest:
+		return schemas.ImageGenerationRequest
+	case schemas.ImageEditStreamRequest:
+		return schemas.ImageEditRequest
+	default:
+		return requestType
+	}
+}
+
+func embeddingTokenCount(req *schemas.BifrostRequest) int {
+	if req == nil || req.EmbeddingRequest == nil || req.EmbeddingRequest.Input == nil {
+		return 0
+	}
+	input := req.EmbeddingRequest.Input
+	if len(input.Embedding) > 0 {
+		return len(input.Embedding)
+	}
+	count := 0
+	for _, row := range input.Embeddings {
+		count += len(row)
+	}
+	return count
+}
+
+func embeddingCharacters(req *schemas.BifrostRequest) int {
+	if req == nil || req.EmbeddingRequest == nil || req.EmbeddingRequest.Input == nil {
+		return 0
+	}
+	input := req.EmbeddingRequest.Input
+	if input.Text != nil {
+		return utf8.RuneCountInString(*input.Text)
+	}
+	count := 0
+	for _, text := range input.Texts {
+		count += utf8.RuneCountInString(text)
+	}
+	return count
+}
+
+func speechCharacters(req *schemas.BifrostRequest) int {
+	if req == nil || req.SpeechRequest == nil || req.SpeechRequest.Input == nil {
+		return 0
+	}
+	return utf8.RuneCountInString(req.SpeechRequest.Input.Input)
+}
+
+func speechSeconds(characters int) int {
+	if characters <= 0 {
+		return 1
+	}
+	seconds := characters / speechCharsPerSecond
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > maxAudioDurationSeconds {
+		return maxAudioDurationSeconds
+	}
+	return seconds
+}
+
+func transcriptionSeconds(file []byte) int {
+	if len(file) == 0 {
+		return defaultAudioDurationSeconds
+	}
+	seconds := (len(file) + minAudioBytesPerSecond - 1) / minAudioBytesPerSecond
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > maxAudioDurationSeconds {
+		return maxAudioDurationSeconds
+	}
+	return seconds
+}
+
+func imageRequestType(req *schemas.BifrostRequest) schemas.RequestType {
+	switch billableRequestType(req) {
+	case schemas.ImageEditRequest:
+		return schemas.ImageEditRequest
+	case schemas.ImageVariationRequest:
+		return schemas.ImageVariationRequest
+	default:
+		return schemas.ImageGenerationRequest
+	}
+}
+
+func imageRequestBounds(req *schemas.BifrostRequest) (outputImages, inputImages int, size, quality string) {
+	outputImages = 1
+	if req == nil {
+		return outputImages, 0, "", ""
+	}
+	switch {
+	case req.ImageGenerationRequest != nil:
+		if params := req.ImageGenerationRequest.Params; params != nil {
+			outputImages = positiveCount(params.N, 1)
+			inputImages = len(params.InputImages)
+			size, quality = stringValue(params.Size), stringValue(params.Quality)
+		}
+	case req.ImageEditRequest != nil:
+		if req.ImageEditRequest.Input != nil {
+			inputImages = len(req.ImageEditRequest.Input.Images)
+		}
+		if params := req.ImageEditRequest.Params; params != nil {
+			outputImages = positiveCount(params.N, 1)
+			size, quality = stringValue(params.Size), stringValue(params.Quality)
+		}
+	case req.ImageVariationRequest != nil:
+		if req.ImageVariationRequest.Input != nil {
+			inputImages = 1
+		}
+		if params := req.ImageVariationRequest.Params; params != nil {
+			outputImages = positiveCount(params.N, 1)
+			size = stringValue(params.Size)
+		}
+	}
+	return capImageCount(outputImages), capImageCount(inputImages), size, quality
+}
+
+func positiveCount(value *int, fallback int) int {
+	if value == nil || *value <= 0 {
+		return fallback
+	}
+	return *value
+}
+
+func capImageCount(count int) int {
+	if count < 0 {
+		return 0
+	}
+	if count > maxImageCount {
+		return maxImageCount
+	}
+	return count
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func scaleAllowance(allowance, count int) int {
+	if count <= 1 || allowance <= 0 {
+		return allowance
+	}
+	scaled := allowance * count
+	if scaled/count != allowance {
+		return allowance
+	}
+	return scaled
 }
 
 func (p *Plugin) reserve(ctx context.Context, payload reserveRequest) (string, int, error) {
@@ -502,7 +923,11 @@ func (p *Plugin) replaceHold(ctx *schemas.BifrostContext, existing *reservation,
 
 func (p *Plugin) release(ctx context.Context, holdID, requestID string) (int, error) {
 	path := strings.TrimRight(p.config.ReservePath, "/") + "/" + url.PathEscape(holdID) + "/release"
-	_, status, err := p.post(ctx, path, requestID, requestID+":release:"+holdID, struct{}{})
+	// PostLLMHook releases after the caller has cancelled. post derives its
+	// deadline from this parent, so a cancelled context fails the call before
+	// the wallet API is reached and the ACTIVE hold stays reserved until TTL.
+	// Drop the parent's cancel and deadline; post still applies timeout_ms.
+	_, status, err := p.post(context.WithoutCancel(ctx), path, requestID, requestID+":release:"+holdID, struct{}{})
 	return status, err
 }
 
