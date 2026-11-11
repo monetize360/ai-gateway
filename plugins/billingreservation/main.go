@@ -1,4 +1,4 @@
-// Package billingreservation reserves MPilot balance before an LLM provider call.
+// Package billingreservation reserves MPilot wallet funds before an LLM provider call.
 package billingreservation
 
 import (
@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,14 +31,23 @@ const (
 	// defaultMaxOutputTokenAllowance is used when the request, model estimate, and
 	// default_max_output_tokens are all unset.
 	defaultMaxOutputTokenAllowance = 10_000
+	// defaultHoldTTLSeconds keeps an ACTIVE hold through a long provider call and the
+	// rating capture that follows. MPilot expires every ACTIVE hold, including one whose
+	// provider call is still in flight.
+	defaultHoldTTLSeconds = 3600
+	// maxHoldTTLSeconds matches WalletHoldService's one-day cap.
+	maxHoldTTLSeconds = 86400
+
+	defaultReservePath = "/api/v1/wallet-holds"
 )
 
-// Config configures the MPilot balance-reservation API.
+// Config configures the MPilot wallet-hold API.
 type Config struct {
 	BaseURL                string                   `json:"base_url"`
 	ReservePath            string                   `json:"reserve_path"`
 	TimeoutMS              int                      `json:"timeout_ms"`
 	FailClosed             *bool                    `json:"fail_closed"`
+	HoldTTLSeconds         int                      `json:"hold_ttl_seconds"`
 	DefaultInputTokens     int                      `json:"default_input_tokens"`
 	DefaultMaxOutputTokens int                      `json:"default_max_output_tokens"`
 	ModelEstimates         map[string]ModelEstimate `json:"model_estimates"`
@@ -46,12 +56,14 @@ type Config struct {
 	AdditionalHeaders      map[string]string        `json:"additional_headers,omitempty"`
 }
 
-// TenantFunding explicitly maps a tenant to its centralized customer wallet.
-// It prevents a gateway-local balance cache from becoming an authorization authority.
+// TenantFunding maps a tenant to the prepaid wallet rating will charge.
+// wallet_id must be that wallet: the service wallet when one exists, otherwise
+// the account wallet with no service. A different wallet is ignored at capture
+// and the usage is direct-debited.
 type TenantFunding struct {
 	AccountID      string `json:"account_id"`
 	WalletID       string `json:"wallet_id"`
-	CurrencyID     string `json:"currency_id"`
+	CurrencyID     string `json:"currency_id,omitempty"`
 	PricingVersion string `json:"pricing_version,omitempty"`
 }
 
@@ -73,20 +85,18 @@ type estimate struct {
 type reservation struct {
 	ID        string
 	RequestID string
+	Amount    string
+	Resource  string
+	Released  bool
 }
 
 type reserveRequest struct {
-	AccountID         string         `json:"accountId"`
-	WalletID          string         `json:"walletId"`
-	RequestID         string         `json:"requestId"`
-	Amount            string         `json:"amount"`
-	CurrencyID        string         `json:"currencyId"`
-	ResourceType      string         `json:"resourceType"`
-	ResourceReference string         `json:"resourceReference"`
-	PricingVersion    string         `json:"pricingVersion,omitempty"`
-	Policy            string         `json:"policy"`
-	ExpirySeconds     int            `json:"expirySeconds"`
-	Metadata          map[string]any `json:"metadata"`
+	AccountID    string `json:"accountId"`
+	WalletID     string `json:"walletId"`
+	RequestID    string `json:"requestId"`
+	Amount       string `json:"amount"`
+	TTLSeconds   int    `json:"ttlSeconds"`
+	AllowOverage bool   `json:"allowOverage"`
 }
 
 // Plugin implements the LLM hook surface. Reservation happens in PreLLMHook,
@@ -113,7 +123,7 @@ func Init(config *Config, catalog *modelcatalog.ModelCatalog, logger schemas.Log
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
 		return nil, fmt.Errorf("base_url must be an absolute URL")
 	}
-	if err := validateRelativePath(&normalized.ReservePath, "/api/v1/balance/reservations"); err != nil {
+	if err := validateRelativePath(&normalized.ReservePath, defaultReservePath); err != nil {
 		return nil, fmt.Errorf("reserve_path: %w", err)
 	}
 	if normalized.TimeoutMS <= 0 {
@@ -121,6 +131,12 @@ func Init(config *Config, catalog *modelcatalog.ModelCatalog, logger schemas.Log
 	}
 	if normalized.TimeoutMS > 5000 {
 		return nil, fmt.Errorf("timeout_ms must not exceed 5000")
+	}
+	if normalized.HoldTTLSeconds <= 0 {
+		normalized.HoldTTLSeconds = defaultHoldTTLSeconds
+	}
+	if normalized.HoldTTLSeconds > maxHoldTTLSeconds {
+		return nil, fmt.Errorf("hold_ttl_seconds must not exceed %d", maxHoldTTLSeconds)
 	}
 	if normalized.DefaultMaxOutputTokens <= 0 {
 		normalized.DefaultMaxOutputTokens = defaultMaxOutputTokenAllowance
@@ -174,9 +190,6 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 	if ctx == nil || req == nil {
 		return req, nil, nil
 	}
-	if existing, _ := ctx.Value(reservationContextKey).(*reservation); existing != nil {
-		return req, nil, nil
-	}
 	provider, model, _ := req.GetRequestFields()
 	if provider == "" || model == "" {
 		return req, nil, nil // metadata operations do not reserve a model balance.
@@ -190,31 +203,44 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 	if err != nil {
 		return p.rejectOrSkip(req, err.Error())
 	}
-	funding, ok := p.config.TenantFunding[tenantID]
-	if !ok || strings.TrimSpace(funding.AccountID) == "" ||
-		strings.TrimSpace(funding.WalletID) == "" ||
-		strings.TrimSpace(funding.CurrencyID) == "" {
+	resource := string(provider) + "/" + model
+	amount := estimated.amount()
+	if existing, _ := ctx.Value(reservationContextKey).(*reservation); existing != nil && !existing.Released {
+		// Fallbacks re-run PreLLMHook on the same context and request ID. Reuse the hold
+		// when the new estimate fits. A costlier model releases that hold and reserves the
+		// full new amount: wallet holds have no increase operation, and a RELEASED row does
+		// not block a new hold for the same request ID.
+		fits, cmpErr := amountLessOrEqual(amount, existing.Amount)
+		if cmpErr != nil {
+			return p.rejectOrSkip(req, cmpErr.Error())
+		}
+		if fits {
+			existing.Resource = resource
+			return req, nil, nil
+		}
+		funding, ok := p.funding(tenantID)
+		if !ok {
+			return p.rejectOrSkip(req, "tenant funding configuration is unavailable for balance reservation")
+		}
+		status, replaceErr := p.replaceHold(ctx, existing, funding, requestID, amount, resource)
+		if replaceErr != nil {
+			if p.failClosed() {
+				// Allow cheaper remaining fallbacks to try. A failed release leaves the
+				// original hold in place; a failed re-reserve clears it.
+				return req, &schemas.LLMPluginShortCircuit{Error: reservationErrorAllowFallbacks(status, replaceErr.Error())}, nil
+			}
+			p.logger.Warn("billing reservation replace skipped: %v", replaceErr)
+			return req, nil, nil
+		}
+		return req, nil, nil
+	}
+	funding, ok := p.funding(tenantID)
+	if !ok {
 		return p.rejectOrSkip(req, "tenant funding configuration is unavailable for balance reservation")
 	}
-	// Reserve commits the hold and the IN_PROGRESS transition together. There is no
-	// follow-up start call that can fail after the funds are reserved.
-	reservationID, status, err := p.reserve(ctx, reserveRequest{
-		AccountID:         funding.AccountID,
-		WalletID:          funding.WalletID,
-		RequestID:         requestID,
-		Amount:            estimated.amount(),
-		CurrencyID:        funding.CurrencyID,
-		ResourceType:      "LLM_INFERENCE",
-		ResourceReference: string(provider) + "/" + model,
-		PricingVersion:    funding.PricingVersion,
-		Policy:            "STRICT",
-		ExpirySeconds:     300,
-		Metadata: map[string]any{
-			"provider": provider, "model": model,
-			"estimatedInputTokens":  estimated.inputTokens,
-			"estimatedOutputTokens": estimated.outputTokens,
-		},
-	})
+	// One reserve creates an ACTIVE hold. Rating captures it when InferenceUsage
+	// carries this same request ID. There is no follow-up start or settle call.
+	holdID, status, err := p.reserve(ctx, p.reservePayload(funding, requestID, amount))
 	if err != nil {
 		if p.failClosed() {
 			return req, &schemas.LLMPluginShortCircuit{Error: reservationError(status, err.Error())}, nil
@@ -222,17 +248,33 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 		p.logger.Warn("billing reservation skipped: %v", err)
 		return req, nil, nil
 	}
-	// This custom key lets other gateway plugins inspect the opaque reservation
+	// This custom key lets other gateway plugins inspect the opaque hold
 	// without changing Bifrost's request ID. Governance continues to publish that
-	// unchanged ID in InferenceUsage, which MPilot Rating uses for settlement.
-	ctx.SetValue(reservationContextKey, &reservation{ID: reservationID, RequestID: requestID})
+	// unchanged ID in InferenceUsage, which MPilot Rating uses for capture.
+	ctx.SetValue(reservationContextKey, &reservation{
+		ID: holdID, RequestID: requestID, Amount: amount, Resource: resource,
+	})
 	return req, nil, nil
 }
 
-// PostLLMHook intentionally does not settle or release successful provider
-// executions. MPilot Rating settles the reservation from the InferenceUsage
-// Kafka event keyed by the unchanged request ID.
-func (p *Plugin) PostLLMHook(_ *schemas.BifrostContext, result *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+// PostLLMHook does not release a successful provider call. Rating captures the
+// ACTIVE hold from the InferenceUsage event, and this hook runs before governance
+// publishes that event. A terminal failure with no token usage is abandoned, so
+// the hold is released instead of waiting for expiry.
+func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+	if ctx == nil || bifrostErr == nil || responseHasTokenUsage(result) || attemptWillBeRetried(ctx, bifrostErr) {
+		return result, bifrostErr, nil
+	}
+	existing, _ := ctx.Value(reservationContextKey).(*reservation)
+	if existing == nil || existing.Released || existing.ID == "" {
+		return result, bifrostErr, nil
+	}
+	if _, err := p.release(ctx, existing.ID, existing.RequestID); err != nil {
+		p.logger.Warn("billing reservation release skipped: %v", err)
+		return result, bifrostErr, nil
+	}
+	existing.Released = true
+	ctx.SetValue(reservationContextKey, nil)
 	return result, bifrostErr, nil
 }
 
@@ -241,6 +283,25 @@ func (p *Plugin) Cleanup() error {
 		transport.CloseIdleConnections()
 	}
 	return nil
+}
+
+func (p *Plugin) funding(tenantID string) (TenantFunding, bool) {
+	funding, ok := p.config.TenantFunding[tenantID]
+	if !ok || strings.TrimSpace(funding.AccountID) == "" || strings.TrimSpace(funding.WalletID) == "" {
+		return TenantFunding{}, false
+	}
+	return funding, true
+}
+
+func (p *Plugin) reservePayload(funding TenantFunding, requestID, amount string) reserveRequest {
+	return reserveRequest{
+		AccountID:    funding.AccountID,
+		WalletID:     funding.WalletID,
+		RequestID:    requestID,
+		Amount:       amount,
+		TTLSeconds:   p.config.HoldTTLSeconds,
+		AllowOverage: false,
+	}
 }
 
 func (p *Plugin) failClosed() bool {
@@ -256,10 +317,91 @@ func (p *Plugin) rejectOrSkip(req *schemas.BifrostRequest, message string) (*sch
 }
 
 func reservationError(status int, message string) *schemas.BifrostError {
+	return reservationErrorWithFallback(status, message, false)
+}
+
+func reservationErrorAllowFallbacks(status int, message string) *schemas.BifrostError {
+	return reservationErrorWithFallback(status, message, true)
+}
+
+func reservationErrorWithFallback(status int, message string, allowFallbacks bool) *schemas.BifrostError {
 	if status < 400 || status > 599 {
 		status = http.StatusServiceUnavailable
 	}
-	return &schemas.BifrostError{Type: bifrost.Ptr("billing_reservation_failed"), StatusCode: bifrost.Ptr(status), Error: &schemas.ErrorField{Message: message}, AllowFallbacks: bifrost.Ptr(false)}
+	return &schemas.BifrostError{
+		Type:           bifrost.Ptr("billing_reservation_failed"),
+		StatusCode:     bifrost.Ptr(status),
+		Error:          &schemas.ErrorField{Message: message},
+		AllowFallbacks: bifrost.Ptr(allowFallbacks),
+	}
+}
+
+func amountLessOrEqual(left, right string) (bool, error) {
+	leftAmount, okLeft := new(big.Rat).SetString(strings.TrimSpace(left))
+	rightAmount, okRight := new(big.Rat).SetString(strings.TrimSpace(right))
+	if !okLeft || !okRight {
+		return false, fmt.Errorf("authorized amount comparison failed")
+	}
+	return leftAmount.Cmp(rightAmount) <= 0, nil
+}
+
+func amountDelta(target, current string) (string, error) {
+	targetAmount, okTarget := new(big.Rat).SetString(strings.TrimSpace(target))
+	currentAmount, okCurrent := new(big.Rat).SetString(strings.TrimSpace(current))
+	if !okTarget || !okCurrent {
+		return "", fmt.Errorf("authorized amount comparison failed")
+	}
+	delta := new(big.Rat).Sub(targetAmount, currentAmount)
+	if delta.Sign() <= 0 {
+		return "", fmt.Errorf("increase requires a positive additional amount")
+	}
+	return delta.FloatString(8), nil
+}
+
+// attemptWillBeRetried reports whether Bifrost will dispatch another fallback for
+// this failed attempt. PostLLMHook must not release the hold in that case.
+// A cancellation is terminal even when fallbacks remain.
+func attemptWillBeRetried(ctx context.Context, err *schemas.BifrostError) bool {
+	if err == nil {
+		return false
+	}
+	if err.Error != nil && err.Error.Type != nil && *err.Error.Type == schemas.RequestCancelled {
+		return false
+	}
+	if err.AllowFallbacks != nil && !*err.AllowFallbacks {
+		return false
+	}
+	fallbackCount := bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackCount)
+	if fallbackCount <= 0 {
+		return false
+	}
+	fallbackIndex := bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackIndex)
+	return fallbackIndex < fallbackCount
+}
+
+func responseHasTokenUsage(result *schemas.BifrostResponse) bool {
+	prompt, completion := tokenCounts(result)
+	return prompt > 0 || completion > 0
+}
+
+func tokenCounts(result *schemas.BifrostResponse) (promptTokens, completionTokens int) {
+	if result == nil {
+		return 0, 0
+	}
+	switch {
+	case result.TextCompletionResponse != nil && result.TextCompletionResponse.Usage != nil:
+		return result.TextCompletionResponse.Usage.PromptTokens, result.TextCompletionResponse.Usage.CompletionTokens
+	case result.ChatResponse != nil && result.ChatResponse.Usage != nil:
+		return result.ChatResponse.Usage.PromptTokens, result.ChatResponse.Usage.CompletionTokens
+	case result.ResponsesResponse != nil && result.ResponsesResponse.Usage != nil:
+		return result.ResponsesResponse.Usage.InputTokens, result.ResponsesResponse.Usage.OutputTokens
+	case result.ResponsesStreamResponse != nil && result.ResponsesStreamResponse.Response != nil && result.ResponsesStreamResponse.Response.Usage != nil:
+		return result.ResponsesStreamResponse.Response.Usage.InputTokens, result.ResponsesStreamResponse.Response.Usage.OutputTokens
+	case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
+		return result.EmbeddingResponse.Usage.PromptTokens, 0
+	default:
+		return 0, 0
+	}
 }
 
 func (p *Plugin) estimate(req *schemas.BifrostRequest, provider schemas.ModelProvider, model string) (estimate, error) {
@@ -326,20 +468,45 @@ func (e estimate) amount() string {
 }
 
 func (p *Plugin) reserve(ctx context.Context, payload reserveRequest) (string, int, error) {
-	body, status, err := p.post(ctx, p.config.ReservePath, payload.RequestID, payload)
+	body, status, err := p.post(ctx, p.config.ReservePath, payload.RequestID, payload.RequestID, payload)
 	if err != nil {
 		return "", status, err
 	}
 	var response struct {
-		ReservationID string `json:"reservationId"`
+		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(body, &response); err != nil || strings.TrimSpace(response.ReservationID) == "" {
-		return "", status, fmt.Errorf("reserve response did not include reservation_id")
+	if err := json.Unmarshal(body, &response); err != nil || strings.TrimSpace(response.ID) == "" {
+		return "", status, fmt.Errorf("reserve response did not include id")
 	}
-	return response.ReservationID, status, nil
+	return response.ID, status, nil
 }
 
-func (p *Plugin) post(parent context.Context, path, idempotencyKey string, payload any) ([]byte, int, error) {
+// replaceHold releases the current ACTIVE hold and reserves the full new amount
+// on the same request ID. The in-memory hold is cleared once release succeeds, so
+// a failed re-reserve cannot be reused by a later fallback.
+func (p *Plugin) replaceHold(ctx *schemas.BifrostContext, existing *reservation, funding TenantFunding, requestID, amount, resource string) (int, error) {
+	status, err := p.release(ctx, existing.ID, requestID)
+	if err != nil {
+		return status, err
+	}
+	ctx.SetValue(reservationContextKey, nil)
+	holdID, status, err := p.reserve(ctx, p.reservePayload(funding, requestID, amount))
+	if err != nil {
+		return status, err
+	}
+	ctx.SetValue(reservationContextKey, &reservation{
+		ID: holdID, RequestID: requestID, Amount: amount, Resource: resource,
+	})
+	return status, nil
+}
+
+func (p *Plugin) release(ctx context.Context, holdID, requestID string) (int, error) {
+	path := strings.TrimRight(p.config.ReservePath, "/") + "/" + url.PathEscape(holdID) + "/release"
+	_, status, err := p.post(ctx, path, requestID, requestID+":release:"+holdID, struct{}{})
+	return status, err
+}
+
+func (p *Plugin) post(parent context.Context, path, requestID, idempotencyKey string, payload any) ([]byte, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, fmt.Errorf("encode request: %w", err)
@@ -353,9 +520,9 @@ func (p *Plugin) post(parent context.Context, path, idempotencyKey string, paylo
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", idempotencyKey)
-	// Preserve the exact Bifrost request ID so MPilot can correlate reserve/start
-	// calls with the existing Kafka InferenceUsage event.
-	request.Header.Set("X-Request-Id", idempotencyKey)
+	// Preserve the exact Bifrost request ID so MPilot can correlate the hold
+	// with the existing Kafka InferenceUsage event.
+	request.Header.Set("X-Request-Id", requestID)
 	for key, value := range p.config.AdditionalHeaders {
 		request.Header.Set(key, value)
 	}
@@ -364,15 +531,15 @@ func (p *Plugin) post(parent context.Context, path, idempotencyKey string, paylo
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return nil, 0, fmt.Errorf("request balance reservation API: %w", err)
+		return nil, 0, fmt.Errorf("request wallet hold API: %w", err)
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return nil, response.StatusCode, fmt.Errorf("read balance reservation API response: %w", err)
+		return nil, response.StatusCode, fmt.Errorf("read wallet hold API response: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, response.StatusCode, fmt.Errorf("balance reservation API returned %d: %s", response.StatusCode, safeResponseMessage(responseBody))
+		return nil, response.StatusCode, fmt.Errorf("wallet hold API returned %d: %s", response.StatusCode, safeResponseMessage(responseBody))
 	}
 	return responseBody, response.StatusCode, nil
 }

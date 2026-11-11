@@ -341,8 +341,8 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(kafka.PluginName, builtinPlacement, schemas.Ptr(9))
 
-	// 10. MPilot balance reservation. It runs after governance and semantic cache:
-	// one call reserves and starts the hold before provider dispatch.
+	// 10. MPilot wallet holds. It runs after governance and semantic cache:
+	// one call reserves an ACTIVE hold before provider dispatch.
 	reservationPluginConfig := s.getPluginConfig(billingreservation.PluginName)
 	if reservationPluginConfig != nil && reservationPluginConfig.Enabled {
 		s.registerPluginWithStatus(ctx, billingreservation.PluginName, nil, reservationPluginConfig.Config, false)

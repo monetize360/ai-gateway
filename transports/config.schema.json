@@ -1749,18 +1749,25 @@
               "properties": {
                 "config": {
                   "type": "object",
-                  "description": "MPilot centralized balance reservation. One call reserves the estimated amount and marks the hold in progress before provider dispatch. MPilot Rating settles it from the existing Kafka InferenceUsage request ID.",
+                  "description": "MPilot wallet holds. One call reserves the estimated amount on the prepaid wallet before provider dispatch. MPilot Rating captures that ACTIVE hold from the existing Kafka InferenceUsage request ID.",
                   "properties": {
                     "base_url": {
                       "type": "string",
                       "format": "uri",
-                      "description": "Absolute MPilot API base URL for the reservation service."
+                      "description": "Absolute MPilot API base URL for the wallet-hold service."
                     },
                     "reserve_path": {
                       "type": "string",
                       "pattern": "^/",
-                      "default": "/api/v1/balance/reservations",
-                      "description": "Relative MPilot reservation path."
+                      "default": "/api/v1/wallet-holds",
+                      "description": "Relative MPilot wallet-hold path."
+                    },
+                    "hold_ttl_seconds": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 86400,
+                      "default": 3600,
+                      "description": "How long the ACTIVE hold stays reserved. MPilot expires every ACTIVE hold, including one whose provider call is still in flight, and returns the funds. Maximum is one day."
                     },
                     "timeout_ms": {
                       "type": "integer",
@@ -1813,16 +1820,20 @@
                     },
                     "tenant_funding": {
                       "type": "object",
-                      "description": "Tenant ID to authoritative MPilot customer-wallet mapping. Required for every tenant using the plugin.",
+                      "description": "Tenant ID to the prepaid wallet rating will charge. Required for every tenant using the plugin.",
                       "additionalProperties": {
                         "type": "object",
                         "properties": {
                           "account_id": { "type": "string", "format": "uuid" },
-                          "wallet_id": { "type": "string", "format": "uuid" },
+                          "wallet_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Wallet rating will charge for this tenant. Use the service wallet when one exists; otherwise the account wallet with no service. A different wallet is ignored and the usage is direct-debited."
+                          },
                           "currency_id": { "type": "string", "format": "uuid" },
                           "pricing_version": { "type": "string" }
                         },
-                        "required": ["account_id", "wallet_id", "currency_id"],
+                        "required": ["account_id", "wallet_id"],
                         "additionalProperties": false
                       }
                     }
