@@ -4277,7 +4277,31 @@ func (s *RDBConfigStore) loadRoutingRulesOrdered(ctx context.Context, dest *[]ta
 	return q.Find(dest).Error
 }
 
-// GetRoutingRules retrieves all routing rules from the database.
+// GetGuardrailPolicies retrieves active guardrail policies from the tenant database.
+func (s *RDBConfigStore) GetGuardrailPolicies(ctx context.Context) ([]tables.TableGuardrailPolicy, error) {
+	var rows []tables.TableGuardrailPolicy
+	if err := s.DB().WithContext(ctx).Where("deleted = ?", false).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetGuardrailBindings(ctx context.Context) ([]tables.TableGuardrailBinding, error) {
+	var rows []tables.TableGuardrailBinding
+	if err := s.DB().WithContext(ctx).Where("deleted = ?", false).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RDBConfigStore) GetGuardrailNemoConfigs(ctx context.Context) ([]tables.TableGuardrailNemoConfig, error) {
+	var rows []tables.TableGuardrailNemoConfig
+	if err := s.DB().WithContext(ctx).Where("deleted = ?", false).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (s *RDBConfigStore) GetRoutingRules(ctx context.Context) ([]tables.TableRoutingRule, error) {
 	var rules []tables.TableRoutingRule
 	if err := s.loadRoutingRulesOrdered(ctx, &rules); err != nil {

@@ -64,6 +64,19 @@
           "context_weight": 0.2
         }
       }
+    },
+    {
+      "name": "guardrails",
+      "enabled": true,
+      "config": {
+        "sync_interval_seconds": 30,
+        "service_virtual_key_id": "",
+        "internal_header": "x-m360-guardrail-internal",
+        "parallel_input": false,
+        "nemo_config_dir": "../../nemo/configs",
+        "nemo_base_url": "http://localhost:8084",
+        "gateway_base_url": "http://localhost:8082"
+      }
     }
   ]
 }

@@ -82,6 +82,26 @@ services:
       retries: 10
       start_period: 20s
 
+  # Open-source NeMo Guardrails server. The gateway plugin calls it in check-only
+  # mode. Folder names under ./nemo/configs are the config_id values policies select.
+  nemo-guardrails:
+    build: ./nemo
+    image: ai-gateway-nemo-guardrails:local
+    container_name: ai-gateway-nemo-guardrails
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${NEMO_GUARDRAILS_PORT:-8084}:8084"
+    environment:
+      M360_GATEWAY_URL: ${M360_GATEWAY_URL:-http://host.docker.internal:8082}
+    volumes:
+      - ./nemo/configs:/configs
+
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    profiles: ["presidio"]
+    ports:
+      - "${PRESIDIO_ANALYZER_PORT:-5002}:3000"
+
 volumes:
   ai-gateway-kafka-data:
   ai-gateway-weaviate-data:

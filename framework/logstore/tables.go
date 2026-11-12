@@ -68,8 +68,12 @@ type SearchFilters struct {
 	MaxCost           *float64          `json:"max_cost,omitempty"`
 	MissingCostOnly   bool              `json:"missing_cost_only,omitempty"`
 	CacheHitTypes     []string          `json:"cache_hit_types,omitempty"` // For filtering by local-cache hit type ("direct", "semantic")
-	ContentSearch     string            `json:"content_search,omitempty"`
-	MetadataFilters   map[string]string `json:"metadata_filters,omitempty"` // key=metadataKey, value=metadataValue for filtering by metadata
+	ContentSearch       string            `json:"content_search,omitempty"`
+	MetadataFilters     map[string]string `json:"metadata_filters,omitempty"` // key=metadataKey, value=metadataValue for filtering by metadata
+	GuardrailDecisions  []string          `json:"guardrail_decisions,omitempty"`
+	GuardrailPolicy     string            `json:"guardrail_policy,omitempty"`
+	GuardrailOnly       bool              `json:"guardrail_only,omitempty"`
+	ScopeOrgIDs         []string          `json:"scope_org_ids,omitempty"`
 }
 
 // PaginationOptions represents pagination parameters
@@ -147,6 +151,8 @@ type Log struct {
 	RoutingSourceProviderID   *string `gorm:"type:uuid;index:idx_logs_routing_source_provider_id" json:"routing_source_provider_id,omitempty"`
 	RoutingSourceModelID      *string `gorm:"type:uuid;index:idx_logs_routing_source_model_id" json:"routing_source_model_id,omitempty"`
 	GovernanceDecision        *string `gorm:"type:varchar(64);index:idx_logs_governance_decision" json:"governance_decision,omitempty"` // governance rejection decision: budget_exceeded, token_limited, request_limited, model_blocked, etc.
+	GuardrailDecision         *string `gorm:"type:varchar(32);index:idx_logs_guardrail_decision" json:"guardrail_decision,omitempty"`
+	GuardrailDetails          *string `gorm:"type:text" json:"guardrail_details,omitempty"`
 	SelectedPromptName      *string   `gorm:"type:varchar(255)" json:"selected_prompt_name"`
 	SelectedPromptVersion   *string   `gorm:"type:varchar(64)" json:"selected_prompt_version"`
 	SelectedPromptID        *string   `gorm:"type:varchar(36)" json:"selected_prompt_id"`
