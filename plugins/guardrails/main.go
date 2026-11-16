@@ -108,9 +108,9 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, registry t
 	}
 	plugin.evaluators = NewEvaluatorRegistry(
 		regexEvaluator{},
-		newNemoEvaluator(cfg.NemoBaseURL, internalSecret, plugin.nemoFolder),
+		newNemoEvaluator(cfg.NemoBaseURL, cfg.InternalHeader, internalSecret, plugin.nemoFolder),
 		newWebhookEvaluator(),
-		newLLMJudgeEvaluator(cfg.GatewayBaseURL, internalSecret),
+		newLLMJudgeEvaluator(cfg.GatewayBaseURL, cfg.InternalHeader, internalSecret),
 		newBedrockEvaluator(),
 		newAzureEvaluator(),
 		newLakeraEvaluator(),
@@ -474,38 +474,52 @@ func (p *Plugin) recordResult(ctx *schemas.BifrostContext, result StageResult) {
 }
 
 func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
-	if req == nil || req.ChatRequest == nil {
+	if req == nil || (req.ChatRequest == nil && req.ResponsesRequest == nil && req.TextCompletionRequest == nil) {
 		return req, nil, nil
 	}
 	policies := p.policiesFor(ctx, req, "input")
 	if len(policies) == 0 {
 		return req, nil, nil
 	}
-	if p.config.ParallelInput {
-		p.startParallelInput(ctx, policies, requestMessages(req))
+	messages := requestMessages(req)
+	if p.config.ParallelInput && !anyRedactPolicy(policies) {
+		p.startParallelInput(ctx, policies, messages)
 		return req, nil, nil
 	}
-	result := p.evaluateStage(ctx, policies, requestMessages(req), "input")
+	result := p.evaluateStage(ctx, policies, messages, "input")
 	p.recordResult(ctx, result)
 	if result.Decision == DecisionBlock {
 		return req, &schemas.LLMPluginShortCircuit{Error: blockError(blockMessage(result))}, nil
 	}
 	if result.Decision == DecisionRedact {
-		applyRequestMessages(req, result.Messages)
+		applyMessages(result.Messages)
 	}
 	return req, nil, nil
+}
+
+// anyRedactPolicy reports whether a policy may rewrite the input. Those must finish before the
+// request is sent, so they cannot run in parallel with the model call.
+func anyRedactPolicy(policies []Policy) bool {
+	for _, policy := range policies {
+		if policy.Action == DecisionRedact {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
 	if inputErr := p.consumeParallelInput(ctx); inputErr != nil {
 		return nil, inputErr, nil
 	}
-	if bifrostErr != nil || resp == nil || resp.ChatResponse == nil {
+	if bifrostErr != nil || resp == nil || (resp.ChatResponse == nil && resp.ResponsesResponse == nil && resp.TextCompletionResponse == nil) {
 		return resp, bifrostErr, nil
 	}
-	provider := string(resp.ChatResponse.ExtraFields.Provider)
-	model := resp.ChatResponse.Model
-	req := &schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{Provider: schemas.ModelProvider(provider), Model: model}}
+	if resp.TextCompletionResponse != nil && resp.TextCompletionResponse.ExtraFields.RequestType == schemas.TextCompletionStreamRequest {
+		return resp, bifrostErr, nil
+	}
+	provider, model := responseModel(resp)
+	req := &schemas.BifrostRequest{ChatRequest: &schemas.BifrostChatRequest{Provider: provider, Model: model}}
 	policies := p.policiesFor(ctx, req, "output")
 	if len(policies) == 0 {
 		return resp, bifrostErr, nil
@@ -513,14 +527,13 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if isStreamChat(resp) {
 		return p.finishStreamChunk(ctx, resp, policies)
 	}
-	text := responseText(resp)
-	result := p.evaluateStage(ctx, policies, []MessageText{{Role: "assistant", Text: text}}, "output")
+	result := p.evaluateStage(ctx, policies, responseMessages(resp), "output")
 	p.recordResult(ctx, result)
 	if result.Decision == DecisionBlock {
 		return nil, blockError(blockMessage(result)), nil
 	}
 	if result.Decision == DecisionRedact {
-		applyResponseText(resp, result.OutputText)
+		applyMessages(result.Messages)
 	}
 	return resp, bifrostErr, nil
 }

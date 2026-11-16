@@ -30,6 +30,7 @@ func (p *Plugin) startParallelInput(ctx *schemas.BifrostContext, policies []Poli
 
 // consumeParallelInput waits for the background input check.
 // The first block is the HTTP 400. Later stream chunks are skipped.
+// The request was already sent unredacted, so a redact decision is enforced as a block.
 func (p *Plugin) consumeParallelInput(ctx *schemas.BifrostContext) *schemas.BifrostError {
 	check, _ := ctx.Value(parallelInputKey).(*inputCheck)
 	if check == nil {
@@ -42,7 +43,7 @@ func (p *Plugin) consumeParallelInput(ctx *schemas.BifrostContext) *schemas.Bifr
 		p.recordResult(ctx, check.result)
 		check.recorded = true
 	}
-	if check.result.Decision != DecisionBlock {
+	if check.result.Decision != DecisionBlock && check.result.Decision != DecisionRedact {
 		return nil
 	}
 	if check.emitted {

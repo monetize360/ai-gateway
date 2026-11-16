@@ -20,13 +20,15 @@ type llmJudgeConfig struct {
 type llmJudgeEvaluator struct {
 	client         *http.Client
 	baseURL        string
+	internalHeader string
 	internalSecret string
 }
 
-func newLLMJudgeEvaluator(baseURL, internalSecret string) *llmJudgeEvaluator {
+func newLLMJudgeEvaluator(baseURL, internalHeader, internalSecret string) *llmJudgeEvaluator {
 	return &llmJudgeEvaluator{
 		client:         &http.Client{Timeout: 30 * time.Second},
 		baseURL:        strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		internalHeader: internalHeader,
 		internalSecret: internalSecret,
 	}
 }
@@ -65,7 +67,7 @@ func (e *llmJudgeEvaluator) Evaluate(ctx context.Context, policy Policy, input E
 	}
 	endpoint := e.baseURL + "/v1/chat/completions"
 	raw, err := postJSON(ctx, e.client, endpoint, body, token, map[string]string{
-		"x-m360-guardrail-internal": e.internalSecret,
+		e.internalHeader: e.internalSecret,
 	})
 	if err != nil {
 		return Evaluation{}, err

@@ -28,14 +28,20 @@ type nemoConfig struct {
 type nemoEvaluator struct {
 	client         *http.Client
 	baseURL        string
+	internalHeader string
 	internalSecret string
 	folderFor      func(tenantID, configID string) string
 }
 
-func newNemoEvaluator(baseURL, internalSecret string, folderFor func(tenantID, configID string) string) *nemoEvaluator {
+// nemoInternalHeaderNameHeader tells the NeMo sidecar which header carries the internal secret,
+// so its model calls back into the gateway use the same configured header name.
+const nemoInternalHeaderNameHeader = "x-m360-guardrail-internal-header"
+
+func newNemoEvaluator(baseURL, internalHeader, internalSecret string, folderFor func(tenantID, configID string) string) *nemoEvaluator {
 	return &nemoEvaluator{
 		client:         &http.Client{Timeout: 30 * time.Second},
 		baseURL:        strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		internalHeader: internalHeader,
 		internalSecret: internalSecret,
 		folderFor:      folderFor,
 	}
@@ -99,7 +105,8 @@ func (e *nemoEvaluator) Evaluate(ctx context.Context, policy Policy, input Evalu
 		return Evaluation{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-m360-guardrail-internal", e.internalSecret)
+	req.Header.Set(e.internalHeader, e.internalSecret)
+	req.Header.Set(nemoInternalHeaderNameHeader, e.internalHeader)
 	if model := gatewayModelName(config.Provider, config.Model); model != "" {
 		token := callerToken(ctx)
 		if token == "" {

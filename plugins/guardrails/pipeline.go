@@ -125,7 +125,7 @@ func (p *Plugin) evaluateOne(ctx context.Context, policy Policy, messages []Mess
 	}
 	copied := append([]MessageText(nil), messages...)
 	if replacement := strings.TrimSpace(evaluation.Replacement); replacement != "" && len(copied) > 0 {
-		copied[len(copied)-1].Text = replacement
+		copied[len(copied)-1] = copied[len(copied)-1].replaceText(replacement)
 		return groupOutcome{policy: policy, detail: detail, messages: copied}
 	}
 	if policy.Type == "regex_keyword" {
@@ -135,7 +135,7 @@ func (p *Plugin) evaluateOne(ctx context.Context, policy Policy, messages []Mess
 		}
 	}
 	for i := range copied {
-		copied[i].Text = "[REDACTED]"
+		copied[i] = copied[i].redactAll("[REDACTED]")
 	}
 	return groupOutcome{policy: policy, detail: detail, messages: copied}
 }

@@ -99,26 +99,24 @@ func redactMessages(messages []MessageText, configJSON string) ([]MessageText, e
 	if err != nil {
 		return nil, err
 	}
-	out := append([]MessageText(nil), messages...)
-	for i := range out {
-		updated := out[i].Text
-		for _, pattern := range patterns {
-			updated = pattern.re.ReplaceAllString(updated, replacement)
+	keywordPatterns := make([]*regexp.Regexp, 0, len(keywords))
+	for _, keyword := range keywords {
+		if trimmed := strings.TrimSpace(keyword); trimmed != "" {
+			keywordPatterns = append(keywordPatterns, regexp.MustCompile("(?i)"+regexp.QuoteMeta(trimmed)))
 		}
-		lower := strings.ToLower(updated)
-		for _, keyword := range keywords {
-			trimmed := strings.TrimSpace(keyword)
-			if trimmed == "" {
-				continue
+	}
+	out := make([]MessageText, len(messages))
+	for i, message := range messages {
+		out[i] = message.mapParts(func(part textPart) string {
+			updated := part.text
+			for _, pattern := range patterns {
+				updated = pattern.re.ReplaceAllString(updated, replacement)
 			}
-			idx := strings.Index(lower, strings.ToLower(trimmed))
-			if idx < 0 {
-				continue
+			for _, keywordPattern := range keywordPatterns {
+				updated = keywordPattern.ReplaceAllLiteralString(updated, replacement)
 			}
-			updated = updated[:idx] + replacement + updated[idx+len(trimmed):]
-			lower = strings.ToLower(updated)
-		}
-		out[i].Text = updated
+			return updated
+		})
 	}
 	return out, nil
 }

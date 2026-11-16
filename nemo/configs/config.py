@@ -27,11 +27,12 @@ def _header(name):
 
 def _inject(request):
     token = _header("x-m360-llm-api-key")
-    secret = _header("x-m360-guardrail-internal")
+    secret_header = _header("x-m360-guardrail-internal-header") or "x-m360-guardrail-internal"
+    secret = _header(secret_header)
     if token:
         request.headers["Authorization"] = "Bearer " + token
     if secret:
-        request.headers["x-m360-guardrail-internal"] = secret
+        request.headers[secret_header] = secret
 
 
 async def _inject_async(request):
