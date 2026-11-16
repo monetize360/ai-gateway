@@ -122,6 +122,38 @@ func applyMessages(messages []MessageText) {
 	}
 }
 
+func chatToolArgumentParts(assistant *schemas.ChatAssistantMessage) []textPart {
+	if assistant == nil {
+		return nil
+	}
+	var parts []textPart
+	for i := range assistant.ToolCalls {
+		call := &assistant.ToolCalls[i]
+		if call.Function.Arguments == "" {
+			continue
+		}
+		parts = append(parts, newTextPart(toolArgumentsTextPart, call.Function.Arguments, func(text string) { call.Function.Arguments = text }))
+	}
+	return parts
+}
+
+func responsesToolParts(toolMessage *schemas.ResponsesToolMessage) []textPart {
+	if toolMessage == nil {
+		return nil
+	}
+	var parts []textPart
+	if toolMessage.Arguments != nil && *toolMessage.Arguments != "" {
+		parts = append(parts, newTextPart(toolArgumentsTextPart, *toolMessage.Arguments, func(text string) { toolMessage.Arguments = &text }))
+	}
+	if output := toolMessage.Output; output != nil {
+		if output.ResponsesToolCallOutputStr != nil && *output.ResponsesToolCallOutputStr != "" {
+			parts = append(parts, newTextPart(contentTextPart, *output.ResponsesToolCallOutputStr, func(text string) { output.ResponsesToolCallOutputStr = &text }))
+		}
+		parts = append(parts, responsesBlockParts(output.ResponsesFunctionToolCallOutputBlocks)...)
+	}
+	return parts
+}
+
 func chatContentParts(content *schemas.ChatMessageContent) []textPart {
 	if content == nil {
 		return nil
@@ -190,15 +222,7 @@ func chatRequestMessages(chatRequest *schemas.BifrostChatRequest) []MessageText 
 	for i := range chatRequest.Input {
 		message := &chatRequest.Input[i]
 		parts := chatContentParts(message.Content)
-		if message.ChatAssistantMessage != nil {
-			for j := range message.ChatAssistantMessage.ToolCalls {
-				call := &message.ChatAssistantMessage.ToolCalls[j]
-				if call.Function.Arguments == "" {
-					continue
-				}
-				parts = append(parts, newTextPart(toolArgumentsTextPart, call.Function.Arguments, func(text string) { call.Function.Arguments = text }))
-			}
-		}
+		parts = append(parts, chatToolArgumentParts(message.ChatAssistantMessage)...)
 		out = append(out, newMessageText(string(message.Role), parts))
 	}
 	return out
@@ -214,17 +238,7 @@ func responsesRequestMessages(responsesRequest *schemas.BifrostResponsesRequest)
 	for i := range responsesRequest.Input {
 		item := &responsesRequest.Input[i]
 		parts := responsesContentParts(item.Content)
-		if toolMessage := item.ResponsesToolMessage; toolMessage != nil {
-			if toolMessage.Arguments != nil && *toolMessage.Arguments != "" {
-				parts = append(parts, newTextPart(toolArgumentsTextPart, *toolMessage.Arguments, func(text string) { toolMessage.Arguments = &text }))
-			}
-			if output := toolMessage.Output; output != nil {
-				if output.ResponsesToolCallOutputStr != nil && *output.ResponsesToolCallOutputStr != "" {
-					parts = append(parts, newTextPart(contentTextPart, *output.ResponsesToolCallOutputStr, func(text string) { output.ResponsesToolCallOutputStr = &text }))
-				}
-				parts = append(parts, responsesBlockParts(output.ResponsesFunctionToolCallOutputBlocks)...)
-			}
-		}
+		parts = append(parts, responsesToolParts(item.ResponsesToolMessage)...)
 		out = append(out, newMessageText(responsesItemRole(item), parts))
 	}
 	return out
@@ -284,11 +298,15 @@ func responseMessages(resp *schemas.BifrostResponse) []MessageText {
 			if choice.ChatNonStreamResponseChoice == nil || choice.ChatNonStreamResponseChoice.Message == nil {
 				continue
 			}
-			parts = append(parts, chatContentParts(choice.ChatNonStreamResponseChoice.Message.Content)...)
+			message := choice.ChatNonStreamResponseChoice.Message
+			parts = append(parts, chatContentParts(message.Content)...)
+			parts = append(parts, chatToolArgumentParts(message.ChatAssistantMessage)...)
 		}
 	case resp.ResponsesResponse != nil:
 		for i := range resp.ResponsesResponse.Output {
-			parts = append(parts, responsesContentParts(resp.ResponsesResponse.Output[i].Content)...)
+			item := &resp.ResponsesResponse.Output[i]
+			parts = append(parts, responsesContentParts(item.Content)...)
+			parts = append(parts, responsesToolParts(item.ResponsesToolMessage)...)
 		}
 	case resp.TextCompletionResponse != nil:
 		for _, choice := range resp.TextCompletionResponse.Choices {
