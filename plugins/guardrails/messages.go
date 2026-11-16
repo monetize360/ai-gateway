@@ -1,6 +1,7 @@
 package guardrails
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -69,9 +70,15 @@ func (m MessageText) mapParts(transform func(part textPart) string) MessageText 
 
 // replaceText writes a full replacement of the joined text. The replacement cannot be split back
 // across parts, so it lands on the first content part and every other part is cleared.
+// A tool-call argument only keeps that text when it is still valid JSON.
 func (m MessageText) replaceText(replacement string) MessageText {
 	if len(m.parts) <= 1 {
-		return m.mapParts(func(textPart) string { return replacement })
+		return m.mapParts(func(part textPart) string {
+			if part.kind == toolArgumentsTextPart {
+				return keepToolArguments(replacement)
+			}
+			return replacement
+		})
 	}
 	written := false
 	return m.mapParts(func(part textPart) string {
@@ -84,6 +91,14 @@ func (m MessageText) replaceText(replacement string) MessageText {
 		written = true
 		return replacement
 	})
+}
+
+// keepToolArguments returns text when it is valid JSON, otherwise an empty object.
+func keepToolArguments(text string) string {
+	if json.Valid([]byte(text)) {
+		return text
+	}
+	return redactedToolArguments
 }
 
 // redactAll overwrites every text part with the placeholder.
