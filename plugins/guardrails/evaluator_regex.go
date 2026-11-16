@@ -115,7 +115,7 @@ func redactMessages(messages []MessageText, configJSON string) ([]MessageText, e
 			for _, keywordPattern := range keywordPatterns {
 				updated = keywordPattern.ReplaceAllLiteralString(updated, replacement)
 			}
-			if part.kind == toolArgumentsTextPart {
+			if part.kind == toolArgumentsTextPart && updated != part.text {
 				return keepToolArguments(updated)
 			}
 			return updated
