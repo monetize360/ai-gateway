@@ -1629,7 +1629,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			},
 		}
 
-	case DecisionMissingServiceID, DecisionAccountAmbiguous, DecisionWalletInsufficient, DecisionMissingAccountExternalID:
+	case DecisionMissingServiceID, DecisionAccountAmbiguous, DecisionWalletInsufficient, DecisionMissingAccount, DecisionMissingAccountExternalID:
 		// Billing metadata is incomplete, so the request cannot be rated — reject it as a
 		// bad request rather than letting unrated spend through.
 		return result, &schemas.BifrostError{

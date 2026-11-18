@@ -41,6 +41,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/billingreservation"
 	"github.com/maximhq/bifrost/plugins/compat"
 	"github.com/maximhq/bifrost/plugins/governance"
+	"github.com/maximhq/bifrost/plugins/guardrails"
 	"github.com/maximhq/bifrost/plugins/kafka"
 	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/plugins/maxim"
@@ -120,6 +121,7 @@ var builtinPluginNames = []string{
 	prompts.PluginName,
 	logging.PluginName,
 	governance.PluginName,
+	guardrails.PluginName,
 	otel.PluginName,
 	semanticcache.PluginName,
 	semanticrouter.PluginName,

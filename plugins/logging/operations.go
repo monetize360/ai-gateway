@@ -199,6 +199,12 @@ func (p *LoggerPlugin) updateLogEntry(
 	if governanceDecision != "" {
 		updates["governance_decision"] = governanceDecision
 	}
+	if data.GuardrailDecision != "" {
+		updates["guardrail_decision"] = data.GuardrailDecision
+	}
+	if data.GuardrailDetails != "" {
+		updates["guardrail_details"] = data.GuardrailDetails
+	}
 	if numberOfRetries != 0 {
 		updates["number_of_retries"] = numberOfRetries
 	}

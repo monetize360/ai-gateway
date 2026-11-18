@@ -1744,6 +1744,12 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 					continue
 				}
 			}
+			if decision, _ := bifrostCtx.Value(schemas.BifrostContextKeyGuardrailDecision).(string); decision != "" {
+				ctx.Response.Header.Set("x-bf-guardrail-decision", decision)
+			}
+			if details, _ := bifrostCtx.Value(schemas.BifrostContextKeyGuardrailDetails).(string); details != "" {
+				ctx.Response.Header.Set("x-bf-guardrail-policies", details)
+			}
 
 			// Convert response to JSON
 			chunkJSON, err := sonic.Marshal(chunk)

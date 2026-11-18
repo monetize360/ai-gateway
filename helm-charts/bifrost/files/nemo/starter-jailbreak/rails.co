@@ -1,0 +1,7 @@
+define flow jailbreak attempt
+  if "ignore previous instructions" in $user_message.lower() or "ignore all previous instructions" in $user_message.lower() or "you are now" in $user_message.lower() or "developer mode" in $user_message.lower() or "jailbreak" in $user_message.lower()
+    bot refuse jailbreak
+    stop
+
+define bot refuse jailbreak
+  "I can't help with that request."

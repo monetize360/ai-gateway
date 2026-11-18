@@ -31,9 +31,12 @@ const (
 	// DecisionAccountAmbiguous is returned when an organization maps to more than one billing
 	// account, making the account-scoped spend limits impossible to resolve.
 	DecisionAccountAmbiguous Decision = "account_ambiguous"
-	// DecisionWalletInsufficient is returned when a prepaid leaf account has no eligible
-	// funded wallet, so the request cannot be billed from prepaid funds.
+	// DecisionWalletInsufficient is returned when the leaf billing account has no eligible
+	// wallet, or a prepaid wallet has no remaining funds.
 	DecisionWalletInsufficient Decision = "wallet_insufficient"
+	// DecisionMissingAccount is returned when the org has no billing account, so the
+	// request cannot be rated.
+	DecisionMissingAccount Decision = "missing_account"
 	// DecisionMissingAccountExternalID is returned when the org maps to exactly one billing
 	// account but that account has no external_id, so usage cannot be published for rating.
 	DecisionMissingAccountExternalID Decision = "missing_account_external_id"
@@ -236,66 +239,78 @@ func (r *BudgetResolver) EvaluateBudgetUsageRequest(ctx *schemas.BifrostContext,
 		}
 	}
 
+	// The virtual key's scope org wins. Otherwise use the org already stamped on the
+	// request (the JWT morgId), which is the same org usage publish bills against.
+	orgID := billingOrgID(ctx, vk)
+
 	// 5. Account hierarchy of the key's organization.
-	if vk != nil {
-		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
-			decision, err := r.store.CheckAccountHierarchyBudgetUsage(ctx, orgID, request, nil)
-			if decision == DecisionAccountAmbiguous {
-				return &EvaluationResult{
-					Decision:   decision,
-					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+	if orgID != "" {
+		decision, err := r.store.CheckAccountHierarchyBudgetUsage(ctx, orgID, request, nil)
+		if decision == DecisionAccountAmbiguous {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
-			if err != nil || isBudgetViolation(decision) {
-				return &EvaluationResult{
-					Decision:   decision,
-					Reason:     fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+		}
+		if err != nil || isBudgetViolation(decision) {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Account-level budget exceeded: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
 		}
 	}
 
-	// 6. Leaf account external_id is required to publish usage for rating.
-	if vk != nil {
-		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
-			decision, err := r.store.CheckLeafAccountExternalID(orgID)
-			if decision == DecisionAccountAmbiguous {
-				return &EvaluationResult{
-					Decision:   decision,
-					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+	// 6. A billing account with external_id is required to publish usage for rating.
+	if orgID != "" {
+		decision, err := r.store.CheckLeafAccountExternalID(orgID)
+		if decision == DecisionAccountAmbiguous {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
-			if decision == DecisionMissingAccountExternalID {
-				return &EvaluationResult{
-					Decision:   decision,
-					Reason:     fmt.Sprintf("Billing account has no external_id: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+		}
+		if decision == DecisionMissingAccount {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Billing account was not found: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
+			}
+		}
+		if decision == DecisionMissingAccountExternalID {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Billing account has no external_id: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
 		}
 	}
 
-	// 7. Prepaid wallet on the leaf billing account.
-	if vk != nil {
-		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
-			serviceID := strings.TrimSpace(r.store.ResolveConfigModelServiceID(request.Provider, request.Model))
-			decision, err := r.store.CheckPrepaidWallet(ctx, orgID, serviceID)
-			if decision == DecisionAccountAmbiguous {
-				return &EvaluationResult{
-					Decision:   decision,
-					Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+	// 7. The leaf account must have an eligible wallet. Prepaid wallets must also have funds.
+	if orgID != "" {
+		serviceID := strings.TrimSpace(r.store.ResolveConfigModelServiceID(request.Provider, request.Model))
+		decision, err := r.store.CheckPrepaidWallet(ctx, orgID, serviceID)
+		if decision == DecisionAccountAmbiguous {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Account hierarchy could not be resolved: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
-			if err != nil || decision == DecisionWalletInsufficient {
-				return &EvaluationResult{
-					Decision:   DecisionWalletInsufficient,
-					Reason:     fmt.Sprintf("Prepaid wallet check failed: %s", reasonFromErr(err, decision)),
-					VirtualKey: vk,
-				}
+		}
+		if decision == DecisionMissingAccount {
+			return &EvaluationResult{
+				Decision:   decision,
+				Reason:     fmt.Sprintf("Billing account was not found: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
+			}
+		}
+		if err != nil || decision == DecisionWalletInsufficient {
+			return &EvaluationResult{
+				Decision:   DecisionWalletInsufficient,
+				Reason:     fmt.Sprintf("Wallet check failed: %s", reasonFromErr(err, decision)),
+				VirtualKey: vk,
 			}
 		}
 	}
@@ -305,6 +320,22 @@ func (r *BudgetResolver) EvaluateBudgetUsageRequest(ctx *schemas.BifrostContext,
 		Reason:     "Budget usage checks passed",
 		VirtualKey: vk,
 	}
+}
+
+// billingOrgID is the organization whose account and wallet pay for this request.
+// The virtual key's scope org takes precedence. The org stamped on the request is the
+// fallback, matching the org InferenceUsage publish uses.
+func billingOrgID(ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey) string {
+	if vk != nil {
+		if orgID := vk.GovernanceScopeOrgIDString(); orgID != "" {
+			return orgID
+		}
+	}
+	if ctx == nil {
+		return ""
+	}
+	orgID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceOrgID).(string)
+	return strings.TrimSpace(orgID)
 }
 
 // isModelRequired checks if the requested model is required for this request
@@ -341,9 +372,14 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 			Reason:   "Virtual key is inactive",
 		}
 	}
+	// A guardrail's own model call uses the provider and model the policy author chose. The
+	// caller's provider and model rules decide what the caller may request, not which model
+	// protects them, so they are skipped for that call. The key must still be active, within
+	// its budgets and rate limits, and use its own provider keys, and the spend lands on it.
+	skipCallerAccessRules := schemas.IsGuardrailInternalCall(ctx)
 	// 2a. Check provider access policy (org → org-unit → user → VK)
 	var scopedPolicies scopedAccessPolicies
-	if requestType != schemas.MCPToolExecutionRequest {
+	if requestType != schemas.MCPToolExecutionRequest && !skipCallerAccessRules {
 		scopedPolicies = r.resolveScopedAccess(ctx, vk)
 		if allowed, reason := isProviderAllowedByAccessPolicy(vk, provider, scopedPolicies.orgUnitProviderPolicy, scopedPolicies.userProviderPolicy); !allowed {
 			return &EvaluationResult{
@@ -354,7 +390,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 		}
 	}
 	// 2b. Check provider filtering (legacy provider config check)
-	if requestType != schemas.MCPToolExecutionRequest && !r.isProviderAllowed(vk, provider) {
+	if requestType != schemas.MCPToolExecutionRequest && !skipCallerAccessRules && !r.isProviderAllowed(vk, provider) {
 		return &EvaluationResult{
 			Decision:   DecisionProviderBlocked,
 			Reason:     fmt.Sprintf("Provider '%s' is not allowed for this virtual key", provider),
@@ -363,7 +399,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	}
 	// 3. Check model filtering. The reason names the layer that denied the model
 	// (organization, organizational unit, user, or virtual key).
-	if r.isModelRequired(requestType) {
+	if !skipCallerAccessRules && r.isModelRequired(requestType) {
 		if reason := r.modelDenialReason(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs); reason != "" {
 			return &EvaluationResult{
 				Decision:   DecisionModelBlocked,

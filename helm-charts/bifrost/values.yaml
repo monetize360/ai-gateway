@@ -433,6 +433,21 @@ bifrost:
         #     mode: plugin
         #     timeout_ms: 2000
 
+    guardrails:
+      enabled: false
+      version: 1
+      config:
+        sync_interval_seconds: 30
+        service_virtual_key_id: ""
+        internal_header: x-m360-guardrail-internal
+        parallel_input: false
+        # Writable directory shared with the NeMo sidecar. Empty skips tenant config sync.
+        nemo_config_dir: "/nemo-configs"
+        # Sidecar shares the pod network. NEMO_BASE_URL overrides this at runtime.
+        nemo_base_url: "http://127.0.0.1:8084"
+        # Where the judge calls this gateway. AI_GATEWAY_BASE_URL overrides this at runtime.
+        gateway_base_url: "http://127.0.0.1:8080"
+
     semanticRouter:
       enabled: false
       version: 1
@@ -1102,3 +1117,23 @@ envFrom: []
 # Init containers to run before the main application container.
 # Provide a list of init containers using standard Kubernetes container spec.
 initContainers: []
+
+# Optional NeMo Guardrails sidecar. Enable together with bifrost.plugins.guardrails.
+# Policies select a config_id that matches a folder mounted at /configs.
+nemoGuardrails:
+  enabled: false
+  image:
+    repository: ai-gateway-nemo-guardrails
+    tag: local
+    pullPolicy: IfNotPresent
+  # Where NeMo calls back into this gateway for model-based checks. Same pod network.
+  gatewayUrl: "http://127.0.0.1:8080"
+
+# Optional Presidio analyzer sidecar used by the presidio evaluator.
+presidioAnalyzer:
+  enabled: false
+  image:
+    repository: mcr.microsoft.com/presidio-analyzer
+    tag: latest
+    pullPolicy: IfNotPresent
+

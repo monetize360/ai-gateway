@@ -241,8 +241,8 @@ type GovernanceStore interface {
 	CheckAccountBudgetUsage(ctx context.Context, accountID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckAccountHierarchyBudgetUsage(ctx context.Context, orgID string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
 	CheckPrepaidWallet(ctx context.Context, orgID string, serviceID string) (Decision, error)
-	// CheckLeafAccountExternalID rejects when the org has a unique billing account with no
-	// external_id. Organizations with no account skip (DecisionAllow); multiple accounts
+	// CheckLeafAccountExternalID rejects when the org has no billing account, the leaf
+	// account cannot be loaded, or that account has no external_id. Multiple accounts
 	// return DecisionAccountAmbiguous.
 	CheckLeafAccountExternalID(orgID string) (Decision, error)
 	CheckOrgUnitHierarchyBudgetUsage(ctx context.Context, userIDs []string, request *EvaluationRequest, baselines map[string]float64) (Decision, error)
@@ -1815,10 +1815,9 @@ func (gs *LocalGovernanceStore) ResolveLeafAccountExternalID(orgID string) strin
 	return strings.TrimSpace(*leaf.ExternalID)
 }
 
-// CheckLeafAccountExternalID rejects PreLLM when the organization has exactly one billing
-// account and that account's external_id is missing. Rating uses that value as
-// billingAccountRef, so the request would otherwise complete the LLM call and then skip
-// Kafka publish.
+// CheckLeafAccountExternalID rejects PreLLM when the organization has no billing account,
+// the leaf account cannot be loaded, or that account's external_id is missing. Rating uses
+// external_id as billingAccountRef, so the request must not reach the model without it.
 func (gs *LocalGovernanceStore) CheckLeafAccountExternalID(orgID string) (Decision, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
@@ -1829,11 +1828,12 @@ func (gs *LocalGovernanceStore) CheckLeafAccountExternalID(orgID string) (Decisi
 		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
 	}
 	if len(accountIDs) == 0 {
-		return DecisionAllow, nil
+		return DecisionMissingAccount, fmt.Errorf("no billing account for organization %s", orgID)
 	}
 	leaf := gs.loadAccount(accountIDs[0])
 	if leaf == nil {
-		return DecisionAllow, nil
+		return DecisionMissingAccount, fmt.Errorf(
+			"billing account %s for organization %s could not be loaded", accountIDs[0], orgID)
 	}
 	if leaf.ExternalID == nil || strings.TrimSpace(*leaf.ExternalID) == "" {
 		return DecisionMissingAccountExternalID, fmt.Errorf(
@@ -2039,8 +2039,9 @@ func (gs *LocalGovernanceStore) CheckAccountHierarchyBudgetUsage(ctx context.Con
 
 const approvedWalletStatusID = "fe07e71d-cba4-4316-9c7c-4935c3adec34"
 
-// CheckPrepaidWallet enforces a funded wallet on the leaf billing account for orgID when
-// that account is prepaid. Organizations without an account, or postpaid accounts, skip.
+// CheckPrepaidWallet requires an eligible wallet on the leaf billing account. A prepaid
+// account is also rejected when that wallet has no remaining funds. An organization with
+// no account is rejected here as well, so a missing account cannot skip the wallet check.
 func (gs *LocalGovernanceStore) CheckPrepaidWallet(ctx context.Context, orgID string, serviceID string) (Decision, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
@@ -2051,17 +2052,18 @@ func (gs *LocalGovernanceStore) CheckPrepaidWallet(ctx context.Context, orgID st
 		return DecisionAccountAmbiguous, fmt.Errorf("multiple accounts for organization %s", orgID)
 	}
 	if len(accountIDs) == 0 {
-		return DecisionAllow, nil
+		return DecisionMissingAccount, fmt.Errorf("no billing account for organization %s", orgID)
 	}
 	leafAccount := gs.loadAccount(accountIDs[0])
-	if leafAccount == nil || !leafAccount.IsPrepaid {
-		return DecisionAllow, nil
+	if leafAccount == nil {
+		return DecisionMissingAccount, fmt.Errorf(
+			"billing account %s for organization %s could not be loaded", accountIDs[0], orgID)
 	}
 	wallet := gs.pickWalletForAccount(accountIDs[0], strings.TrimSpace(serviceID))
 	if wallet == nil {
-		return DecisionWalletInsufficient, fmt.Errorf("prepaid account %s has no eligible wallet", accountIDs[0])
+		return DecisionWalletInsufficient, fmt.Errorf("account %s has no eligible wallet", accountIDs[0])
 	}
-	if walletFunds(wallet) <= 0 {
+	if leafAccount.IsPrepaid && walletFunds(wallet) <= 0 {
 		return DecisionWalletInsufficient, fmt.Errorf("prepaid account %s wallet has no remaining funds", accountIDs[0])
 	}
 	return DecisionAllow, nil

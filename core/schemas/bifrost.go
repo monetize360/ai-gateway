@@ -217,6 +217,8 @@ const (
 	BifrostContextKeyGovernanceRoutingRuleName           BifrostContextKey = "bifrost-governance-routing-rule-name"          // string (to store the routing rule name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceRoutingQueryParams        BifrostContextKey = "bifrost-governance-routing-query-params"       // string (JSON object of query param key/values from matched params-based routing rule - set by governance plugin)
 	BifrostContextKeyGovernanceDecision                  BifrostContextKey = "bifrost-governance-decision"                   // string (governance rejection decision type, e.g. budget_exceeded, token_limited, request_limited, model_blocked - set by governance plugin)
+	BifrostContextKeyGuardrailDecision                   BifrostContextKey = "bifrost-guardrail-decision"                    // string (allow, block, redact, flag, fail_open - set by guardrails plugin)
+	BifrostContextKeyGuardrailDetails                    BifrostContextKey = "bifrost-guardrail-details"                     // string (JSON array of per-policy verdicts - set by guardrails plugin)
 	BifrostContextKeyGovernanceRoutingSourceProviderID   BifrostContextKey = "bifrost-governance-routing-source-provider-id" // string (config_providers.id before routing - set by governance plugin)
 	BifrostContextKeyGovernanceRoutingSourceModelID      BifrostContextKey = "bifrost-governance-routing-source-model-id"    // string (config_models.id before routing - set by governance plugin)
 	BifrostContextKeySelectedPromptName                  BifrostContextKey = "bifrost-selected-prompt-name"                  // string (display name of the selected prompt (set by prompts plugin - DO NOT SET THIS MANUALLY))

@@ -1,0 +1,13 @@
+# Input-only jailbreak heuristics. Pair with starter-input-output when a policy
+# needs both a model self-check and these phrases. Phrase checks never call the model.
+models:
+  - type: main
+    engine: m360_gateway
+    model: policy-model
+
+rails:
+  input:
+    flows:
+      - jailbreak attempt
+
+prompts: []

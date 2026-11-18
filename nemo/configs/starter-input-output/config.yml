@@ -1,0 +1,26 @@
+# Shipped NeMo config. The folder name is the config_id a GuardrailPolicy selects.
+# Self-check calls the gateway with the virtual key and model stored on that policy.
+models:
+  - type: main
+    engine: m360_gateway
+    model: policy-model
+
+rails:
+  input:
+    flows:
+      - self check input
+  output:
+    flows:
+      - self check output
+
+prompts:
+  - task: self_check_input
+    content: |
+      Your task is to check if the user message should be blocked.
+      User message: "{{ user_input }}"
+      Answer with yes or no. yes means block.
+  - task: self_check_output
+    content: |
+      Your task is to check if the assistant message should be blocked.
+      Assistant message: "{{ bot_response }}"
+      Answer with yes or no. yes means block.

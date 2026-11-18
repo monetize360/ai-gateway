@@ -286,7 +286,10 @@ func newKafkaClient(conf *kafkaConnectionConfig) (*kgo.Client, error) {
 		kgo.ProducerLinger(lingerDuration(settings.LingerMs)),
 		kgo.ProducerBatchMaxBytes(ProducerBatchMaxBytes),
 		kgo.MaxBufferedRecords(MaxBufferedRecords),
-		kgo.RecordPartitioner(kgo.RoundRobinPartitioner()),
+		// Hash the record key (Kafka murmur2, same as the Java producer default).
+		// Inference usage and POST /v1/ingest/usage both set that key. Records
+		// with no key stay sticky instead of spreading round-robin.
+		kgo.RecordPartitioner(kgo.StickyKeyPartitioner(nil)),
 		kgo.ProducerBatchCompression(kgo.Lz4Compression()),
 	}
 	// franz-go enables idempotent writes by default, which only works with acks=all.

@@ -33,6 +33,8 @@ type GovernanceRefreshDelta struct {
 	ConfigModels                     []tables.TableModel
 	Providers                        []tables.TableProvider
 	RoutingRules                     []tables.TableRoutingRule
+	GuardrailPolicies                []tables.TableGuardrailPolicy
+	GuardrailBindings                []tables.TableGuardrailBinding
 	ReloadOrgAllowedModelConfigs     bool
 	ReloadOrgProviderAccess          bool
 	ReloadOrgUnitAllowedModelConfigs bool
@@ -65,7 +67,9 @@ func (d *GovernanceRefreshDelta) IsEmpty() bool {
 		len(d.ModelConfigs) == 0 &&
 		len(d.ConfigModels) == 0 &&
 		len(d.Providers) == 0 &&
-		len(d.RoutingRules) == 0
+		len(d.RoutingRules) == 0 &&
+		len(d.GuardrailPolicies) == 0 &&
+		len(d.GuardrailBindings) == 0
 }
 
 // ProviderConfigRefreshDelta holds provider runtime config changes since the last refresh.
@@ -216,6 +220,18 @@ func (s *RDBConfigStore) GetGovernanceRefreshDelta(ctx context.Context, since ti
 	}
 	if err := appendDeletedRowsSince(db, since, &delta.RoutingRules); err != nil {
 		return nil, fmt.Errorf("deleted routing rules since: %w", err)
+	}
+	if err := db.Where("updated_at >= ?", since).Find(&delta.GuardrailPolicies).Error; err != nil {
+		return nil, fmt.Errorf("guardrail policies changed since: %w", err)
+	}
+	if err := appendDeletedRowsSince(db, since, &delta.GuardrailPolicies); err != nil {
+		return nil, fmt.Errorf("deleted guardrail policies since: %w", err)
+	}
+	if err := db.Where("updated_at >= ?", since).Find(&delta.GuardrailBindings).Error; err != nil {
+		return nil, fmt.Errorf("guardrail bindings changed since: %w", err)
+	}
+	if err := appendDeletedRowsSince(db, since, &delta.GuardrailBindings); err != nil {
+		return nil, fmt.Errorf("deleted guardrail bindings since: %w", err)
 	}
 
 	vkIDs, err := s.collectVirtualKeyIDsChangedSince(ctx, since)
