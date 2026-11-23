@@ -568,12 +568,21 @@ func TestCreateVirtualKey_DuplicateName(t *testing.T) {
 
 	vk2 := &tables.TableVirtualKey{
 		ID:       "vk-2",
-		Name:     "Same Name", // Duplicate name
+		Name:     "Same Name", // Duplicate unowned name (HTTP / config-file path)
 		Value:    "vk-value-2",
 		IsActive: schemas.Ptr(true),
 	}
 	err = store.CreateVirtualKey(ctx, vk2)
-	assert.Error(t, err, "Should fail with duplicate name")
+	assert.Error(t, err, "Should fail with duplicate name among unowned keys")
+
+	userA := "11111111-1111-1111-1111-111111111111"
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-owned-same-name",
+		Name:   "Same Name",
+		Value:  "vk-owned-value",
+		UserID: &userA,
+	})
+	require.NoError(t, err, "owned key may reuse an unowned name")
 }
 
 func TestGetVirtualKeyByValue(t *testing.T) {

@@ -279,9 +279,12 @@ func (mc *TableVirtualKeyMCPConfig) UnmarshalJSON(data []byte) error {
 
 // TableVirtualKey represents a virtual key with budget, rate limits, and org association
 type TableVirtualKey struct {
-	ID                     string                     `gorm:"primaryKey;type:uuid" json:"id"`
-	// Name is unique per owning user among non-deleted rows (matches MPilot idx_virtual_key_name).
-	Name                   string                     `gorm:"uniqueIndex:idx_virtual_key_name,priority:2,where:deleted = false AND user_id IS NOT NULL;type:varchar(255);not null" json:"name"`
+	ID string `gorm:"primaryKey;type:uuid" json:"id"`
+	// Name uniqueness (non-deleted rows):
+	//   - owned:  (user_id, name) via idx_virtual_key_name
+	//   - unowned (HTTP/config loaders with null user_id): name via idx_virtual_key_name_unowned
+	// Without the unowned index, SQL NULL≠NULL would allow duplicate names for keys with no owner.
+	Name                   string                     `gorm:"uniqueIndex:idx_virtual_key_name,priority:2,where:deleted = false AND user_id IS NOT NULL;uniqueIndex:idx_virtual_key_name_unowned,where:deleted = false AND user_id IS NULL;type:varchar(255);not null" json:"name"`
 	Description            string                     `gorm:"type:text" json:"description,omitempty"`
 	Value                  string                     `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`                // The virtual key value
 	IsActive               *bool                      `gorm:"default:true" json:"is_active,omitempty"`                                          // Nil means true (DB default); false means inactive
