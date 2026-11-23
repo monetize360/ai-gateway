@@ -1128,6 +1128,9 @@ nemoGuardrails:
     pullPolicy: IfNotPresent
   # Where NeMo calls back into this gateway for model-based checks. Same pod network.
   gatewayUrl: "http://127.0.0.1:8080"
+  # Requests are needed when the HPA scales on cpu/memory: utilization is computed
+  # across every container in the pod and fails if any container has no request.
+  resources: {}
 
 # Optional Presidio analyzer sidecar used by the presidio evaluator.
 presidioAnalyzer:
