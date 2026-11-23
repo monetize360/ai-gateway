@@ -13,6 +13,10 @@ on:
         description: "Bump the image tag in the GitOps repo after pushing"
         type: boolean
         default: true
+      build_nemo:
+        description: "Also build the NeMo Guardrails sidecar image (push builds it only when nemo/ changed)"
+        type: boolean
+        default: false
   push:
     branches:
       - dev
@@ -25,6 +29,7 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
   GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+  NEMO_ECR_REPOSITORY_NAME: ai-gateway-nemo-guardrails
 
 jobs:
   build-and-push:
@@ -67,14 +72,87 @@ jobs:
       - name: Push image to ECR
         run: docker push "${ECR_REPOSITORY}:${{ steps.vars.outputs.image_tag }}"
 
+  # The NeMo Guardrails sidecar image (nemo/Dockerfile). Runs alongside the gateway
+  # build and only builds when nemo/ changed in the push, or when build_nemo is set
+  # on a manual run. Its configs ship in the Helm chart, not in this image.
+  build-nemo:
+    name: Build & push NeMo Guardrails image to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      built: ${{ steps.pushed.outputs.built }}
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether to build
+        id: vars
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BUILD_NEMO_INPUT: ${{ inputs.build_nemo }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:8}"
+          echo "image_tag=ai-gateway-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            BUILD="${BUILD_NEMO_INPUT:-false}"
+          elif [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            # No usable base commit to diff against: build to be safe.
+            BUILD=true
+          elif git diff --quiet "$BEFORE_SHA" "$GITHUB_SHA" -- nemo/; then
+            BUILD=false
+          else
+            BUILD=true
+          fi
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "Build NeMo image: ${BUILD} (tag ai-gateway-${SHORT_SHA})"
+
+      - name: Configure AWS credentials
+        if: steps.vars.outputs.build == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: steps.vars.outputs.build == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        if: steps.vars.outputs.build == 'true'
+        env:
+          NEMO_IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.NEMO_ECR_REPOSITORY_NAME }}:${{ steps.vars.outputs.image_tag }}
+        run: docker build -f nemo/Dockerfile -t "$NEMO_IMAGE" nemo
+
+      - name: Push image to ECR
+        if: steps.vars.outputs.build == 'true'
+        env:
+          NEMO_IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.NEMO_ECR_REPOSITORY_NAME }}:${{ steps.vars.outputs.image_tag }}
+        run: docker push "$NEMO_IMAGE"
+
+      - name: Record result
+        id: pushed
+        env:
+          BUILD: ${{ steps.vars.outputs.build }}
+        run: echo "built=${BUILD}" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Bump GitOps image tag
-    needs: build-and-push
+    needs: [build-and-push, build-nemo]
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || inputs.deploy }}
     env:
       ENVIRONMENT: ${{ inputs.environment || 'qa' }}
       IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+      NEMO_BUILT: ${{ needs.build-nemo.outputs.built }}
+      NEMO_IMAGE_TAG: ${{ needs.build-nemo.outputs.image_tag }}
     steps:
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
@@ -91,6 +169,7 @@ jobs:
           sudo chmod +x /usr/local/bin/yq
 
       - name: Update image tag
+        id: bump
         run: |
           cd CD
           git config --global user.name "github-actions[bot]"
@@ -98,8 +177,20 @@ jobs:
           FILE="apps/bifrost/${ENVIRONMENT}/deployment.yaml"
           echo "Updating ${FILE} -> image.tag=${IMAGE_TAG}"
           TAG="$IMAGE_TAG" yq -i '.spec.values.image.tag = strenv(TAG)' "$FILE"
+          SUMMARY="bifrost ${IMAGE_TAG}"
+          # Only bump the sidecar where this environment already runs it; never add the block.
+          if [ "$NEMO_BUILT" = "true" ]; then
+            if yq -e '.spec.values.nemoGuardrails' "$FILE" >/dev/null 2>&1; then
+              echo "Updating ${FILE} -> nemoGuardrails.image.tag=${NEMO_IMAGE_TAG}"
+              TAG="$NEMO_IMAGE_TAG" yq -i '.spec.values.nemoGuardrails.image.tag = strenv(TAG)' "$FILE"
+              SUMMARY="${SUMMARY}, nemo-guardrails ${NEMO_IMAGE_TAG}"
+            else
+              echo "NeMo image built, but ${FILE} has no nemoGuardrails block; leaving it alone"
+            fi
+          fi
+          echo "summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
           git add "$FILE"
-          git commit -m "Update bifrost to $IMAGE_TAG"
+          git commit -m "Update ${SUMMARY}"
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
@@ -110,5 +201,5 @@ jobs:
           base: main
           delete-branch: true
           title: "[AUTOMATED] Update bifrost on ${{ env.ENVIRONMENT }}"
-          body: "This PR updates the bifrost version to ${{ env.IMAGE_TAG }}"
+          body: "This PR updates ${{ steps.bump.outputs.summary }}"
           labels: "bifrost,${{ env.ENVIRONMENT }}"
