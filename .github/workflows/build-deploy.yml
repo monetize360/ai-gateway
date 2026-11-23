@@ -25,6 +25,7 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
   GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+  NEMO_ECR_REPOSITORY_NAME: ai-gateway-nemo-guardrails
 
 jobs:
   build-and-push:
@@ -67,14 +68,54 @@ jobs:
       - name: Push image to ECR
         run: docker push "${ECR_REPOSITORY}:${{ steps.vars.outputs.image_tag }}"
 
+  build-nemo:
+    name: Build & push NeMo Guardrails image to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: vars
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:8}"
+          echo "image_tag=ai-gateway-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ai-gateway-${SHORT_SHA}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        env:
+          NEMO_IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.NEMO_ECR_REPOSITORY_NAME }}:${{ steps.vars.outputs.image_tag }}
+        run: docker build -f nemo/Dockerfile -t "$NEMO_IMAGE" nemo
+
+      - name: Push image to ECR
+        env:
+          NEMO_IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.NEMO_ECR_REPOSITORY_NAME }}:${{ steps.vars.outputs.image_tag }}
+        run: docker push "$NEMO_IMAGE"
+
   deploy:
     name: Bump GitOps image tag
-    needs: build-and-push
+    needs: [build-and-push, build-nemo]
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || inputs.deploy }}
     env:
       ENVIRONMENT: ${{ inputs.environment || 'qa' }}
       IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+      NEMO_IMAGE_TAG: ${{ needs.build-nemo.outputs.image_tag }}
     steps:
       - name: Checkout GitOps repo
         uses: actions/checkout@v4
@@ -90,14 +131,15 @@ jobs:
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Update image tag
+      - name: Update image tags
         run: |
           cd CD
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           FILE="apps/bifrost/${ENVIRONMENT}/deployment.yaml"
-          echo "Updating ${FILE} -> image.tag=${IMAGE_TAG}"
+          echo "Updating ${FILE} -> image.tag=${IMAGE_TAG}, nemoGuardrails.image.tag=${NEMO_IMAGE_TAG}"
           TAG="$IMAGE_TAG" yq -i '.spec.values.image.tag = strenv(TAG)' "$FILE"
+          TAG="$NEMO_IMAGE_TAG" yq -i '.spec.values.nemoGuardrails.image.tag = strenv(TAG)' "$FILE"
           git add "$FILE"
           git commit -m "Update bifrost to $IMAGE_TAG"
 
@@ -110,5 +152,5 @@ jobs:
           base: main
           delete-branch: true
           title: "[AUTOMATED] Update bifrost on ${{ env.ENVIRONMENT }}"
-          body: "This PR updates the bifrost version to ${{ env.IMAGE_TAG }}"
+          body: "This PR updates the bifrost version to ${{ env.IMAGE_TAG }} (gateway and NeMo Guardrails images)"
           labels: "bifrost,${{ env.ENVIRONMENT }}"
