@@ -60,6 +60,7 @@
     go work use ./framework && \
     go work use ./plugins/compat && \
     go work use ./plugins/governance && \
+    go work use ./plugins/guardrails && \
     go work use ./plugins/jsonparser && \
     go work use ./plugins/kafka && \
     go work use ./plugins/logging && \

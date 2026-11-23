@@ -298,6 +298,10 @@ spec:
           env:
             - name: M360_GATEWAY_URL
               value: {{ .Values.nemoGuardrails.gatewayUrl | quote }}
+          {{- with .Values.nemoGuardrails.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: nemo-guardrails-config
               mountPath: /shipped
