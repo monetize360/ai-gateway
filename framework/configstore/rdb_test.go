@@ -619,6 +619,38 @@ func TestUpdateVirtualKey(t *testing.T) {
 	assert.False(t, result.IsActiveValue())
 }
 
+func TestCreateVirtualKey_SameNameAllowedForDifferentUsers(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	userA := "11111111-1111-1111-1111-111111111111"
+	userB := "22222222-2222-2222-2222-222222222222"
+
+	err := store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-a",
+		Name:   "shared-name",
+		Value:  "vk-user-a-value",
+		UserID: &userA,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-b",
+		Name:   "shared-name",
+		Value:  "vk-user-b-value",
+		UserID: &userB,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-a-dup",
+		Name:   "shared-name",
+		Value:  "vk-user-a-dup-value",
+		UserID: &userA,
+	})
+	require.Error(t, err, "same user must not create duplicate name")
+}
+
 func TestDeleteVirtualKey(t *testing.T) {
 	store := setupRDBTestStore(t)
 	ctx := context.Background()

@@ -2463,11 +2463,20 @@ func (s *RDBConfigStore) UpdateVirtualKey(ctx context.Context, virtualKey *table
 
 	txDB := tx[0]
 
-	// Check if record exists by ID or Name
+	// Resolve by id, or by (user_id, name) when id is empty. Never match on bare name —
+	// names are unique per user, so a global name lookup is ambiguous across owners.
 	var existing tables.TableVirtualKey
-	err := dbForUpdate(txDB.WithContext(ctx)).
-		Where("id = ? OR name = ?", virtualKey.ID, virtualKey.Name).
-		First(&existing).Error
+	q := dbForUpdate(txDB.WithContext(ctx))
+	var err error
+	switch {
+	case virtualKey.ID != "":
+		err = q.Where("id = ?", virtualKey.ID).First(&existing).Error
+	case virtualKey.UserID != nil && *virtualKey.UserID != "" && virtualKey.Name != "":
+		err = q.Where("user_id = ? AND name = ? AND deleted = ?", *virtualKey.UserID, virtualKey.Name, false).
+			First(&existing).Error
+	default:
+		err = gorm.ErrRecordNotFound
+	}
 
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return s.parseGormError(err)

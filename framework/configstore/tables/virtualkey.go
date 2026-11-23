@@ -280,7 +280,8 @@ func (mc *TableVirtualKeyMCPConfig) UnmarshalJSON(data []byte) error {
 // TableVirtualKey represents a virtual key with budget, rate limits, and org association
 type TableVirtualKey struct {
 	ID                     string                     `gorm:"primaryKey;type:uuid" json:"id"`
-	Name                   string                     `gorm:"uniqueIndex:idx_virtual_key_name;type:varchar(255);not null" json:"name"`
+	// Name is unique per owning user among non-deleted rows (matches MPilot idx_virtual_key_name).
+	Name                   string                     `gorm:"uniqueIndex:idx_virtual_key_name,priority:2,where:deleted = false AND user_id IS NOT NULL;type:varchar(255);not null" json:"name"`
 	Description            string                     `gorm:"type:text" json:"description,omitempty"`
 	Value                  string                     `gorm:"uniqueIndex:idx_virtual_key_value;type:text;not null" json:"value"`                // The virtual key value
 	IsActive               *bool                      `gorm:"default:true" json:"is_active,omitempty"`                                          // Nil means true (DB default); false means inactive
@@ -298,7 +299,8 @@ type TableVirtualKey struct {
 	// OrgID is reserved for MPilot tenant visibility and is not used by the governance engine.
 	OrgID *string `gorm:"type:uuid;index" json:"org_id,omitempty"`
 	// UserID is the billing user owning this key; drives budgetusage__m.user_id checks in PreLLM.
-	UserID *string `gorm:"column:user_id;type:uuid;index" json:"user_id,omitempty"`
+	// Part of idx_virtual_key_name so the same display name can exist for different users.
+	UserID *string `gorm:"column:user_id;type:uuid;uniqueIndex:idx_virtual_key_name,priority:1" json:"user_id,omitempty"`
 	// ScopeOrgID is the org used for budget, rate limit, and routing scope at runtime.
 	// When set, it takes precedence over OrgID.
 	ScopeOrgID *string `gorm:"type:uuid;index" json:"scope_org_id,omitempty"`
