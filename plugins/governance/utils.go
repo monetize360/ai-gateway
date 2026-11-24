@@ -42,10 +42,17 @@ func VirtualKeyIDFromFastHTTPContext(ctx *fasthttp.RequestCtx) string {
 	return ""
 }
 
-// stampVirtualKeyOrgContext sets the resolved governance org (usage scope) on context.
+// stampVirtualKeyOrgContext sets the resolved governance org (usage scope) and
+// virtual key identity on context so downstream request-flow logs can include vk=.
 func stampVirtualKeyOrgContext(ctx *schemas.BifrostContext, vk *configstoreTables.TableVirtualKey) {
 	if ctx == nil || vk == nil {
 		return
+	}
+	if vk.ID != "" {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, vk.ID)
+	}
+	if vk.Name != "" {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyName, vk.Name)
 	}
 	if scopeOrgID := vk.GovernanceScopeOrgID(); scopeOrgID != nil {
 		ctx.SetValue(schemas.BifrostContextKeyGovernanceOrgID, *scopeOrgID)

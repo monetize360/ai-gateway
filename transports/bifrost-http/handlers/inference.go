@@ -1030,6 +1030,7 @@ func (h *CompletionHandler) chatCompletion(ctx *fasthttp.RequestCtx) {
 	resp, bifrostErr := h.client.ChatCompletionRequest(bifrostCtx, bifrostChatReq)
 	if bifrostErr != nil {
 		forwardProviderHeadersFromContext(ctx, bifrostCtx)
+		logRequestFlow(bifrostCtx, "7/constructing-error-response: constructing gateway response stream=%t", false)
 		SendBifrostError(ctx, bifrostErr)
 		return
 	}
@@ -1041,6 +1042,7 @@ func (h *CompletionHandler) chatCompletion(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Send successful response
+	logRequestFlow(bifrostCtx, "7/constructing-response: constructing gateway response stream=%t", false)
 	SendJSON(ctx, resp)
 }
 
@@ -1590,10 +1592,12 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 	if bifrostErr != nil {
 		cancel()
 		forwardProviderHeadersFromContext(ctx, bifrostCtx)
+		logRequestFlow(bifrostCtx, "7/constructing-error-response: constructing gateway response stream=%t", true)
 		SendBifrostError(ctx, bifrostErr)
 		return
 	}
 
+	logRequestFlow(bifrostCtx, "7/constructing-response: constructing gateway response stream=%t", true)
 	// SSE headers set only after successful stream setup
 	ctx.SetContentType("text/event-stream")
 	ctx.Response.Header.Set("Cache-Control", "no-cache")

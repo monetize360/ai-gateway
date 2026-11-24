@@ -617,9 +617,10 @@ func (p *GovernancePlugin) validateCandidateForContext(ctx context.Context, comp
 }
 
 // logSemantic writes one semantic-routing line to the request's routing-engine log
-// and the process logger.
+// and the process logger. Every line is prefixed with vk= (Virtual Key name) when
+// available on context, matching [request-flow] observability.
 func (p *GovernancePlugin) logSemantic(ctx *schemas.BifrostContext, level schemas.LogLevel, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
+	msg := fmt.Sprintf("vk=%q ", vkNameFromCtx(ctx)) + fmt.Sprintf(format, args...)
 	if ctx != nil {
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineSemantic, level, msg)
 	}
@@ -679,6 +680,7 @@ func (p *GovernancePlugin) applySemanticRouting(ctx *schemas.BifrostContext, req
 	vkName := ""
 	if virtualKey != nil {
 		vkName = virtualKey.Name
+		stampVirtualKeyOrgContext(ctx, virtualKey)
 	}
 
 	p.logSemantic(ctx, schemas.LogLevelInfo, "Selecting model from virtual key %q pool", vkName)

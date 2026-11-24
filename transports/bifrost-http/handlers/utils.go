@@ -9,10 +9,25 @@ import (
 	"strings"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
+
+// logRequestFlow writes a concise [request-flow] Info line with vk= prefix.
+func logRequestFlow(ctx *schemas.BifrostContext, format string, args ...any) {
+	if logger == nil {
+		return
+	}
+	vkName := "(none)"
+	if ctx != nil {
+		if name := bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyName); name != "" {
+			vkName = name
+		}
+	}
+	logger.Info(fmt.Sprintf("[request-flow] vk=%q ", vkName)+format, args...)
+}
 
 // ResolvePeriod converts a relative period string ("1h","6h","24h","7d","30d") to concrete
 // start/end time pointers computed from the current server time. Returns nil, nil for
