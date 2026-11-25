@@ -568,12 +568,21 @@ func TestCreateVirtualKey_DuplicateName(t *testing.T) {
 
 	vk2 := &tables.TableVirtualKey{
 		ID:       "vk-2",
-		Name:     "Same Name", // Duplicate name
+		Name:     "Same Name", // Duplicate unowned name (HTTP / config-file path)
 		Value:    "vk-value-2",
 		IsActive: schemas.Ptr(true),
 	}
 	err = store.CreateVirtualKey(ctx, vk2)
-	assert.Error(t, err, "Should fail with duplicate name")
+	assert.Error(t, err, "Should fail with duplicate name among unowned keys")
+
+	userA := "11111111-1111-1111-1111-111111111111"
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-owned-same-name",
+		Name:   "Same Name",
+		Value:  "vk-owned-value",
+		UserID: &userA,
+	})
+	require.NoError(t, err, "owned key may reuse an unowned name")
 }
 
 func TestGetVirtualKeyByValue(t *testing.T) {
@@ -617,6 +626,38 @@ func TestUpdateVirtualKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Updated Name", result.Name)
 	assert.False(t, result.IsActiveValue())
+}
+
+func TestCreateVirtualKey_SameNameAllowedForDifferentUsers(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	userA := "11111111-1111-1111-1111-111111111111"
+	userB := "22222222-2222-2222-2222-222222222222"
+
+	err := store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-a",
+		Name:   "shared-name",
+		Value:  "vk-user-a-value",
+		UserID: &userA,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-b",
+		Name:   "shared-name",
+		Value:  "vk-user-b-value",
+		UserID: &userB,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateVirtualKey(ctx, &tables.TableVirtualKey{
+		ID:     "vk-user-a-dup",
+		Name:   "shared-name",
+		Value:  "vk-user-a-dup-value",
+		UserID: &userA,
+	})
+	require.Error(t, err, "same user must not create duplicate name")
 }
 
 func TestDeleteVirtualKey(t *testing.T) {
