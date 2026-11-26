@@ -23,6 +23,7 @@ import (
 
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -63,12 +64,15 @@ func NewInferenceHandler(client *bifrost.Bifrost, config *lib.Config) *Completio
 func resolveModelAndProvider(ctx *fasthttp.RequestCtx, config *lib.Config, model string) (schemas.ModelProvider, string, error) {
 	provider, modelName := schemas.ParseModelString(model, "")
 	if modelName == "" {
-		return "", "", fmt.Errorf("model is required")
+		return "", "", fmt.Errorf("%s", governance.ModelNameRequiredMessage)
 	}
 	if provider == "" {
 		providers := config.GetProvidersForModelForRequest(ctx, modelName)
 		if len(providers) == 0 {
-			return "", "", fmt.Errorf("provider is required in model field (format: provider/model) — no providers found for model %q in model catalog to auto-resolve", modelName)
+			if logger != nil {
+				logger.Warn("no provider resolved for model %q", modelName)
+			}
+			return "", "", fmt.Errorf("%s", governance.InvalidModelNameMessage)
 		}
 		ctx.SetUserValue(lib.FastHTTPUserValueModelCatalogResolution, &lib.ModelCatalogResolution{
 			Model:            modelName,
@@ -900,7 +904,7 @@ func prepareTextCompletionRequest(ctx *fasthttp.RequestCtx, config *lib.Config) 
 		return nil, nil, err
 	}
 	if req.Prompt == nil || (req.Prompt.PromptStr == nil && req.Prompt.PromptArray == nil) {
-		return nil, nil, fmt.Errorf("prompt is required for text completion")
+		return nil, nil, fmt.Errorf("%s", governance.MissingPromptMessage)
 	}
 	if req.TextCompletionParameters == nil {
 		req.TextCompletionParameters = &schemas.TextCompletionParameters{}
@@ -962,7 +966,7 @@ func prepareChatCompletionRequest(ctx *fasthttp.RequestCtx, config *lib.Config) 
 		return nil, nil, err
 	}
 	if len(req.Messages) == 0 {
-		return nil, nil, fmt.Errorf("messages is required for chat completion")
+		return nil, nil, fmt.Errorf("%s", governance.MissingPromptMessage)
 	}
 	if req.ChatParameters == nil {
 		req.ChatParameters = &schemas.ChatParameters{}
@@ -1051,7 +1055,7 @@ func prepareResponsesRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (*Res
 		return nil, nil, err
 	}
 	if len(req.Input.ResponsesRequestInputArray) == 0 && req.Input.ResponsesRequestInputStr == nil {
-		return nil, nil, fmt.Errorf("input is required for responses")
+		return nil, nil, fmt.Errorf("%s", governance.MissingPromptMessage)
 	}
 	if req.ResponsesParameters == nil {
 		req.ResponsesParameters = &schemas.ResponsesParameters{}
@@ -1122,7 +1126,7 @@ func prepareEmbeddingRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (*Emb
 		return nil, nil, err
 	}
 	if req.Input == nil || (req.Input.Text == nil && req.Input.Texts == nil && req.Input.Embedding == nil && req.Input.Embeddings == nil) {
-		return nil, nil, fmt.Errorf("input is required for embeddings")
+		return nil, nil, fmt.Errorf("%s", governance.MissingPromptMessage)
 	}
 	if req.EmbeddingParameters == nil {
 		req.EmbeddingParameters = &schemas.EmbeddingParameters{}
@@ -1307,7 +1311,7 @@ func prepareSpeechRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (*Speech
 		return nil, nil, err
 	}
 	if req.SpeechInput == nil || req.SpeechInput.Input == "" {
-		return nil, nil, fmt.Errorf("input is required for speech completion")
+		return nil, nil, fmt.Errorf("%s", governance.MissingPromptMessage)
 	}
 	if req.SpeechParameters == nil || req.VoiceConfig == nil || (req.VoiceConfig.Voice == nil && len(req.VoiceConfig.MultiVoiceConfig) == 0) {
 		return nil, nil, fmt.Errorf("voice is required for speech completion")
@@ -1394,7 +1398,7 @@ func prepareTranscriptionRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (
 	}
 	modelValues := form.Value["model"]
 	if len(modelValues) == 0 || modelValues[0] == "" {
-		return nil, false, fmt.Errorf("model is required")
+		return nil, false, fmt.Errorf("%s", governance.ModelNameRequiredMessage)
 	}
 	provider, modelName, err := resolveModelAndProvider(ctx, config, modelValues[0])
 	if err != nil {
@@ -1963,7 +1967,7 @@ func prepareImageEditRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (*Ima
 	}
 	modelValues := form.Value["model"]
 	if len(modelValues) == 0 || modelValues[0] == "" {
-		return nil, nil, fmt.Errorf("model is required")
+		return nil, nil, fmt.Errorf("%s", governance.ModelNameRequiredMessage)
 	}
 	req.Model = modelValues[0]
 	provider, modelName, err := resolveModelAndProvider(ctx, config, req.Model)
@@ -2169,7 +2173,7 @@ func prepareImageVariationRequest(ctx *fasthttp.RequestCtx, config *lib.Config) 
 	}
 	modelValues := form.Value["model"]
 	if len(modelValues) == 0 || modelValues[0] == "" {
-		return nil, fmt.Errorf("model is required")
+		return nil, fmt.Errorf("%s", governance.ModelNameRequiredMessage)
 	}
 	provider, modelName, err := resolveModelAndProvider(ctx, config, modelValues[0])
 	if err != nil {
@@ -2607,7 +2611,7 @@ func (h *CompletionHandler) videoRemix(ctx *fasthttp.RequestCtx) {
 
 	// Validate prompt
 	if req.VideoGenerationInput == nil || req.VideoGenerationInput.Prompt == "" {
-		SendError(ctx, fasthttp.StatusBadRequest, "prompt is required")
+		SendError(ctx, fasthttp.StatusBadRequest, governance.MissingPromptMessage)
 		return
 	}
 
