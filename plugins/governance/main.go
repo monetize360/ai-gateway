@@ -1616,7 +1616,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(403),
 			Error: &schemas.ErrorField{
-				Message: ClientMessage(result.Decision, result.Reason),
+				Message: ClientMessage(result),
 			},
 		}
 
@@ -1625,7 +1625,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(429),
 			Error: &schemas.ErrorField{
-				Message: ClientMessage(result.Decision, result.Reason),
+				Message: ClientMessage(result),
 			},
 		}
 
@@ -1634,7 +1634,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(402),
 			Error: &schemas.ErrorField{
-				Message: ClientMessage(result.Decision, result.Reason),
+				Message: ClientMessage(result),
 			},
 		}
 
@@ -1645,7 +1645,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(400),
 			Error: &schemas.ErrorField{
-				Message: ClientMessage(result.Decision, result.Reason),
+				Message: ClientMessage(result),
 			},
 		}
 
@@ -1654,7 +1654,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(403),
 			Error: &schemas.ErrorField{
-				Message: ClientMessage(result.Decision, result.Reason),
+				Message: ClientMessage(result),
 			},
 		}
 

@@ -67,14 +67,35 @@ type scopedAccessPolicies struct {
 	userProviderPolicy    *configstoreTables.ProviderAccessPolicyRT
 }
 
+// ModelDenialScope names the layer that denied a model. It is set alongside
+// DecisionModelBlocked so callers never infer the layer from the reason text,
+// which embeds the model name.
+type ModelDenialScope string
+
+const (
+	// ModelDenialScopeNone means the model was not denied.
+	ModelDenialScopeNone ModelDenialScope = ""
+	// ModelDenialScopeUnknown means the model was denied without a resolvable layer.
+	ModelDenialScopeUnknown ModelDenialScope = "unknown"
+	// ModelDenialScopeOrganization means an organization-level rule denied the model.
+	ModelDenialScopeOrganization ModelDenialScope = "organization"
+	// ModelDenialScopeOrganizationalUnit means a department or team rule denied the model.
+	ModelDenialScopeOrganizationalUnit ModelDenialScope = "organizational_unit"
+	// ModelDenialScopeUser means a user-level rule denied the model.
+	ModelDenialScopeUser ModelDenialScope = "user"
+	// ModelDenialScopeVirtualKey means the virtual key's own rule denied the model.
+	ModelDenialScopeVirtualKey ModelDenialScope = "virtual_key"
+)
+
 // EvaluationResult contains the complete result of governance evaluation
 type EvaluationResult struct {
-	Decision      Decision                           `json:"decision"`
-	Reason        string                             `json:"reason"`
-	VirtualKey    *configstoreTables.TableVirtualKey `json:"virtual_key,omitempty"`
-	RateLimitInfo *configstoreTables.TableRateLimit  `json:"rate_limit_info,omitempty"`
-	BudgetInfo    []*configstoreTables.TableBudget   `json:"budget_info,omitempty"` // All budgets in hierarchy
-	UsageInfo     *UsageInfo                         `json:"usage_info,omitempty"`
+	Decision         Decision                           `json:"decision"`
+	Reason           string                             `json:"reason"`
+	ModelDenialScope ModelDenialScope                   `json:"model_denial_scope,omitempty"` // Set only for DecisionModelBlocked
+	VirtualKey       *configstoreTables.TableVirtualKey `json:"virtual_key,omitempty"`
+	RateLimitInfo    *configstoreTables.TableRateLimit  `json:"rate_limit_info,omitempty"`
+	BudgetInfo       []*configstoreTables.TableBudget   `json:"budget_info,omitempty"` // All budgets in hierarchy
+	UsageInfo        *UsageInfo                         `json:"usage_info,omitempty"`
 }
 
 // UsageInfo represents current usage levels for rate limits and budgets
@@ -400,11 +421,12 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	// 3. Check model filtering. The reason names the layer that denied the model
 	// (organization, organizational unit, user, or virtual key).
 	if !skipCallerAccessRules && r.isModelRequired(requestType) {
-		if reason := r.modelDenialReason(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs); reason != "" {
+		if denialScope, reason := r.modelDenial(vk, provider, model, scopedPolicies.orgUnitModelConfigs, scopedPolicies.userModelConfigs); denialScope != ModelDenialScopeNone {
 			return &EvaluationResult{
-				Decision:   DecisionModelBlocked,
-				Reason:     reason,
-				VirtualKey: vk,
+				Decision:         DecisionModelBlocked,
+				Reason:           reason,
+				ModelDenialScope: denialScope,
+				VirtualKey:       vk,
 			}
 		}
 	}
@@ -485,31 +507,33 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 }
 
 func (r *BudgetResolver) isModelAllowedWithScopedConfigs(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) bool {
-	return r.modelDenialReason(vk, provider, model, orgUnitConfigs, userConfigs) == ""
+	denialScope, _ := r.modelDenial(vk, provider, model, orgUnitConfigs, userConfigs)
+	return denialScope == ModelDenialScopeNone
 }
 
-// modelDenialReason returns an empty string when the model is allowed. Otherwise it names
-// the layer that blocked it. A department or team rule is reported with that unit's name.
-func (r *BudgetResolver) modelDenialReason(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) string {
+// modelDenial returns ModelDenialScopeNone when the model is allowed. Otherwise it returns the
+// layer that blocked it together with a log-friendly reason. A department or team rule is
+// reported with that unit's name in the reason.
+func (r *BudgetResolver) modelDenial(vk *configstoreTables.TableVirtualKey, provider schemas.ModelProvider, model string, orgUnitConfigs []configstoreTables.TableAllowedModelConfig, userConfigs []configstoreTables.TableAllowedModelConfig) (ModelDenialScope, string) {
 	if vk == nil {
-		return fmt.Sprintf("Model '%s' is not allowed", model)
+		return ModelDenialScopeUnknown, fmt.Sprintf("Model '%s' is not allowed", model)
 	}
 	if _, blocked := r.blockingScopeID(vk.OrgAllowedModelConfigs, provider, model, orgConfigScopeID); blocked {
-		return fmt.Sprintf("Model '%s' is not allowed for this organization", model)
+		return ModelDenialScopeOrganization, fmt.Sprintf("Model '%s' is not allowed for this organization", model)
 	}
 	if scopeID, blocked := r.blockingScopeID(orgUnitConfigs, provider, model, orgUnitConfigScopeID); blocked {
 		if name := r.orgUnitName(scopeID); name != "" {
-			return fmt.Sprintf("Model '%s' is not allowed for organizational unit '%s'", model, name)
+			return ModelDenialScopeOrganizationalUnit, fmt.Sprintf("Model '%s' is not allowed for organizational unit '%s'", model, name)
 		}
-		return fmt.Sprintf("Model '%s' is not allowed for this organizational unit", model)
+		return ModelDenialScopeOrganizationalUnit, fmt.Sprintf("Model '%s' is not allowed for this organizational unit", model)
 	}
 	if !r.isModelAllowedByUserConfigs(userConfigs, provider, model) {
-		return fmt.Sprintf("Model '%s' is not allowed for this user", model)
+		return ModelDenialScopeUser, fmt.Sprintf("Model '%s' is not allowed for this user", model)
 	}
 	if !r.isModelAllowedByVirtualKey(vk, provider, model) {
-		return fmt.Sprintf("Model '%s' is not allowed for this virtual key", model)
+		return ModelDenialScopeVirtualKey, fmt.Sprintf("Model '%s' is not allowed for this virtual key", model)
 	}
-	return ""
+	return ModelDenialScopeNone, ""
 }
 
 func (r *BudgetResolver) orgUnitName(orgUnitID string) string {

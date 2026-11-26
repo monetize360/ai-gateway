@@ -19,38 +19,40 @@ const (
 	MissingPromptMessage                  = "Request input is missing. Please provide a valid prompt."
 )
 
-// ClientMessage maps a governance decision to the catalogue sentence when one
-// matches. Decisions the catalogue does not name keep their existing reason.
-func ClientMessage(decision Decision, reason string) string {
-	switch decision {
+// ClientMessage maps a governance evaluation result to the catalogue sentence when one
+// matches. Decisions the catalogue does not name keep their existing reason. Model denials
+// are classified by the structured ModelDenialScope, never by the reason text, because the
+// reason embeds the model name.
+func ClientMessage(result *EvaluationResult) string {
+	switch result.Decision {
 	case DecisionVirtualKeyNotFound:
 		return InvalidAPIKeyMessage
 	case DecisionVirtualKeyBlocked:
-		if strings.Contains(strings.ToLower(reason), "inactive") {
+		if strings.Contains(strings.ToLower(result.Reason), "inactive") {
 			return RevokedAPIKeyMessage
 		}
-		return reason
+		return result.Reason
 	case DecisionModelBlocked:
-		switch {
-		case strings.Contains(reason, "organizational unit"):
+		switch result.ModelDenialScope {
+		case ModelDenialScopeOrganizationalUnit:
 			return ModelRestrictedByDepartmentMessage
-		case strings.Contains(reason, "organization"):
+		case ModelDenialScopeOrganization:
 			return ModelNotEnabledForOrganisationMessage
-		case strings.Contains(reason, "this user"), strings.Contains(reason, "virtual key"):
+		case ModelDenialScopeUser, ModelDenialScopeVirtualKey:
 			return ModelNotPermittedMessage
 		default:
-			return reason
+			return result.Reason
 		}
 	case DecisionWalletInsufficient:
 		return InsufficientWalletBalanceMessage
 	case DecisionBudgetExceeded:
-		if strings.Contains(reason, "Org-unit budget") {
+		if strings.Contains(result.Reason, "Org-unit budget") {
 			return DepartmentSpendLimitMessage
 		}
-		return reason
+		return result.Reason
 	case DecisionRateLimited, DecisionTokenLimited, DecisionRequestLimited:
 		return RateLimitExceededMessage
 	default:
-		return reason
+		return result.Reason
 	}
 }
