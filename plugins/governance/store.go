@@ -3297,13 +3297,11 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 		account := &accounts[i]
 		gs.accounts.Store(account.ID, account)
 	}
-	gs.reindexAccountsByCustomerOrg()
 
 	for i := range wallets {
 		wallet := &wallets[i]
 		gs.wallets.Store(wallet.ID, wallet)
 	}
-	gs.reindexWalletsByAccount()
 
 	for i := range orgUnits {
 		orgUnit := &orgUnits[i]
@@ -3414,6 +3412,10 @@ func (gs *LocalGovernanceStore) rebuildInMemoryStructures(ctx context.Context, o
 	sweepStaleSyncMap(&gs.budgetUsages, beforeBudgetUsages)
 	sweepStaleSyncMap(&gs.accounts, beforeAccounts)
 	sweepStaleSyncMap(&gs.wallets, beforeWallets)
+	// Indexes range the live maps. Rebuild them after the sweep so a dropped
+	// account or wallet is not left reachable through the secondary index.
+	gs.reindexAccountsByCustomerOrg()
+	gs.reindexWalletsByAccount()
 	sweepStaleSyncMap(&gs.orgUnits, beforeOrgUnits)
 	sweepStaleSyncMap(&gs.userOrgUnits, beforeUserOrgUnits)
 	sweepStaleSyncMap(&gs.rateLimits, beforeRateLimits)

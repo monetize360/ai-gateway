@@ -14,6 +14,7 @@ import (
 	ws "github.com/fasthttp/websocket"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
@@ -912,7 +913,7 @@ func completeTrace(ctx *schemas.BifrostContext) {
 
 var (
 	errModelFormat   = errorf("model should be in provider/model format")
-	errInputRequired = errorf("input is required for responses")
+	errInputRequired = errorf(governance.MissingPromptMessage)
 )
 
 func errorf(msg string) error {

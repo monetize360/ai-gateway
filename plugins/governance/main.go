@@ -1466,20 +1466,26 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			isVirtualKeyValid = true
 		} else {
 			// VK was provided but does not exist in the store — reject regardless of mandatory setting
+			if p.logger != nil {
+				p.logger.Warn("rejected virtual key: not found or revoked")
+			}
 			return nil, &schemas.BifrostError{
 				Type:       bifrost.Ptr("virtual_key_not_found"),
 				StatusCode: bifrost.Ptr(401),
 				Error: &schemas.ErrorField{
-					Message: "virtual key not found. The provided virtual key does not exist or has been revoked.",
+					Message: InvalidAPIKeyMessage,
 				},
 			}
 		}
 	}
 	p.cfgMutex.RLock()
 	if !isVirtualKeyValid && evaluationRequest.UserID == "" && p.isVkMandatory != nil && *p.isVkMandatory {
-		message := "virtual key is required. Authenticate with a tenant JWT that includes a virtualKey claim."
+		message := MissingAPIKeyMessage
 		if p.isEnterprise {
 			message = "authentication is required. Provide a tenant JWT with virtualKey claim or user token."
+		}
+		if p.logger != nil {
+			p.logger.Warn("rejected request with no virtual key")
 		}
 		p.cfgMutex.RUnlock()
 		return nil, &schemas.BifrostError{
@@ -1588,6 +1594,9 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			}
 			ctx.SetValue(schemas.BifrostContextKeyGovernanceDecision, string(result.Decision))
 		}
+		if p.logger != nil {
+			p.logger.Warn("governance rejected request: decision=%s reason=%s", result.Decision, result.Reason)
+		}
 	}
 
 	// Handle decision
@@ -1607,7 +1616,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(403),
 			Error: &schemas.ErrorField{
-				Message: result.Reason,
+				Message: ClientMessage(result.Decision, result.Reason),
 			},
 		}
 
@@ -1616,7 +1625,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(429),
 			Error: &schemas.ErrorField{
-				Message: result.Reason,
+				Message: ClientMessage(result.Decision, result.Reason),
 			},
 		}
 
@@ -1625,7 +1634,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(402),
 			Error: &schemas.ErrorField{
-				Message: result.Reason,
+				Message: ClientMessage(result.Decision, result.Reason),
 			},
 		}
 
@@ -1636,7 +1645,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(400),
 			Error: &schemas.ErrorField{
-				Message: result.Reason,
+				Message: ClientMessage(result.Decision, result.Reason),
 			},
 		}
 
@@ -1645,7 +1654,7 @@ func (p *GovernancePlugin) EvaluateGovernanceRequest(ctx *schemas.BifrostContext
 			Type:       new(string(result.Decision)),
 			StatusCode: new(403),
 			Error: &schemas.ErrorField{
-				Message: result.Reason,
+				Message: ClientMessage(result.Decision, result.Reason),
 			},
 		}
 
